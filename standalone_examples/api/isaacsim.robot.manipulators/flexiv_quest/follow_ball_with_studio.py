@@ -779,7 +779,16 @@ def run(args: argparse.Namespace) -> int:
             if keyboard is not None:
                 keyboard.update_pose_reference(synced_target_pose)
 
-        if target_pose_publisher is not None and target_pose_publish_gate.should_publish(servo_cycle):
+        quest_target_active = target_pose_control_is_active(
+            quest_target_receiver_enabled=quest_target_receiver is not None,
+            latest_quest_target=latest_quest_target,
+        )
+
+        if (
+            quest_target_active
+            and target_pose_publisher is not None
+            and target_pose_publish_gate.should_publish(servo_cycle)
+        ):
             target_pose_publisher.publish(
                 build_target_pose_packet(
                     serial_number=args.serial_number,
@@ -818,10 +827,6 @@ def run(args: argparse.Namespace) -> int:
                 effort_control_enabled = False
                 return
             connected = sim_node.connected()
-            quest_target_active = target_pose_control_is_active(
-                quest_target_receiver_enabled=quest_target_receiver is not None,
-                latest_quest_target=latest_quest_target,
-            )
             if current_pose_base_tcp is None:
                 tcp_position, tcp_orientation = robot.end_effector.get_world_pose()
                 current_pose_base_tcp = world_target_to_flexiv_pose(
@@ -844,7 +849,7 @@ def run(args: argparse.Namespace) -> int:
                     )
                 )
 
-            if rdk_target_gate.should_publish(servo_cycle):
+            if quest_target_active and rdk_target_gate.should_publish(servo_cycle):
                 try:
                     if rdk_runtime is None:
                         rdk_serial_number = args.rdk_serial_number or args.serial_number

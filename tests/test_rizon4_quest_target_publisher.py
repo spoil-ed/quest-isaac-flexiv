@@ -114,13 +114,13 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         actual = [round(value, 4) for value in packet["pose_base_tcp_des"][3:]]
         self.assertEqual(actual, expected)
 
-    def test_default_orientation_maps_controller_x_to_tcp_z_direction(self):
+    def test_default_orientation_maps_controller_x_to_negative_tcp_z_direction(self):
         mapper = mod.QuestRelativeMapper(engage_settle_sec=0.0)
 
         packet = mapper.update(_pose(0.0, 0.0, 0.0), enabled=True, seq=1, now=10.0)
 
         tcp_x_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [1.0, 0.0, 0.0])
-        self.assertEqual([round(value, 4) for value in tcp_x_in_base], [0.0, 0.0, 1.0])
+        self.assertEqual([round(value, 4) for value in tcp_x_in_base], [0.0, 0.0, -1.0])
 
     def test_mapper_applies_position_deadband_after_settle(self):
         mapper = mod.QuestRelativeMapper(

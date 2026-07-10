@@ -88,6 +88,6 @@ def target_pose_control_is_active(
     quest_target_receiver_enabled: bool,
     latest_quest_target,
 ) -> bool:
-    _ = quest_target_receiver_enabled
-    _ = latest_quest_target
+    if quest_target_receiver_enabled:
+        return latest_quest_target is not None
     return True

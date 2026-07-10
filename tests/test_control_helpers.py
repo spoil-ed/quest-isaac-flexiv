@@ -50,6 +50,28 @@ class ControlHelpersTests(unittest.TestCase):
             )
         )
 
+    def test_target_pose_control_pauses_without_fresh_quest_target(self):
+        helpers = load_control_helpers()
+
+        self.assertTrue(
+            helpers.target_pose_control_is_active(
+                quest_target_receiver_enabled=False,
+                latest_quest_target=None,
+            )
+        )
+        self.assertFalse(
+            helpers.target_pose_control_is_active(
+                quest_target_receiver_enabled=True,
+                latest_quest_target=None,
+            )
+        )
+        self.assertTrue(
+            helpers.target_pose_control_is_active(
+                quest_target_receiver_enabled=True,
+                latest_quest_target=object(),
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
