@@ -61,7 +61,7 @@ python scripts/rizon4_quest_target_publisher.py \
   --side right \
   --enable-button squeeze \
   --axis-map=-z,-x,y \
-  --position-delta-scale 3.0 \
+  --position-delta-scale 1.0 \
   --position-deadband 0.05 \
   --engage-settle-sec 0.25 \
   --rate-hz 60
