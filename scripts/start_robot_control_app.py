@@ -13,14 +13,49 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 import flexiv_runtime
 
 
+def _relative_to_studio_root(path: Path, studio_root: Path) -> str:
+    try:
+        return str(path.relative_to(studio_root))
+    except ValueError:
+        return str(path)
+
+
+def _find_one(paths: list[Path], *, description: str) -> Path:
+    if not paths:
+        raise FileNotFoundError(f"Could not find {description} under Elements Studio")
+    return sorted(paths, key=lambda path: path.stat().st_mtime, reverse=True)[0]
+
+
+def discover_robot_control_args(studio_root: Path) -> dict[str, str]:
+    root = Path(studio_root).expanduser()
+    simulator_root = root / "user_data_ui" / "simDir" / "simulator0"
+    param_path = _find_one(
+        list(simulator_root.glob("*/arm_driver_param.xml")),
+        description="simulator arm driver parameter file",
+    )
+    config_path = _find_one(
+        list((root / "specs" / "robots").glob("*/flexivCfg.xml")),
+        description="robot control config",
+    )
+    return {
+        "serial": param_path.parent.name,
+        "config": _relative_to_studio_root(config_path, root),
+    }
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--studio-root", type=Path, default=flexiv_runtime.STUDIO_ROOT)
-    parser.add_argument("--serial", default="A02L-00-M6-I0LIRN")
+    parser.add_argument("--serial", default=None)
     parser.add_argument("--control-box", default="CX01-02-P1-00034")
     parser.add_argument("--user-data", default="./user_data_ui//./simDir/simulator0/user_data/")
-    parser.add_argument("--config", default="./specs//robots/FlexivA02L/flexivCfg.xml")
-    return parser.parse_args(argv)
+    parser.add_argument("--config", default=None)
+    args = parser.parse_args(argv)
+    if args.serial is None or args.config is None:
+        discovered = discover_robot_control_args(args.studio_root)
+        args.serial = args.serial or discovered["serial"]
+        args.config = args.config or discovered["config"]
+    return args
 
 
 def build_command(args: argparse.Namespace) -> list[str]:

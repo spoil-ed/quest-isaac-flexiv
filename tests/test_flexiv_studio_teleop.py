@@ -146,7 +146,7 @@ class FlexivStudioTeleopTests(unittest.TestCase):
         mod = load_follow_ball()
         packet = {
             "schema": "rizon4_quest_target.v1",
-            "serial": "A02L",
+            "serial": "Rizon4-WRONG",
             "joint_group": "ARM_1",
             "pose_base_tcp_des": [0, 0, 0, 1, 0, 0, 0],
             "monotonic_time": 10.0,

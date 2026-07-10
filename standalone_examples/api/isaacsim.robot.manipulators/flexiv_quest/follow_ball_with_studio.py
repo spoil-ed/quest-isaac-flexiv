@@ -5,13 +5,57 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
-import socket
-import struct
 import sys
 import time
 from pathlib import Path
-from typing import NamedTuple
+
+UTILS_DIR = Path(__file__).resolve().parents[1]
+if str(UTILS_DIR) not in sys.path:
+    sys.path.insert(0, str(UTILS_DIR))
+
+from elements_studio_utils import (
+    CartJogCommand,
+    RdkRuntimeController,
+    RdkRuntimeSettings,
+    StudioJoggingClient,
+    StudioReachabilityClient,
+    joint_positions_rad_to_studio_seed,
+    studio_target_pose_from_rdk_pose as pose_base_tcp_des_to_studio_target_pose,
+    valid_target_drives_or_none,
+)
+from control_helpers import (
+    StepRateLimiter,
+    TargetPosePublishGate,
+    VirtualJogFeedback,
+    format_float_list as _format_float_list,
+    format_jog_command_telemetry,
+    format_state_torque_telemetry,
+    pose_error_to_cart_jog_cmd,
+    select_cart_jog_command,
+    should_poll_simplugin_target_drives,
+    target_pose_control_is_active,
+)
+from targeting import (
+    QuestRelativeTargetMapper,
+    QuestTargetPacket,
+    QuestTargetUdpReceiver,
+    TargetPose,
+    TargetPoseUdpPublisher,
+    build_coordinate_observation_packet,
+    build_target_pose_packet,
+    euler_xyz_deg_to_quat_wxyz,
+    flexiv_pose_to_world_target,
+    map_openxr_delta_to_base,
+    parse_float_list,
+    parse_quest_axis_map,
+    parse_quest_target_packet,
+    quest_target_is_fresh,
+    select_pose_base_tcp_des,
+    sync_target_ball_to_base_tcp_pose,
+    target_pose_from_world_pose,
+    triple as _triple,
+    world_target_to_flexiv_pose,
+)
 
 
 DEFAULT_RIZON4_USD = Path(
@@ -44,38 +88,6 @@ DEFAULT_PHYSICS_HZ = PHYSICS_FREQ
 DEFAULT_STUDIO_IK_HZ = 30.0
 DEFAULT_STUDIO_JOG_HZ = 30.0
 COMPATIBLE_SIM_PLUGIN_VER = "1.2.0"
-
-
-class TargetPose(NamedTuple):
-    position: tuple[float, float, float]
-    euler_deg: tuple[float, float, float]
-
-
-class CartJogCommand(NamedTuple):
-    jog_index: int
-    jog_dir: int
-    step_size: float
-    jog_axis_type: int
-    vel_scale: float
-
-
-class QuestTargetPacket(NamedTuple):
-    seq: int
-    side: str
-    pose_base_tcp_des: list[float]
-    controller_position_openxr: list[float] | None
-    gripper_open_ratio: float | None
-    monotonic_time: float
-
-
-class QuestAxisMapEntry(NamedTuple):
-    source_index: int
-    sign: float
-
-
-class QuestRelativeReference(NamedTuple):
-    controller_position_openxr: list[float]
-    tcp_pose_base: list[float]
 
 
 KEYBOARD_DELTAS = {
@@ -119,9 +131,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--render-hz", type=float, default=RENDER_FREQ, help="Isaac rendering frequency.")
     parser.add_argument(
         "--control-source",
-        choices=("studio-jog", "studio-ik", "studio-bridge"),
-        default="studio-jog",
+        choices=("rdk-cartesian", "studio-jog", "studio-ik", "studio-bridge"),
+        default="rdk-cartesian",
         help=(
+            "rdk-cartesian streams target TCP poses through flexivrdk and applies Studio target_drives; "
             "studio-jog sends CartesianJogging commands to Elements Studio and applies Studio target_drives; "
             "studio-ik uses Studio CalReachability directly; studio-bridge only applies target_drives."
         ),
@@ -140,6 +153,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_STUDIO_JOG_HZ,
         help="Studio CartesianJogging command frequency.",
     )
+    parser.add_argument(
+        "--rdk-target-hz",
+        type=float,
+        default=30.0,
+        help="RDK Cartesian target update frequency.",
+    )
+    parser.add_argument(
+        "--rdk-network-interface-whitelist",
+        default="",
+        help="Comma-separated local IPv4 whitelist for Flexiv RDK discovery. Empty tries all interfaces.",
+    )
+    parser.add_argument("--rdk-switch-mode", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--rdk-serial-number",
+        default=None,
+        help="Optional Flexiv RDK robot serial. Defaults to --serial-number.",
+    )
+    parser.add_argument("--rdk-clear-fault", action="store_true")
+    parser.add_argument("--rdk-servo-on", action="store_true")
+    parser.add_argument("--rdk-verbose", action="store_true")
     parser.add_argument(
         "--studio-jog-position-deadband",
         type=float,
@@ -310,6 +343,13 @@ PARAM_OVERRIDE_KEYS = {
     "physics_hz",
     "render_hz",
     "studio_jog_hz",
+    "rdk_target_hz",
+    "rdk_network_interface_whitelist",
+    "rdk_serial_number",
+    "rdk_switch_mode",
+    "rdk_clear_fault",
+    "rdk_servo_on",
+    "rdk_verbose",
     "studio_jog_position_deadband",
     "studio_jog_max_step_size",
     "studio_jog_vel_scale",
@@ -365,109 +405,12 @@ def apply_param_overrides(args: argparse.Namespace) -> None:
         raise ValueError("target_euler_deg in params-json must contain 3 values")
 
 
-def _triple(values) -> tuple[float, float, float]:
-    return (float(values[0]), float(values[1]), float(values[2]))
-
-
-def parse_float_list(value, *, expected: int, name: str) -> list[float]:
-    if isinstance(value, str):
-        values = [float(item.strip()) for item in value.split(",") if item.strip()]
-    else:
-        values = [float(item) for item in value]
-    if len(values) != expected:
-        raise ValueError(f"{name} must contain {expected} values")
-    return values
-
-
-def parse_quest_axis_map(value: str) -> tuple[QuestAxisMapEntry, QuestAxisMapEntry, QuestAxisMapEntry]:
-    axis_to_index = {"x": 0, "y": 1, "z": 2}
-    entries = []
-    for raw_token in str(value).split(","):
-        token = raw_token.strip().lower()
-        if not token:
-            continue
-        sign = -1.0 if token.startswith("-") else 1.0
-        token = token[1:] if token[0] in "+-" else token
-        if token not in axis_to_index:
-            raise ValueError("--quest-axis-map tokens must be x, y, z with optional +/- prefix")
-        entries.append(QuestAxisMapEntry(source_index=axis_to_index[token], sign=sign))
-    if len(entries) != 3:
-        raise ValueError("--quest-axis-map must contain exactly 3 comma-separated axes")
-    return tuple(entries)
-
-
-def map_openxr_delta_to_base(
-    delta_openxr,
-    *,
-    axis_map: tuple[QuestAxisMapEntry, QuestAxisMapEntry, QuestAxisMapEntry],
-    scale: float,
-) -> list[float]:
-    values = [float(value) for value in delta_openxr]
-    if len(values) != 3 or not all(math.isfinite(value) for value in values):
-        raise ValueError("delta_openxr must contain 3 finite values")
-    return [entry.sign * values[entry.source_index] * float(scale) for entry in axis_map]
-
-
-def _clip_xyz(values, workspace_min, workspace_max) -> list[float]:
-    mins = parse_float_list(workspace_min, expected=3, name="workspace_min")
-    maxs = parse_float_list(workspace_max, expected=3, name="workspace_max")
-    return [min(max(float(values[index]), mins[index]), maxs[index]) for index in range(3)]
-
-
-class QuestRelativeTargetMapper:
-    def __init__(
-        self,
-        *,
-        axis_map: tuple[QuestAxisMapEntry, QuestAxisMapEntry, QuestAxisMapEntry],
-        scale: float,
-        workspace_min,
-        workspace_max,
-    ) -> None:
-        self.axis_map = axis_map
-        self.scale = float(scale)
-        self.workspace_min = parse_float_list(workspace_min, expected=3, name="workspace_min")
-        self.workspace_max = parse_float_list(workspace_max, expected=3, name="workspace_max")
-        self.reference: QuestRelativeReference | None = None
-
-    def reset(self) -> None:
-        self.reference = None
-
-    def update(self, quest_target: QuestTargetPacket, current_pose_base_tcp: list[float]) -> list[float]:
-        current_pose = [float(value) for value in current_pose_base_tcp]
-        if len(current_pose) != 7:
-            raise ValueError("current_pose_base_tcp must contain 7 values")
-        if quest_target.controller_position_openxr is None:
-            return current_pose
-        controller_position = [float(value) for value in quest_target.controller_position_openxr]
-        if self.reference is None:
-            self.reference = QuestRelativeReference(
-                controller_position_openxr=controller_position,
-                tcp_pose_base=list(current_pose),
-            )
-            return list(current_pose)
-        delta_openxr = [
-            controller_position[index] - self.reference.controller_position_openxr[index]
-            for index in range(3)
-        ]
-        delta_base = map_openxr_delta_to_base(delta_openxr, axis_map=self.axis_map, scale=self.scale)
-        xyz = [self.reference.tcp_pose_base[index] + delta_base[index] for index in range(3)]
-        return xyz + list(self.reference.tcp_pose_base[3:7])
-
-
 def initial_q_for_args(args: argparse.Namespace) -> list[float]:
     if args.initial_q is not None:
         return [float(value) for value in args.initial_q]
     if args.control_source in {"studio-jog", "studio-bridge"}:
         return list(DEFAULT_STUDIO_INITIAL_Q)
     return list(DEFAULT_INITIAL_Q)
-
-
-def target_pose_from_world_pose(world_position, world_orientation_wxyz) -> TargetPose:
-    qw, qx, qy, qz = (float(value) for value in world_orientation_wxyz)
-    return TargetPose(
-        position=_triple(world_position),
-        euler_deg=quat_wxyz_to_euler_xyz_deg(qw, qx, qy, qz),
-    )
 
 
 def configured_initial_target_pose(args: argparse.Namespace) -> TargetPose:
@@ -489,767 +432,6 @@ def physics_hz_for_args(args: argparse.Namespace) -> float:
     if args.physics_hz is not None:
         return float(args.physics_hz)
     return DEFAULT_PHYSICS_HZ
-
-
-def _fmt_float(value: float) -> str:
-    return f"{float(value):.10g}"
-
-
-def grpc_dependency_path() -> Path:
-    return Path(__file__).absolute().parents[4] / ".deps" / "grpc"
-
-
-def import_grpc_module():
-    try:
-        import grpc  # type: ignore
-
-        return grpc
-    except ImportError:
-        dependency_path = grpc_dependency_path()
-        if dependency_path.exists() and str(dependency_path) not in sys.path:
-            sys.path.insert(0, str(dependency_path))
-        import grpc  # type: ignore
-
-        return grpc
-
-
-def _quat_xyzw(values) -> tuple[float, float, float, float]:
-    x, y, z, w = (float(v) for v in values)
-    norm = math.sqrt(x * x + y * y + z * z + w * w)
-    if norm <= 0.0:
-        return 0.0, 0.0, 0.0, 1.0
-    return x / norm, y / norm, z / norm, w / norm
-
-
-def _wxyz_to_xyzw(values) -> tuple[float, float, float, float]:
-    w, x, y, z = (float(v) for v in values)
-    return _quat_xyzw((x, y, z, w))
-
-
-def _xyzw_to_wxyz(values) -> tuple[float, float, float, float]:
-    x, y, z, w = _quat_xyzw(values)
-    return w, x, y, z
-
-
-def _quat_conjugate_xyzw(q) -> tuple[float, float, float, float]:
-    x, y, z, w = _quat_xyzw(q)
-    return -x, -y, -z, w
-
-
-def _quat_mul_xyzw(a, b) -> tuple[float, float, float, float]:
-    ax, ay, az, aw = _quat_xyzw(a)
-    bx, by, bz, bw = _quat_xyzw(b)
-    return _quat_xyzw(
-        (
-            aw * bx + ax * bw + ay * bz - az * by,
-            aw * by - ax * bz + ay * bw + az * bx,
-            aw * bz + ax * by - ay * bx + az * bw,
-            aw * bw - ax * bx - ay * by - az * bz,
-        )
-    )
-
-
-def _rotate_vector_xyzw(q, v) -> tuple[float, float, float]:
-    qx, qy, qz, qw = _quat_xyzw(q)
-    vx, vy, vz = _triple(v)
-    tx = 2.0 * (qy * vz - qz * vy)
-    ty = 2.0 * (qz * vx - qx * vz)
-    tz = 2.0 * (qx * vy - qy * vx)
-    return (
-        vx + qw * tx + (qy * tz - qz * ty),
-        vy + qw * ty + (qz * tx - qx * tz),
-        vz + qw * tz + (qx * ty - qy * tx),
-    )
-
-
-def world_target_to_flexiv_pose(
-    *,
-    world_position,
-    world_orientation_wxyz,
-    base_position,
-    base_orientation_wxyz,
-) -> list[float]:
-    wp = _triple(world_position)
-    bp = _triple(base_position)
-    wo = _wxyz_to_xyzw(world_orientation_wxyz)
-    bo = _wxyz_to_xyzw(base_orientation_wxyz)
-    inv_base = _quat_conjugate_xyzw(bo)
-    rel_world = (wp[0] - bp[0], wp[1] - bp[1], wp[2] - bp[2])
-    rel_pos = _rotate_vector_xyzw(inv_base, rel_world)
-    rel_ori_xyzw = _quat_mul_xyzw(inv_base, wo)
-    qw, qx, qy, qz = _xyzw_to_wxyz(rel_ori_xyzw)
-    return [rel_pos[0], rel_pos[1], rel_pos[2], qw, qx, qy, qz]
-
-
-def select_pose_base_tcp_des(
-    *,
-    quest_target: QuestTargetPacket | None,
-    world_position,
-    world_orientation_wxyz,
-    base_position,
-    base_orientation_wxyz,
-) -> list[float]:
-    if quest_target is not None:
-        return list(quest_target.pose_base_tcp_des)
-    return world_target_to_flexiv_pose(
-        world_position=world_position,
-        world_orientation_wxyz=world_orientation_wxyz,
-        base_position=base_position,
-        base_orientation_wxyz=base_orientation_wxyz,
-    )
-
-
-def quest_target_is_fresh(
-    quest_target: QuestTargetPacket | None,
-    *,
-    now: float | None = None,
-    max_age_sec: float,
-) -> bool:
-    if quest_target is None:
-        return False
-    if max_age_sec <= 0.0:
-        return True
-    current = time.monotonic() if now is None else float(now)
-    age = current - float(quest_target.monotonic_time)
-    return -1.0 <= age <= float(max_age_sec)
-
-
-def flexiv_pose_to_world_target(
-    *,
-    pose_base_tcp_des,
-    base_position,
-    base_orientation_wxyz,
-) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
-    values = [float(value) for value in pose_base_tcp_des]
-    if len(values) != 7 or not all(math.isfinite(value) for value in values):
-        raise ValueError("pose_base_tcp_des must contain 7 finite values")
-    bp = _triple(base_position)
-    bo = _wxyz_to_xyzw(base_orientation_wxyz)
-    rel_pos = (values[0], values[1], values[2])
-    rel_ori_xyzw = _wxyz_to_xyzw(values[3:7])
-    world_rel = _rotate_vector_xyzw(bo, rel_pos)
-    world_pos = (bp[0] + world_rel[0], bp[1] + world_rel[1], bp[2] + world_rel[2])
-    world_ori_xyzw = _quat_mul_xyzw(bo, rel_ori_xyzw)
-    return world_pos, _xyzw_to_wxyz(world_ori_xyzw)
-
-
-def sync_target_ball_to_base_tcp_pose(
-    ball,
-    *,
-    pose_base_tcp_des,
-    base_position,
-    base_orientation_wxyz,
-) -> TargetPose:
-    import numpy as np
-
-    world_position, world_orientation_wxyz = flexiv_pose_to_world_target(
-        pose_base_tcp_des=pose_base_tcp_des,
-        base_position=base_position,
-        base_orientation_wxyz=base_orientation_wxyz,
-    )
-    ball.set_world_pose(
-        position=np.array(world_position),
-        orientation=np.array(world_orientation_wxyz),
-    )
-    return target_pose_from_world_pose(world_position, world_orientation_wxyz)
-
-
-def build_target_pose_packet(
-    *,
-    serial_number: str,
-    joint_group: str,
-    servo_cycle: int,
-    pose_base_tcp_des: list[float],
-    monotonic_time: float | None = None,
-) -> dict:
-    if len(pose_base_tcp_des) != 7:
-        raise ValueError("pose_base_tcp_des must contain 7 values")
-    return {
-        "schema": "flexiv_target_pose.v1",
-        "serial": serial_number,
-        "joint_group": joint_group,
-        "servo_cycle": int(servo_cycle),
-        "monotonic_time": time.monotonic() if monotonic_time is None else float(monotonic_time),
-        "pose_base_tcp_des": [float(value) for value in pose_base_tcp_des],
-    }
-
-
-def build_coordinate_observation_packet(
-    *,
-    serial_number: str,
-    joint_group: str,
-    servo_cycle: int,
-    quest_target: QuestTargetPacket | None,
-    active: bool,
-    current_pose_base_tcp: list[float] | None,
-    target_pose_base_tcp: list[float] | None = None,
-    monotonic_time: float | None = None,
-) -> dict:
-    current_time = time.monotonic() if monotonic_time is None else float(monotonic_time)
-    if target_pose_base_tcp is not None:
-        target_pose = [float(value) for value in target_pose_base_tcp]
-    else:
-        target_pose = None if quest_target is None else [float(value) for value in quest_target.pose_base_tcp_des]
-    current_pose = None if current_pose_base_tcp is None else [float(value) for value in current_pose_base_tcp]
-    position_error = None
-    if target_pose is not None and current_pose is not None:
-        position_error = [target_pose[index] - current_pose[index] for index in range(3)]
-    return {
-        "schema": "rizon4_quest_coordinate_observation.v1",
-        "serial": str(serial_number),
-        "joint_group": str(joint_group),
-        "servo_cycle": int(servo_cycle),
-        "active": bool(active),
-        "quest_seq": None if quest_target is None else int(quest_target.seq),
-        "side": None if quest_target is None else str(quest_target.side),
-        "age_sec": None if quest_target is None else current_time - float(quest_target.monotonic_time),
-        "target_pose_base_tcp": target_pose,
-        "current_pose_base_tcp": current_pose,
-        "position_error": position_error,
-        "monotonic_time": current_time,
-    }
-
-
-class TargetPoseUdpPublisher:
-    def __init__(self, host: str, port: int) -> None:
-        self._address = (host, int(port))
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    def publish(self, packet: dict) -> None:
-        data = json.dumps(packet, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        self._socket.sendto(data, self._address)
-
-    def close(self) -> None:
-        self._socket.close()
-
-
-def parse_quest_target_packet(
-    packet: dict,
-    *,
-    serial_number: str,
-    joint_group: str,
-    now: float | None = None,
-    max_age_sec: float = 0.5,
-) -> QuestTargetPacket | None:
-    if not isinstance(packet, dict):
-        return None
-    if packet.get("schema") != "rizon4_quest_target.v1":
-        return None
-    if str(packet.get("serial", "")) != str(serial_number):
-        return None
-    if str(packet.get("joint_group", "")) != str(joint_group):
-        return None
-    try:
-        pose = [float(value) for value in packet["pose_base_tcp_des"]]
-    except (KeyError, TypeError, ValueError):
-        return None
-    if len(pose) != 7 or not all(math.isfinite(value) for value in pose):
-        return None
-    controller_position_openxr = None
-    if packet.get("controller_position_openxr") is not None:
-        try:
-            controller_position_openxr = [float(value) for value in packet["controller_position_openxr"]]
-        except (TypeError, ValueError):
-            return None
-        if len(controller_position_openxr) != 3 or not all(
-            math.isfinite(value) for value in controller_position_openxr
-        ):
-            return None
-    if max_age_sec > 0.0 and packet.get("monotonic_time") is not None:
-        current = time.monotonic() if now is None else float(now)
-        try:
-            age = current - float(packet["monotonic_time"])
-        except (TypeError, ValueError):
-            return None
-        if age < -1.0 or age > float(max_age_sec):
-            return None
-    try:
-        monotonic_time = float(packet.get("monotonic_time", time.monotonic()))
-    except (TypeError, ValueError):
-        return None
-    gripper_open_ratio = packet.get("gripper_open_ratio")
-    if gripper_open_ratio is not None:
-        try:
-            gripper_open_ratio = float(gripper_open_ratio)
-        except (TypeError, ValueError):
-            gripper_open_ratio = None
-    return QuestTargetPacket(
-        seq=int(packet.get("seq", -1)),
-        side=str(packet.get("side", "")),
-        pose_base_tcp_des=pose,
-        controller_position_openxr=controller_position_openxr,
-        gripper_open_ratio=gripper_open_ratio,
-        monotonic_time=monotonic_time,
-    )
-
-
-class QuestTargetUdpReceiver:
-    def __init__(
-        self,
-        host: str,
-        port: int,
-        *,
-        serial_number: str,
-        joint_group: str,
-        max_age_sec: float,
-    ) -> None:
-        self._address = (str(host), int(port))
-        self._serial_number = str(serial_number)
-        self._joint_group = str(joint_group)
-        self._max_age_sec = float(max_age_sec)
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._socket.bind(self._address)
-        self._socket.setblocking(False)
-
-    @property
-    def address(self) -> tuple[str, int]:
-        return self._address
-
-    def poll_latest(self) -> QuestTargetPacket | None:
-        latest = None
-        while True:
-            try:
-                data, _addr = self._socket.recvfrom(65536)
-            except BlockingIOError:
-                return latest
-            except OSError:
-                return latest
-            try:
-                packet = json.loads(data.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            parsed = parse_quest_target_packet(
-                packet,
-                serial_number=self._serial_number,
-                joint_group=self._joint_group,
-                max_age_sec=self._max_age_sec,
-            )
-            if parsed is not None:
-                latest = parsed
-
-    def close(self) -> None:
-        self._socket.close()
-
-
-class TargetPosePublishGate(NamedTuple):
-    period_cycles: int
-
-    @classmethod
-    def from_hz(cls, publish_hz: float, *, physics_freq: float) -> "TargetPosePublishGate":
-        if publish_hz <= 0.0:
-            return cls(period_cycles=1)
-        return cls(period_cycles=max(1, int(round(float(physics_freq) / float(publish_hz)))))
-
-    def should_publish(self, servo_cycle: int) -> bool:
-        return int(servo_cycle) % self.period_cycles == 0
-
-
-class StepRateLimiter:
-    def __init__(self, step_hz: float, *, time_fn=time.perf_counter, sleep_fn=time.sleep) -> None:
-        self._period = 0.0 if step_hz <= 0.0 else 1.0 / float(step_hz)
-        self._time_fn = time_fn
-        self._sleep_fn = sleep_fn
-        self._next_time = self._time_fn()
-
-    def sleep(self) -> None:
-        if self._period <= 0.0:
-            return
-        self._next_time += self._period
-        now = self._time_fn()
-        delay = self._next_time - now
-        if delay > 0.0:
-            self._sleep_fn(delay)
-        elif delay < -self._period:
-            self._next_time = now
-
-
-def euler_xyz_deg_to_quat_wxyz(euler_deg: tuple[float, float, float]) -> tuple[float, float, float, float]:
-    roll, pitch, yaw = (math.radians(value) for value in euler_deg)
-    cr, sr = math.cos(roll * 0.5), math.sin(roll * 0.5)
-    cp, sp = math.cos(pitch * 0.5), math.sin(pitch * 0.5)
-    cy, sy = math.cos(yaw * 0.5), math.sin(yaw * 0.5)
-    return (
-        cr * cp * cy + sr * sp * sy,
-        sr * cp * cy - cr * sp * sy,
-        cr * sp * cy + sr * cp * sy,
-        cr * cp * sy - sr * sp * cy,
-    )
-
-
-def quat_wxyz_to_euler_xyz_deg(qw: float, qx: float, qy: float, qz: float) -> tuple[float, float, float]:
-    norm = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz)
-    if norm <= 0.0:
-        qw, qx, qy, qz = 1.0, 0.0, 0.0, 0.0
-    else:
-        qw, qx, qy, qz = qw / norm, qx / norm, qy / norm, qz / norm
-
-    sinr_cosp = 2.0 * (qw * qx + qy * qz)
-    cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
-    roll = math.atan2(sinr_cosp, cosr_cosp)
-
-    sinp = 2.0 * (qw * qy - qz * qx)
-    if abs(sinp) >= 1.0:
-        pitch = math.copysign(math.pi / 2.0, sinp)
-    else:
-        pitch = math.asin(sinp)
-
-    siny_cosp = 2.0 * (qw * qz + qx * qy)
-    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
-    yaw = math.atan2(siny_cosp, cosy_cosp)
-    return tuple(math.degrees(value) for value in (roll, pitch, yaw))
-
-
-def pose_base_tcp_des_to_studio_target_pose(pose_base_tcp_des: list[float]) -> list[str]:
-    if len(pose_base_tcp_des) != 7:
-        raise ValueError("pose_base_tcp_des must contain 7 values")
-    x, y, z, qw, qx, qy, qz = (float(value) for value in pose_base_tcp_des)
-    roll, pitch, yaw = quat_wxyz_to_euler_xyz_deg(qw, qx, qy, qz)
-    return [_fmt_float(value) for value in (x, y, z, roll, pitch, yaw)]
-
-
-def joint_positions_rad_to_studio_seed(joint_positions_rad) -> list[str]:
-    values = [float(value) for value in joint_positions_rad]
-    if len(values) != 7:
-        raise ValueError("joint_positions_rad must contain 7 values")
-    return [_fmt_float(math.degrees(value)) for value in values]
-
-
-def _encode_varint(value: int) -> bytes:
-    if value < 0:
-        raise ValueError("varint value must be non-negative")
-    chunks = bytearray()
-    while value > 0x7F:
-        chunks.append((value & 0x7F) | 0x80)
-        value >>= 7
-    chunks.append(value)
-    return bytes(chunks)
-
-
-def _encode_length_delimited(field_number: int, payload: bytes) -> bytes:
-    return _encode_varint((int(field_number) << 3) | 2) + _encode_varint(len(payload)) + payload
-
-
-def _encode_int32(field_number: int, value: int) -> bytes:
-    return _encode_varint((int(field_number) << 3) | 0) + _encode_varint(int(value) & 0xFFFFFFFFFFFFFFFF)
-
-
-def _encode_double(field_number: int, value: float) -> bytes:
-    return _encode_varint((int(field_number) << 3) | 1) + struct.pack("<d", float(value))
-
-
-def encode_cal_reachability_request(
-    *,
-    target_pose: list[str],
-    seed_jnt_pos: list[str],
-    ext_axis_pos: list[str] | None = None,
-    tcp_pose: list[str] | None = None,
-    ref_frame_base_flag: bool = True,
-) -> bytes:
-    if len(target_pose) != 6:
-        raise ValueError("target_pose must contain 6 Studio m-deg values")
-    if len(seed_jnt_pos) != 7:
-        raise ValueError("seed_jnt_pos must contain 7 joint values")
-    message = bytearray()
-    for value in target_pose:
-        message.extend(_encode_length_delimited(1, str(value).encode("utf-8")))
-    for value in seed_jnt_pos:
-        message.extend(_encode_length_delimited(2, str(value).encode("utf-8")))
-    for value in ext_axis_pos or ():
-        message.extend(_encode_length_delimited(3, str(value).encode("utf-8")))
-    for value in tcp_pose or ():
-        message.extend(_encode_length_delimited(5, str(value).encode("utf-8")))
-    if ref_frame_base_flag:
-        message.extend(_encode_varint((7 << 3) | 0))
-        message.extend(b"\x01")
-    return bytes(message)
-
-
-def encode_set_cart_jogging_cmd_request(
-    *,
-    coord_type: int,
-    coord_name: str,
-    jog_index: int,
-    jog_dir: int,
-    step_size: float,
-    jog_axis_type: int,
-    vel_scale: float,
-) -> bytes:
-    jog_cmd = b"".join(
-        (
-            _encode_int32(1, int(jog_index)),
-            _encode_int32(2, int(jog_dir)),
-            _encode_double(3, float(step_size)),
-            _encode_int32(4, int(jog_axis_type)),
-            _encode_double(5, float(vel_scale)),
-        )
-    )
-    cart_jogging_cmd = b"".join(
-        (
-            _encode_int32(1, int(coord_type)),
-            _encode_length_delimited(2, str(coord_name).encode("utf-8")),
-            _encode_length_delimited(3, jog_cmd),
-        )
-    )
-    return _encode_length_delimited(1, cart_jogging_cmd)
-
-
-def pose_error_to_cart_jog_cmd(
-    pose_error_base_tcp: list[float],
-    *,
-    position_deadband: float,
-    max_step_size: float,
-    vel_scale: float,
-) -> CartJogCommand:
-    if len(pose_error_base_tcp) != 7:
-        raise ValueError("pose_error_base_tcp must contain 7 values")
-    position_error = [float(value) for value in pose_error_base_tcp[:3]]
-    axis = max(range(3), key=lambda index: abs(position_error[index]))
-    error = position_error[axis]
-    if abs(error) <= float(position_deadband):
-        return CartJogCommand(jog_index=0, jog_dir=0, step_size=0.0, jog_axis_type=0, vel_scale=0.0)
-    return CartJogCommand(
-        jog_index=axis,
-        jog_dir=1 if error > 0.0 else 2,
-        step_size=min(abs(error), float(max_step_size)),
-        jog_axis_type=0,
-        vel_scale=float(vel_scale),
-    )
-
-
-def select_cart_jog_command(
-    *,
-    control_pose_base_tcp: list[float],
-    current_pose_base_tcp: list[float],
-    can_jog: bool,
-    position_deadband: float,
-    max_step_size: float,
-    vel_scale: float,
-) -> tuple[CartJogCommand, list[float]]:
-    pose_error_base_tcp = [
-        float(control_pose_base_tcp[0]) - float(current_pose_base_tcp[0]),
-        float(control_pose_base_tcp[1]) - float(current_pose_base_tcp[1]),
-        float(control_pose_base_tcp[2]) - float(current_pose_base_tcp[2]),
-        1.0,
-        0.0,
-        0.0,
-        0.0,
-    ]
-    if not can_jog:
-        return (
-            CartJogCommand(jog_index=0, jog_dir=0, step_size=0.0, jog_axis_type=0, vel_scale=0.0),
-            pose_error_base_tcp,
-        )
-    return (
-        pose_error_to_cart_jog_cmd(
-            pose_error_base_tcp,
-            position_deadband=position_deadband,
-            max_step_size=max_step_size,
-            vel_scale=vel_scale,
-        ),
-        pose_error_base_tcp,
-    )
-
-
-class VirtualJogFeedback:
-    def __init__(self) -> None:
-        self._pose_base_tcp: list[float] | None = None
-
-    def reset(self) -> None:
-        self._pose_base_tcp = None
-
-    def current_pose(self, measured_pose_base_tcp: list[float]) -> list[float]:
-        measured_pose = [float(value) for value in measured_pose_base_tcp]
-        if len(measured_pose) != 7:
-            raise ValueError("measured_pose_base_tcp must contain 7 values")
-        if self._pose_base_tcp is None:
-            self._pose_base_tcp = list(measured_pose)
-        return list(self._pose_base_tcp)
-
-    def advance(self, command: CartJogCommand) -> None:
-        if self._pose_base_tcp is None:
-            return
-        if command.jog_dir not in {1, 2} or command.step_size <= 0.0:
-            return
-        if command.jog_index not in {0, 1, 2}:
-            return
-        sign = 1.0 if command.jog_dir == 1 else -1.0
-        self._pose_base_tcp[command.jog_index] += sign * float(command.step_size)
-
-
-def valid_target_drives_or_none(target_drives, *, max_norm: float):
-    values = [float(value) for value in target_drives]
-    if not values or not all(math.isfinite(value) for value in values):
-        return None, float("nan")
-    norm = math.sqrt(sum(value * value for value in values))
-    if norm > float(max_norm):
-        return None, norm
-    return values, norm
-
-
-def _format_float_list(values, *, precision: int = 4) -> str:
-    return "[" + ", ".join(f"{float(value):.{precision}f}" for value in values) + "]"
-
-
-def format_state_torque_telemetry(
-    *,
-    servo_cycle: int,
-    q,
-    dq,
-    target_drives,
-    torque_norm: float,
-    current_pose_base_tcp,
-    control_pose_base_tcp,
-) -> str:
-    current_pose = [float(value) for value in current_pose_base_tcp]
-    target_pose = [float(value) for value in control_pose_base_tcp]
-    pos_error = [target_pose[index] - current_pose[index] for index in range(3)]
-    return (
-        "[FlexivStudioBall] state_torque "
-        f"cycle={int(servo_cycle)} "
-        f"q={_format_float_list(q)} "
-        f"dq={_format_float_list(dq)} "
-        f"tau={_format_float_list(target_drives)} "
-        f"tau_norm={float(torque_norm):.4f} "
-        f"tcp_xyz={_format_float_list(current_pose[:3])} "
-        f"target_xyz={_format_float_list(target_pose[:3])} "
-        f"pos_err={_format_float_list(pos_error)}"
-    )
-
-
-def format_jog_command_telemetry(
-    *,
-    servo_cycle: int,
-    command: CartJogCommand,
-    pose_error_base_tcp,
-    can_jog: bool,
-) -> str:
-    return (
-        "[FlexivStudioBall] jog_cmd "
-        f"cycle={int(servo_cycle)} "
-        f"can_jog={bool(can_jog)} "
-        f"jog_index={int(command.jog_index)} "
-        f"jog_dir={int(command.jog_dir)} "
-        f"step_size={float(command.step_size):.4f} "
-        f"axis_type={int(command.jog_axis_type)} "
-        f"vel_scale={float(command.vel_scale):.4f} "
-        f"pos_err={_format_float_list([float(value) for value in pose_error_base_tcp[:3]])}"
-    )
-
-
-def should_poll_simplugin_target_drives(
-    *,
-    connected: bool,
-    disable_simplugin_target_drives: bool,
-    quest_target_active: bool,
-) -> bool:
-    _ = quest_target_active
-    return bool(connected) and not bool(disable_simplugin_target_drives)
-
-
-def target_pose_control_is_active(
-    *,
-    quest_target_receiver_enabled: bool,
-    latest_quest_target: QuestTargetPacket | None,
-) -> bool:
-    _ = quest_target_receiver_enabled
-    _ = latest_quest_target
-    return True
-
-
-def parse_cal_reachability_response(response: bytes) -> list[float]:
-    solved: list[float] = []
-    index = 0
-    while index < len(response):
-        key = response[index]
-        index += 1
-        field_number = key >> 3
-        wire_type = key & 0x07
-        if wire_type == 0:
-            while index < len(response):
-                byte = response[index]
-                index += 1
-                if not byte & 0x80:
-                    break
-        elif wire_type == 1:
-            index += 8
-        elif wire_type == 2:
-            length = 0
-            shift = 0
-            while index < len(response):
-                byte = response[index]
-                index += 1
-                length |= (byte & 0x7F) << shift
-                if not byte & 0x80:
-                    break
-                shift += 7
-            payload = response[index : index + length]
-            index += length
-            if field_number == 2:
-                solved.append(float(payload.decode("utf-8")))
-        elif wire_type == 5:
-            index += 4
-        else:
-            raise ValueError(f"unsupported protobuf wire type {wire_type}")
-    if len(solved) != 7:
-        raise ValueError(f"CalReachability returned {len(solved)} joint values, expected 7")
-    return solved
-
-
-class StudioReachabilityClient:
-    def __init__(self, address: str, timeout: float) -> None:
-        try:
-            grpc = import_grpc_module()
-        except ImportError as exc:
-            raise RuntimeError("Studio IK requires grpcio in this Python environment") from exc
-        self._timeout = float(timeout)
-        self._channel = grpc.insecure_channel(address)
-        self._call = self._channel.unary_unary(
-            "/proto.robot.motion.MotionService/CalReachability",
-            request_serializer=lambda value: value,
-            response_deserializer=lambda value: value,
-        )
-
-    def solve(self, *, target_pose: list[str], seed_jnt_pos: list[str]) -> list[float]:
-        request = encode_cal_reachability_request(target_pose=target_pose, seed_jnt_pos=seed_jnt_pos)
-        return parse_cal_reachability_response(self._call(request, timeout=self._timeout))
-
-    def close(self) -> None:
-        self._channel.close()
-
-
-class StudioJoggingClient:
-    def __init__(self, address: str, timeout: float, *, coord_type: int = 0, coord_name: str = "WORLD") -> None:
-        try:
-            grpc = import_grpc_module()
-        except ImportError as exc:
-            raise RuntimeError("Studio jogging requires grpcio in this Python environment") from exc
-        self._timeout = float(timeout)
-        self._coord_type = int(coord_type)
-        self._coord_name = str(coord_name)
-        self._channel = grpc.insecure_channel(address)
-        self._call = self._channel.unary_unary(
-            "/proto.robot.motion.MotionService/SetCartJoggingCmd",
-            request_serializer=lambda value: value,
-            response_deserializer=lambda value: value,
-        )
-
-    def send(self, command: CartJogCommand) -> bytes:
-        request = encode_set_cart_jogging_cmd_request(
-            coord_type=self._coord_type,
-            coord_name=self._coord_name,
-            jog_index=command.jog_index,
-            jog_dir=command.jog_dir,
-            step_size=command.step_size,
-            jog_axis_type=command.jog_axis_type,
-            vel_scale=command.vel_scale,
-        )
-        return self._call(request, timeout=self._timeout)
-
-    def stop(self) -> None:
-        self.send(CartJogCommand(jog_index=0, jog_dir=0, step_size=0.0, jog_axis_type=0, vel_scale=0.0))
-
-    def close(self) -> None:
-        self._channel.close()
 
 
 def apply_key_nudge(
@@ -1483,6 +665,7 @@ def run(args: argparse.Namespace) -> int:
         float(args.target_pose_publish_hz),
         physics_freq=physics_hz,
     )
+    rdk_target_gate = TargetPosePublishGate.from_hz(float(args.rdk_target_hz), physics_freq=physics_hz)
     studio_ik_gate = TargetPosePublishGate.from_hz(float(args.studio_ik_hz), physics_freq=physics_hz)
     studio_jog_gate = TargetPosePublishGate.from_hz(float(args.studio_jog_hz), physics_freq=physics_hz)
     state_torque_log_gate = TargetPosePublishGate.from_hz(float(args.state_torque_log_hz), physics_freq=physics_hz)
@@ -1498,15 +681,19 @@ def run(args: argparse.Namespace) -> int:
     last_target_drive_log_cycle = -10_000
     last_jog_command_log_cycle = -10_000
     last_quest_target_log_cycle = -10_000
+    last_rdk_error_cycle = -10_000
+    last_rdk_command_log_cycle = -10_000
     latest_quest_target = None
+    rdk_runtime = None
+    rdk_runtime_target_active = False
 
     def on_physics_step(_dt):
         nonlocal servo_cycle, last_connected, effort_control_enabled, target_drive_warmup_remaining
         nonlocal valid_target_drive_streak
         nonlocal last_studio_ik_q, last_studio_ik_error_cycle, last_studio_jog_error_cycle
         nonlocal last_invalid_target_drive_cycle, last_target_drive_log_cycle, last_jog_command_log_cycle
-        nonlocal last_quest_target_log_cycle
-        nonlocal latest_quest_target
+        nonlocal last_quest_target_log_cycle, last_rdk_error_cycle, last_rdk_command_log_cycle
+        nonlocal latest_quest_target, rdk_runtime, rdk_runtime_target_active
         servo_cycle += 1
         sim_node.SendRobotStates(flexivsimplugin.SimRobotStates(servo_cycle, robot.q, robot.dq))
 
@@ -1580,6 +767,181 @@ def run(args: argparse.Namespace) -> int:
                         joint_indices=np.arange(0, 7),
                     )
             )
+            return
+
+        if args.control_source == "rdk-cartesian":
+            if not _is_robot_ready(robot):
+                last_connected = False
+                effort_control_enabled = False
+                return
+            connected = sim_node.connected()
+            quest_target_active = target_pose_control_is_active(
+                quest_target_receiver_enabled=quest_target_receiver is not None,
+                latest_quest_target=latest_quest_target,
+            )
+            tcp_position, tcp_orientation = robot.end_effector.get_world_pose()
+            current_pose_base_tcp = world_target_to_flexiv_pose(
+                world_position=tcp_position,
+                world_orientation_wxyz=tcp_orientation,
+                base_position=base_position,
+                base_orientation_wxyz=base_orientation,
+            )
+            control_pose_base_tcp = pose_base_tcp_des
+            if latest_quest_target is not None and args.quest_target_mode == "relative":
+                control_pose_base_tcp = quest_relative_mapper.update(latest_quest_target, current_pose_base_tcp)
+                synced_target_pose = sync_target_ball_to_base_tcp_pose(
+                    ball,
+                    pose_base_tcp_des=control_pose_base_tcp,
+                    base_position=base_position,
+                    base_orientation_wxyz=base_orientation,
+                )
+                if keyboard is not None:
+                    keyboard.update_pose_reference(synced_target_pose)
+            if quest_coordinate_observer is not None and target_pose_publish_gate.should_publish(servo_cycle):
+                quest_coordinate_observer.publish(
+                    build_coordinate_observation_packet(
+                        serial_number=args.serial_number,
+                        joint_group=args.joint_group,
+                        servo_cycle=servo_cycle,
+                        quest_target=latest_quest_target,
+                        active=quest_target_active,
+                        current_pose_base_tcp=current_pose_base_tcp,
+                        target_pose_base_tcp=control_pose_base_tcp if quest_target_active else None,
+                        monotonic_time=time.monotonic(),
+                    )
+                )
+
+            if rdk_target_gate.should_publish(servo_cycle):
+                try:
+                    if rdk_runtime is None:
+                        rdk_serial_number = args.rdk_serial_number or args.serial_number
+                        rdk_runtime = RdkRuntimeController(
+                            RdkRuntimeSettings(
+                                serial_number=rdk_serial_number,
+                                joint_group=args.joint_group,
+                                network_interface_whitelist=args.rdk_network_interface_whitelist,
+                                switch_mode=bool(args.rdk_switch_mode),
+                                clear_fault=bool(args.rdk_clear_fault),
+                                servo_on=bool(args.rdk_servo_on),
+                                verbose=bool(args.rdk_verbose),
+                            ),
+                            log=lambda message: print(f"[FlexivStudioBall] {message}", flush=True),
+                        )
+                        rdk_runtime.connect()
+                        print(f"[FlexivStudioBall] RDK connected {rdk_serial_number}", flush=True)
+                    rdk_runtime.send_pose(control_pose_base_tcp)
+                    rdk_runtime_target_active = True
+                    rdk_log_period_cycles = (
+                        int(physics_hz / float(args.state_torque_log_hz))
+                        if float(args.state_torque_log_hz) > 0.0
+                        else 0
+                    )
+                    if rdk_log_period_cycles > 0 and servo_cycle - last_rdk_command_log_cycle >= rdk_log_period_cycles:
+                        print(
+                            "[FlexivStudioBall] rdk_target "
+                            f"cycle={servo_cycle} "
+                            f"pose={_format_float_list(control_pose_base_tcp)}",
+                            flush=True,
+                        )
+                        last_rdk_command_log_cycle = servo_cycle
+                except Exception as exc:
+                    rdk_runtime = None
+                    rdk_runtime_target_active = False
+                    if servo_cycle - last_rdk_error_cycle >= int(physics_hz):
+                        print(f"[FlexivStudioBall] RDK Cartesian streaming failed: {exc}", flush=True)
+                        last_rdk_error_cycle = servo_cycle
+
+            if connected and not last_connected:
+                print(
+                    f"[FlexivStudioBall] SimPlugin connected {args.serial_number}; "
+                    f"warming up {max(0, int(args.target_drive_warmup_cycles))} cycles",
+                    flush=True,
+                )
+                target_drive_warmup_remaining = max(0, int(args.target_drive_warmup_cycles))
+                effort_control_enabled = False
+                valid_target_drive_streak = 0
+                robot.switch_control_mode("position")
+                robot.teleport_to(robot.q)
+
+            if args.disable_simplugin_target_drives:
+                if effort_control_enabled:
+                    robot.switch_control_mode("position")
+                    robot.teleport_to(robot.q)
+                    effort_control_enabled = False
+                valid_target_drive_streak = 0
+                last_connected = connected
+                return
+
+            if should_poll_simplugin_target_drives(
+                connected=connected,
+                disable_simplugin_target_drives=bool(args.disable_simplugin_target_drives),
+                runtime_target_active=rdk_runtime_target_active,
+            ):
+                if sim_node.WaitForRobotCommands(max(0, int(args.command_timeout_ms))):
+                    if target_drive_warmup_remaining > 0:
+                        target_drive_warmup_remaining -= 1
+                        last_connected = True
+                        return
+                    target_drives, torque_norm = valid_target_drives_or_none(
+                        sim_node.robot_commands().target_drives,
+                        max_norm=float(args.max_target_drive_norm),
+                    )
+                    if target_drives is None:
+                        if effort_control_enabled:
+                            robot.switch_control_mode("position")
+                            robot.teleport_to(robot.q)
+                            effort_control_enabled = False
+                        valid_target_drive_streak = 0
+                        if servo_cycle - last_invalid_target_drive_cycle >= int(physics_hz):
+                            print(
+                                f"[FlexivStudioBall] rejected target_drives norm={torque_norm:.3g}; "
+                                "waiting for Studio/SimPlugin to settle",
+                                flush=True,
+                            )
+                            last_invalid_target_drive_cycle = servo_cycle
+                        last_connected = True
+                        return
+                    valid_target_drive_streak += 1
+                    if valid_target_drive_streak < max(1, int(args.target_drive_required_valid_cycles)):
+                        last_connected = True
+                        return
+                    if not effort_control_enabled:
+                        robot.switch_control_mode("effort")
+                        effort_control_enabled = True
+                    if state_torque_log_gate.should_publish(servo_cycle):
+                        print(
+                            format_state_torque_telemetry(
+                                servo_cycle=servo_cycle,
+                                q=robot.q,
+                                dq=robot.dq,
+                                target_drives=target_drives,
+                                torque_norm=torque_norm,
+                                current_pose_base_tcp=current_pose_base_tcp,
+                                control_pose_base_tcp=control_pose_base_tcp,
+                            ),
+                            flush=True,
+                        )
+                    robot.apply_torques(target_drives)
+                    if servo_cycle - last_target_drive_log_cycle >= int(physics_hz):
+                        print(f"[FlexivStudioBall] target_drives norm={torque_norm:.3f}", flush=True)
+                        last_target_drive_log_cycle = servo_cycle
+                last_connected = True
+            else:
+                if connected:
+                    if effort_control_enabled:
+                        robot.switch_control_mode("position")
+                        robot.teleport_to(robot.q)
+                        effort_control_enabled = False
+                    valid_target_drive_streak = 0
+                    last_connected = True
+                    return
+                if last_connected:
+                    print(f"[FlexivStudioBall] SimPlugin disconnected {args.serial_number}", flush=True)
+                    robot.switch_control_mode("position")
+                    robot.teleport_to(robot.q)
+                effort_control_enabled = False
+                valid_target_drive_streak = 0
+                last_connected = False
             return
 
         if args.control_source == "studio-jog":
@@ -1701,7 +1063,7 @@ def run(args: argparse.Namespace) -> int:
             if should_poll_simplugin_target_drives(
                 connected=connected,
                 disable_simplugin_target_drives=bool(args.disable_simplugin_target_drives),
-                quest_target_active=quest_target_active,
+                runtime_target_active=quest_target_active,
             ):
                 if sim_node.WaitForRobotCommands(max(0, int(args.command_timeout_ms))):
                     if target_drive_warmup_remaining > 0:
