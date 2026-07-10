@@ -21,6 +21,15 @@ def _pose(x, y, z):
     return matrix
 
 
+def _rot_z_90_pose(x=0.0, y=0.0, z=0.0):
+    return [
+        [0.0, -1.0, 0.0, x],
+        [1.0, 0.0, 0.0, y],
+        [0.0, 0.0, 1.0, z],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+
+
 class Rizon4QuestTargetPublisherTests(unittest.TestCase):
     def test_default_televuer_root_is_inside_repo(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -83,6 +92,18 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
 
         self.assertEqual(packet["controller_delta_base"], [0.0, 0.0, 0.0])
         self.assertEqual(packet["pose_base_tcp_des"][:3], [0.0, 0.0, 0.0])
+
+    def test_mapper_uses_absolute_orientation_during_engage_settle_window(self):
+        mapper = mod.QuestRelativeMapper(
+            tcp_rot_offset_wxyz=[1.0, 0.0, 0.0, 0.0],
+            engage_settle_sec=0.25,
+        )
+
+        packet = mapper.update(_rot_z_90_pose(), enabled=True, seq=1, now=10.0)
+
+        expected = [round(math.sqrt(0.5), 4), 0.0, 0.0, round(math.sqrt(0.5), 4)]
+        actual = [round(value, 4) for value in packet["pose_base_tcp_des"][3:]]
+        self.assertEqual(actual, expected)
 
     def test_mapper_applies_position_deadband_after_settle(self):
         mapper = mod.QuestRelativeMapper(

@@ -165,7 +165,6 @@ class QuestRelativeMapper:
         self.engage_settle_sec = max(0.0, float(engage_settle_sec))
         self.position_deadband = max(0.0, float(position_deadband))
         self._position_zero: list[float] | None = None
-        self._orientation_zero: list[float] | None = None
         self._engage_time: float | None = None
 
     def update(self, pose_matrix: list[list[float]], *, enabled: bool, seq: int, now: float) -> dict | None:
@@ -174,21 +173,17 @@ class QuestRelativeMapper:
         hand_quat = pose_matrix_quat_wxyz(pose_matrix)
         if not enabled:
             self._position_zero = None
-            self._orientation_zero = None
             self._engage_time = None
             return None
 
         if self._position_zero is None:
             self._position_zero = list(mapped_position)
             self._engage_time = float(now)
-        if self._orientation_zero is None:
-            self._orientation_zero = list(hand_quat)
+        tcp_quat = quat_multiply_wxyz(hand_quat, self.tcp_rot_offset_wxyz)
 
         if self._engage_time is not None and float(now) - self._engage_time < self.engage_settle_sec:
             self._position_zero = list(mapped_position)
-            self._orientation_zero = list(hand_quat)
             delta = [0.0, 0.0, 0.0]
-            tcp_quat = list(self.tcp_rot_offset_wxyz)
             pose = delta + tcp_quat
             return build_quest_packet(
                 seq=seq,
@@ -207,8 +202,6 @@ class QuestRelativeMapper:
             for index in range(3)
         ]
         delta = [0.0 if abs(value) < self.position_deadband else value for value in delta]
-        relative_hand_quat = quat_multiply_wxyz(hand_quat, quat_inverse_wxyz(self._orientation_zero))
-        tcp_quat = quat_multiply_wxyz(relative_hand_quat, self.tcp_rot_offset_wxyz)
         pose = delta + tcp_quat
         return build_quest_packet(
             seq=seq,
