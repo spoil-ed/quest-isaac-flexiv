@@ -22,7 +22,7 @@ DEFAULT_KEY_FILE = REPO_ROOT / "configs" / "xr_teleoperate" / "key.pem"
 DEFAULT_HOST_IP = "192.168.32.10"
 DEFAULT_UDP_HOST = "127.0.0.1"
 DEFAULT_UDP_PORT = 45679
-DEFAULT_TCP_ROT_OFFSET_WXYZ = (0.70710678, 0.0, 0.0, 0.70710678)
+DEFAULT_TCP_ROT_OFFSET_WXYZ = (0.70710678, 0.0, -0.70710678, 0.0)
 DEFAULT_AXIS_MAP = "-z,-x,y"
 
 
@@ -71,6 +71,10 @@ def multiply_matrix3(a: list[list[float]], b: list[list[float]]) -> list[list[fl
         [sum(float(a[row][inner]) * float(b[inner][col]) for inner in range(3)) for col in range(3)]
         for row in range(3)
     ]
+
+
+def transpose_matrix3(matrix: list[list[float]]) -> list[list[float]]:
+    return [[float(matrix[row][col]) for row in range(3)] for col in range(3)]
 
 
 def normalize_quat_wxyz(values: Iterable[float]) -> list[float]:
@@ -128,7 +132,8 @@ def pose_matrix_quat_wxyz(matrix: list[list[float]], axis_map: list[tuple[int, f
         raise ValueError("pose matrix must be 4x4")
     rotation = [row[:3] for row in matrix[:3]]
     if axis_map is not None:
-        rotation = multiply_matrix3(axis_map_matrix(axis_map), rotation)
+        transform = axis_map_matrix(axis_map)
+        rotation = multiply_matrix3(multiply_matrix3(transform, rotation), transpose_matrix3(transform))
     return rotation_matrix_to_quat_wxyz(rotation)
 
 
@@ -280,7 +285,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--position-delta-scale", type=float, default=3.0)
     parser.add_argument("--position-deadband", type=float, default=0.05)
     parser.add_argument("--engage-settle-sec", type=float, default=0.25)
-    parser.add_argument("--right-tcp-rot-offset", default="0.70710678,0.0,0.0,0.70710678")
+    parser.add_argument("--right-tcp-rot-offset", default="0.70710678,0.0,-0.70710678,0.0")
     parser.add_argument("--enable-threshold", type=float, default=0.5)
     parser.add_argument("--televuer-root", type=Path, default=DEFAULT_TELEVUER_ROOT)
     parser.add_argument("--cert-file", default=str(DEFAULT_CERT_FILE))

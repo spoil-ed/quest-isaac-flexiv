@@ -110,7 +110,7 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
 
         packet = mapper.update(_rot_z_90_pose(), enabled=True, seq=1, now=10.0)
 
-        expected = [round(math.sqrt(0.5), 4), 0.0, -round(math.sqrt(0.5), 4), 0.0]
+        expected = [round(math.sqrt(0.5), 4), -round(math.sqrt(0.5), 4), 0.0, 0.0]
         actual = [round(value, 4) for value in packet["pose_base_tcp_des"][3:]]
         self.assertEqual(actual, expected)
 
@@ -122,13 +122,12 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
 
         packet = mapper.update(_pose(0.0, 0.0, 0.0), enabled=True, seq=1, now=10.0)
 
-        controller_forward_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [0.0, 0.0, -1.0])
-        self.assertEqual([round(value, 4) for value in controller_forward_in_base], [1.0, 0.0, 0.0])
-
-        controller_left_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [-1.0, 0.0, 0.0])
-        controller_up_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [0.0, 1.0, 0.0])
-        self.assertEqual([round(value, 4) for value in controller_left_in_base], [0.0, 1.0, 0.0])
-        self.assertEqual([round(value, 4) for value in controller_up_in_base], [0.0, 0.0, 1.0])
+        hand_forward_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [1.0, 0.0, 0.0])
+        hand_left_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [0.0, 1.0, 0.0])
+        hand_up_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [0.0, 0.0, 1.0])
+        self.assertEqual([round(value, 4) for value in hand_forward_in_base], [1.0, 0.0, 0.0])
+        self.assertEqual([round(value, 4) for value in hand_left_in_base], [0.0, 1.0, 0.0])
+        self.assertEqual([round(value, 4) for value in hand_up_in_base], [0.0, 0.0, 1.0])
 
     def test_default_orientation_maps_hand_semantic_axes_to_tcp_zero(self):
         mapper = mod.QuestRelativeMapper(engage_settle_sec=0.0)
