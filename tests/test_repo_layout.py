@@ -36,6 +36,7 @@ class RepoLayoutTests(unittest.TestCase):
             "spec",
             "standalone_examples",
             "tests",
+            "third_party",
         }
         actual = {path.name for path in ROOT.iterdir()}
 
@@ -51,6 +52,7 @@ class RepoLayoutTests(unittest.TestCase):
             "flexiv_stack_status.py",
             "flexiv_studio_teleop.py",
             "rdk_target_streamer.py",
+            "rizon4_quest_target_publisher.py",
             "start_elements_studio_ui.py",
             "start_robot_control_app.py",
             "start_flexiv_simulation.py",
@@ -90,6 +92,13 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertFalse(hasattr(follow, "build_env"))
         self.assertNotIn("--rdk-target-hz", command)
 
+    def test_isaac_follow_startup_can_set_rdk_target_frequency(self):
+        follow = load_script("start_isaac_follow.py")
+        command = follow.build_command(follow.parse_args(["--rdk-target-hz", "60"]))
+
+        self.assertIn("--rdk-target-hz", command)
+        self.assertIn("60.0", command)
+
     def test_scripts_do_not_reference_removed_flexiv_test_path(self):
         offenders = []
         for path in SCRIPTS.glob("*.py"):
@@ -119,6 +128,14 @@ class RepoLayoutTests(unittest.TestCase):
         actual = {path.name for path in FLEXIV_QUEST.iterdir() if path.is_file()}
 
         self.assertEqual(actual, allowed)
+
+    def test_vendored_televuer_requests_controller_button_events(self):
+        text = (ROOT / "third_party" / "televuer" / "src" / "televuer" / "televuer.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('eventType=["trigger", "squeeze"]', text)
+        self.assertIn("fps=60", text)
         self.assertFalse(FLEXIV_QUEST.is_symlink())
 
 

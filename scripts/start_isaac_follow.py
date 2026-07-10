@@ -23,6 +23,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--manual-play", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--enable-quest-target-udp", action="store_true")
+    parser.add_argument("--rdk-target-hz", type=float, default=None)
     return parser.parse_args(argv)
 
 
@@ -43,6 +44,8 @@ def build_command(args: argparse.Namespace) -> list[str]:
         command.append("--headless")
     if args.enable_quest_target_udp:
         command.append("--enable-quest-target-udp")
+    if args.rdk_target_hz is not None:
+        command.extend(["--rdk-target-hz", str(float(args.rdk_target_hz))])
     return command
 
 

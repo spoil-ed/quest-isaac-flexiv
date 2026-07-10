@@ -1,31 +1,44 @@
-# Isaac Sim Flexiv Minimal Workspace
+# Quest Isaac Flexiv
 
-This repository is the thin project layer on top of the original Isaac Sim and
-Flexiv workspaces. It keeps only the assets, local extensions, scripts, tests,
-and specs needed for the current Flexiv Studio / Quest teleoperation work.
+本仓库是基于原始 Isaac Sim / Flexiv 工程维护的主线项目层，只保留当前 Quest 遥操、Elements Studio/RDK 控制链路、脚本入口、配置和测试。原始示例只作为参考，新方案代码放在本仓库内维护。
 
-## Layout
+## 目标
 
-- `scripts/`: all runnable entry points and small runtime helpers.
-- `standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/`: maintained
-  Flexiv Isaac asset/demo code for the new Quest/Studio workflow, including
-  the editable bridge app.
-- `local_exts/`: local Isaac Sim extensions for teleop loading and Flexiv Studio
-  teleop adaptation.
-- `configs/`: project configuration files.
-- `spec/`: planning/spec documents maintained by the project owner.
-- `tests/`: fast regression tests for repository layout and pure-Python helpers.
-- `isaac_sim_ws/`: upstream Flexiv Isaac Sim workspace clone, kept as an external
-  reference and ignored by this outer repository.
-- Original Flexiv examples are treated as backup/reference. New workflow changes
-  should land in `flexiv_quest/` and `scripts/`.
+用 Quest 手柄位姿控制 Isaac Sim 中的 Flexiv Rizon4。Isaac Sim 负责场景、机器人状态读取和力矩执行；控制逻辑走 Flexiv runtime / Elements Studio 可视化链路，不使用 Isaac 自带 IK，也不使用 jog / CartesianJogging 作为跟随控制方案。
 
-Generated logs, recordings, datasets, Python caches, and local dependency
-folders are ignored.
+主线闭环：
 
-## Runtime Entry Points
+```text
+Quest controller pose
+  -> scripts/rizon4_quest_target_publisher.py
+  -> UDP target pose
+  -> Isaac TargetFrame / follow bridge
+  -> Flexiv runtime / RDK control stack
+  -> target_drives / torque
+  -> Isaac apply_torques
+  -> q, dq feedback
+  -> next control frame
+```
 
-Start the Flexiv stack as separate processes:
+控制语义：
+
+- 按住右手柄 `squeeze` 时，使用手柄相对位移控制 TCP 相对目标。
+- 松开 `squeeze` 时暂停发送目标，不回到固定零点。
+- 默认 Rizon4 序列号为 `Rizon4-I0LIRN`。
+
+## 目录
+
+- `scripts/`: 所有可执行入口和 runtime helper。
+- `standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/`: Isaac 侧 Flexiv/Quest demo 资产和桥接代码。
+- `local_exts/`: Isaac Sim 本地扩展。
+- `third_party/televuer/`: 仓库内 vendored Quest/Vuer 输入层。
+- `configs/`: 项目配置。`configs/xr_teleoperate/*.pem` 是本地 HTTPS 证书，不提交。
+- `spec/`: 简要目标和方案文档。
+- `tests/`: 快速回归测试。
+
+## 启动
+
+分别启动各组件：
 
 ```bash
 cd /home/simate/workspace/isaacsim-flexiv
@@ -33,27 +46,40 @@ cd /home/simate/workspace/isaacsim-flexiv
 python scripts/start_robot_control_app.py
 python scripts/start_flexiv_simulation.py
 python scripts/start_elements_studio_ui.py
-python scripts/start_isaac_follow.py
+python scripts/start_isaac_follow.py --enable-quest-target-udp --rdk-target-hz 60
 python scripts/start_rdk_target_streamer.py
 ```
 
-Check or stop the processes:
+启动 Quest 输入 publisher：
+
+```bash
+python scripts/rizon4_quest_target_publisher.py \
+  --host-ip 192.168.32.10 \
+  --udp-host 127.0.0.1 \
+  --udp-port 45679 \
+  --side right \
+  --enable-button squeeze \
+  --axis-map x,y,z \
+  --position-delta-scale 3.0 \
+  --rate-hz 60
+```
+
+在 Quest 浏览器打开 publisher 打印的 HTTPS 地址，例如：
+
+```text
+https://192.168.32.10:8012/?ws=wss://192.168.32.10:8012
+```
+
+进入 VR 后，按住右手柄 `squeeze` 并移动手柄。publisher 日志中应从 `ready=False` 变为 `ready=True`，按住时 `enabled=True` 且持续发送 UDP target pose。
+
+## 状态检查
 
 ```bash
 python scripts/flexiv_stack_status.py
 python scripts/stop_flexiv_stack.py
 ```
 
-Teleop / SDG workflows:
-
-```bash
-scripts/teleop_sdg teleop
-scripts/teleop_sdg record
-scripts/teleop_sdg replay --hdf5 recordings/teleop_hdf5/<session>.hdf5
-scripts/flexiv_studio_teleop
-```
-
-## Test
+## 测试
 
 ```bash
 python -m unittest discover -s tests -p 'test_*.py'

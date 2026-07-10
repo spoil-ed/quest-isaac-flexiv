@@ -25,3 +25,5 @@ exts
 .DS_Store
 .vscode/
 .vs/
+
+configs/xr_teleoperate/*.pem
