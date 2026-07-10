@@ -301,7 +301,7 @@ class FlexivStudioTeleopTests(unittest.TestCase):
 
         self.assertEqual(mapped, [0.15, -0.05, 0.1])
 
-    def test_follow_ball_relative_mapper_anchors_to_current_tcp_and_keeps_orientation(self):
+    def test_follow_ball_relative_mapper_anchors_position_and_uses_absolute_orientation(self):
         mod = load_follow_ball()
         mapper = mod.QuestRelativeTargetMapper(
             axis_map=mod.parse_quest_axis_map("-z,-x,y"),
@@ -320,7 +320,7 @@ class FlexivStudioTeleopTests(unittest.TestCase):
         second = mod.QuestTargetPacket(
             seq=2,
             side="right",
-            pose_base_tcp_des=[9.0, 9.0, 9.0, 0.0, 1.0, 0.0, 0.0],
+            pose_base_tcp_des=[9.0, 9.0, 9.0, 0.0, 0.0, 1.0, 0.0],
             controller_position_openxr=[0.10, 1.20, -0.80],
             gripper_open_ratio=0.5,
             monotonic_time=10.1,
@@ -330,7 +330,7 @@ class FlexivStudioTeleopTests(unittest.TestCase):
 
         self.assertEqual(mapper.update(first, current_tcp), current_tcp)
         mapped = mapper.update(second, current_tcp)
-        for actual, expected in zip(mapped, [0.55, -0.15, 0.8, 1.0, 0.0, 0.0, 0.0]):
+        for actual, expected in zip(mapped, [0.55, -0.15, 0.8, 0.0, 0.0, 1.0, 0.0]):
             self.assertAlmostEqual(actual, expected)
 
     def test_follow_ball_relative_mapper_prefers_transmitted_base_delta(self):
@@ -353,7 +353,7 @@ class FlexivStudioTeleopTests(unittest.TestCase):
         second = mod.QuestTargetPacket(
             seq=2,
             side="right",
-            pose_base_tcp_des=[0.3, -0.2, 0.1, 1.0, 0.0, 0.0, 0.0],
+            pose_base_tcp_des=[0.3, -0.2, 0.1, 0.5, 0.5, 0.5, 0.5],
             controller_position_openxr=[200.0, 200.0, 200.0],
             gripper_open_ratio=0.5,
             monotonic_time=10.1,
@@ -363,7 +363,7 @@ class FlexivStudioTeleopTests(unittest.TestCase):
         current_tcp = [0.40, -0.10, 0.70, 1.0, 0.0, 0.0, 0.0]
 
         self.assertEqual(mapper.update(first, current_tcp), current_tcp)
-        self.assertEqual(mapper.update(second, current_tcp), [0.7, -0.30000000000000004, 0.7999999999999999, 1.0, 0.0, 0.0, 0.0])
+        self.assertEqual(mapper.update(second, current_tcp), [0.7, -0.30000000000000004, 0.7999999999999999, 0.5, 0.5, 0.5, 0.5])
 
     def test_follow_ball_relative_mapper_does_not_clip_position_to_workspace_bounds(self):
         mod = load_follow_ball()
@@ -394,7 +394,7 @@ class FlexivStudioTeleopTests(unittest.TestCase):
 
         self.assertEqual(mapper.update(first, current_tcp), current_tcp)
         mapped = mapper.update(second, current_tcp)
-        for actual, expected in zip(mapped, [0.042, -0.3195, 2.0635, 1.0, 0.0, 0.0, 0.0]):
+        for actual, expected in zip(mapped, [0.042, -0.3195, 2.0635, 0.0, 1.0, 0.0, 0.0]):
             self.assertAlmostEqual(actual, expected)
 
 

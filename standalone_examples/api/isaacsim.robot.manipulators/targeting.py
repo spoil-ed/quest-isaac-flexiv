@@ -99,6 +99,7 @@ class QuestRelativeTargetMapper:
         current_pose = [float(value) for value in current_pose_base_tcp]
         if len(current_pose) != 7:
             raise ValueError("current_pose_base_tcp must contain 7 values")
+        orientation = list(quest_target.pose_base_tcp_des[3:7])
         if quest_target.controller_delta_base is not None:
             delta_base = [float(value) for value in quest_target.controller_delta_base]
             if len(delta_base) != 3 or not all(math.isfinite(value) for value in delta_base):
@@ -110,7 +111,7 @@ class QuestRelativeTargetMapper:
                 )
                 return list(current_pose)
             xyz = [self.reference.tcp_pose_base[index] + delta_base[index] for index in range(3)]
-            return xyz + list(self.reference.tcp_pose_base[3:7])
+            return xyz + orientation
         if quest_target.controller_position_openxr is None:
             return current_pose
         controller_position = [float(value) for value in quest_target.controller_position_openxr]
@@ -126,7 +127,7 @@ class QuestRelativeTargetMapper:
         ]
         delta_base = map_openxr_delta_to_base(delta_openxr, axis_map=self.axis_map, scale=self.scale)
         xyz = [self.reference.tcp_pose_base[index] + delta_base[index] for index in range(3)]
-        return xyz + list(self.reference.tcp_pose_base[3:7])
+        return xyz + orientation
 
 
 def target_pose_from_world_pose(world_position, world_orientation_wxyz) -> TargetPose:
