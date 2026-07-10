@@ -30,13 +30,11 @@ Start the Flexiv stack as separate processes:
 ```bash
 cd /home/simate/workspace/isaacsim-flexiv
 
-python scripts/install_studio_ball_jog_project.py
 python scripts/start_robot_control_app.py
 python scripts/start_flexiv_simulation.py
 python scripts/start_elements_studio_ui.py
-python scripts/studio_plan_control.py start
-python scripts/start_flexiv_bridge.py
 python scripts/start_isaac_follow.py
+python scripts/start_rdk_target_streamer.py
 ```
 
 Check or stop the processes:

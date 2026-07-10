@@ -30,14 +30,12 @@ class ControlHelpersTests(unittest.TestCase):
         self.assertFalse(
             helpers.should_poll_simplugin_target_drives(
                 connected=True,
-                disable_simplugin_target_drives=False,
                 runtime_target_active=False,
             )
         )
         self.assertTrue(
             helpers.should_poll_simplugin_target_drives(
                 connected=True,
-                disable_simplugin_target_drives=False,
                 runtime_target_active=True,
             )
         )

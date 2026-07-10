@@ -280,8 +280,8 @@ def flexiv_pose_to_world_target(
     return world_pos, _xyzw_to_wxyz(world_ori_xyzw)
 
 
-def sync_target_ball_to_base_tcp_pose(
-    ball,
+def sync_target_to_base_tcp_pose(
+    target,
     *,
     pose_base_tcp_des,
     base_position,
@@ -294,11 +294,14 @@ def sync_target_ball_to_base_tcp_pose(
         base_position=base_position,
         base_orientation_wxyz=base_orientation_wxyz,
     )
-    ball.set_world_pose(
+    target.set_world_pose(
         position=np.array(world_position),
         orientation=np.array(world_orientation_wxyz),
     )
     return target_pose_from_world_pose(world_position, world_orientation_wxyz)
+
+
+sync_target_ball_to_base_tcp_pose = sync_target_to_base_tcp_pose
 
 
 def build_target_pose_packet(

@@ -295,6 +295,58 @@ class ElementsStudioUtilsTests(unittest.TestCase):
         self.assertEqual(command.twist_d, [0.0] * 6)
         self.assertEqual(command.wrench_d, [0.0] * 6)
 
+    def test_connect_rdk_cartesian_streamer_switches_mode_even_if_operational_state_lags_after_enable(self):
+        utils = load_utils()
+
+        class FakeMode:
+            NRT_CARTESIAN_MOTION_FORCE = "nrt_cartesian"
+
+        class FakeRobot:
+            def __init__(self, serial_number, whitelist, verbose):
+                self.serial_number = serial_number
+                self.whitelist = whitelist
+                self.verbose = verbose
+                self.enabled = False
+                self.switched_to = None
+
+            def fault(self):
+                return False
+
+            def operational(self):
+                return False
+
+            def Enable(self):
+                self.enabled = True
+
+            def mode(self):
+                return "idle"
+
+            def SwitchMode(self, mode):
+                self.switched_to = mode
+
+            def SendCartesianMotionForce(self, *_args):
+                pass
+
+        class FakeRdk:
+            Mode = FakeMode
+            created = []
+
+            @classmethod
+            def Robot(cls, serial_number, whitelist, verbose):
+                robot = FakeRobot(serial_number, whitelist, verbose)
+                cls.created.append(robot)
+                return robot
+
+        streamer = utils.connect_rdk_cartesian_streamer(
+            "Rizon4-I0LIRN",
+            flexivrdk=FakeRdk,
+        )
+
+        robot = FakeRdk.created[0]
+        self.assertIsInstance(streamer, utils.RdkCartesianStreamer)
+        self.assertTrue(robot.enabled)
+        self.assertEqual(robot.switched_to, "nrt_cartesian")
+
     def test_rdk_runtime_controller_wraps_pose_as_runtime_stream_command(self):
         utils = load_utils()
 

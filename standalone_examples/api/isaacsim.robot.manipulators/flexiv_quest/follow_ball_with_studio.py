@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -14,10 +15,8 @@ if str(UTILS_DIR) not in sys.path:
     sys.path.insert(0, str(UTILS_DIR))
 
 from elements_studio_utils import (
-    CartJogCommand,
     RdkRuntimeController,
     RdkRuntimeSettings,
-    StudioJoggingClient,
     StudioReachabilityClient,
     joint_positions_rad_to_studio_seed,
     studio_target_pose_from_rdk_pose as pose_base_tcp_des_to_studio_target_pose,
@@ -26,12 +25,8 @@ from elements_studio_utils import (
 from control_helpers import (
     StepRateLimiter,
     TargetPosePublishGate,
-    VirtualJogFeedback,
     format_float_list as _format_float_list,
-    format_jog_command_telemetry,
     format_state_torque_telemetry,
-    pose_error_to_cart_jog_cmd,
-    select_cart_jog_command,
     should_poll_simplugin_target_drives,
     target_pose_control_is_active,
 )
@@ -51,7 +46,7 @@ from targeting import (
     parse_quest_target_packet,
     quest_target_is_fresh,
     select_pose_base_tcp_des,
-    sync_target_ball_to_base_tcp_pose,
+    sync_target_to_base_tcp_pose,
     target_pose_from_world_pose,
     triple as _triple,
     world_target_to_flexiv_pose,
@@ -67,10 +62,12 @@ DEFAULT_EXAMPLES_EXT = Path(
 )
 DEFAULT_SERIAL_NUMBER = "Rizon4-I0LIRN"
 DEFAULT_JOINT_GROUP = "ARM_1"
-DEFAULT_TARGET_PRIM_PATH = "/World/TargetBall"
-DEFAULT_TARGET_NAME = "target_ball"
+DEFAULT_TARGET_PRIM_PATH = "/World/TargetFrame"
+DEFAULT_TARGET_NAME = "target_frame"
 DEFAULT_TARGET_POSITION = (0.45, 0.0, 0.35)
 DEFAULT_TARGET_EULER_DEG = (0.0, 0.0, 0.0)
+DEFAULT_TARGET_AXIS_LENGTH = 0.14
+DEFAULT_TARGET_AXIS_RADIUS = 0.006
 DEFAULT_INITIAL_Q = (0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0)
 DEFAULT_STUDIO_INITIAL_Q = DEFAULT_INITIAL_Q
 DEFAULT_TARGET_POSE_UDP_HOST = "127.0.0.1"
@@ -86,7 +83,6 @@ PHYSICS_FREQ = 2000.0
 RENDER_FREQ = 60.0
 DEFAULT_PHYSICS_HZ = PHYSICS_FREQ
 DEFAULT_STUDIO_IK_HZ = 30.0
-DEFAULT_STUDIO_JOG_HZ = 30.0
 COMPATIBLE_SIM_PLUGIN_VER = "1.2.0"
 
 
@@ -104,6 +100,59 @@ KEYBOARD_DELTAS = {
     "J": ((0.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
     "L": ((0.0, 0.0, 0.0), (0.0, 0.0, -1.0)),
 }
+
+
+def target_arrow_specs(axis_length: float = DEFAULT_TARGET_AXIS_LENGTH, axis_radius: float = DEFAULT_TARGET_AXIS_RADIUS):
+    shaft_length = float(axis_length) * 0.72
+    head_length = float(axis_length) - shaft_length
+    shaft_center = shaft_length / 2.0
+    head_center = shaft_length + head_length / 2.0
+    head_radius = float(axis_radius) * 2.8
+    q_45 = math.sqrt(0.5)
+    axis_data = {
+        "x": {
+            "direction": (1.0, 0.0, 0.0),
+            "orientation": (q_45, 0.0, q_45, 0.0),
+            "color": (1.0, 0.05, 0.05),
+        },
+        "y": {
+            "direction": (0.0, 1.0, 0.0),
+            "orientation": (q_45, -q_45, 0.0, 0.0),
+            "color": (0.05, 0.75, 0.15),
+        },
+        "z": {
+            "direction": (0.0, 0.0, 1.0),
+            "orientation": (1.0, 0.0, 0.0, 0.0),
+            "color": (0.1, 0.35, 1.0),
+        },
+    }
+    specs = []
+    for axis in ("x", "y", "z"):
+        data = axis_data[axis]
+        direction = data["direction"]
+        specs.append(
+            {
+                "axis": axis,
+                "kind": "shaft",
+                "translation": tuple(component * shaft_center for component in direction),
+                "orientation": data["orientation"],
+                "color": data["color"],
+                "radius": float(axis_radius),
+                "height": shaft_length,
+            }
+        )
+        specs.append(
+            {
+                "axis": axis,
+                "kind": "head",
+                "translation": tuple(component * head_center for component in direction),
+                "orientation": data["orientation"],
+                "color": data["color"],
+                "radius": head_radius,
+                "height": head_length,
+            }
+        )
+    return specs
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -131,11 +180,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--render-hz", type=float, default=RENDER_FREQ, help="Isaac rendering frequency.")
     parser.add_argument(
         "--control-source",
-        choices=("rdk-cartesian", "studio-jog", "studio-ik", "studio-bridge"),
+        choices=("rdk-cartesian", "studio-ik", "studio-bridge"),
         default="rdk-cartesian",
         help=(
             "rdk-cartesian streams target TCP poses through flexivrdk and applies Studio target_drives; "
-            "studio-jog sends CartesianJogging commands to Elements Studio and applies Studio target_drives; "
             "studio-ik uses Studio CalReachability directly; studio-bridge only applies target_drives."
         ),
     )
@@ -146,12 +194,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=DEFAULT_STUDIO_IK_HZ,
         help="Studio IK query frequency. Increase only after checking gRPC latency.",
-    )
-    parser.add_argument(
-        "--studio-jog-hz",
-        type=float,
-        default=DEFAULT_STUDIO_JOG_HZ,
-        help="Studio CartesianJogging command frequency.",
     )
     parser.add_argument(
         "--rdk-target-hz",
@@ -173,34 +215,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rdk-clear-fault", action="store_true")
     parser.add_argument("--rdk-servo-on", action="store_true")
     parser.add_argument("--rdk-verbose", action="store_true")
-    parser.add_argument(
-        "--studio-jog-position-deadband",
-        type=float,
-        default=0.005,
-        help="Position error deadband in meters before sending a stop jog command.",
-    )
-    parser.add_argument(
-        "--studio-jog-max-step-size",
-        type=float,
-        default=0.01,
-        help="Maximum CartesianJogging step size in meters per command.",
-    )
-    parser.add_argument(
-        "--studio-jog-vel-scale",
-        type=float,
-        default=0.4,
-        help="CartesianJogging velocity scale sent to Elements Studio.",
-    )
-    parser.add_argument("--target-prim-path", default=DEFAULT_TARGET_PRIM_PATH, help="USD prim path for the ball target.")
-    parser.add_argument("--target-name", default=DEFAULT_TARGET_NAME, help="Scene object name for the ball target.")
-    parser.add_argument("--ball-radius", type=float, default=0.035, help="Visual ball radius in meters.")
+    parser.add_argument("--target-prim-path", default=DEFAULT_TARGET_PRIM_PATH, help="USD prim path for the XYZ target frame.")
+    parser.add_argument("--target-name", default=DEFAULT_TARGET_NAME, help="Scene object name for the XYZ target frame.")
+    parser.add_argument("--target-axis-length", type=float, default=DEFAULT_TARGET_AXIS_LENGTH, help="XYZ target frame axis length in meters.")
+    parser.add_argument("--target-axis-radius", type=float, default=DEFAULT_TARGET_AXIS_RADIUS, help="XYZ target frame axis radius in meters.")
     parser.add_argument(
         "--initial-q",
         type=float,
         nargs=7,
         default=None,
         metavar=("J1", "J2", "J3", "J4", "J5", "J6", "J7"),
-        help="Initial robot joint positions in radians. Defaults to Studio home for bridge/jog modes.",
+        help="Initial robot joint positions in radians. Defaults to Studio home for bridge mode.",
     )
     parser.add_argument("--position-step", type=float, default=0.01, help="Keyboard translation step in meters.")
     parser.add_argument("--rotation-step-deg", type=float, default=5.0, help="Keyboard rotation step in degrees.")
@@ -224,17 +249,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Require this many consecutive valid target_drives before entering effort control.",
     )
     parser.add_argument(
-        "--disable-simplugin-target-drives",
-        action="store_true",
-        help="In studio-jog mode, send Studio CartesianJogging only and skip applying SimPlugin target_drives to Isaac.",
-    )
-    parser.add_argument(
-        "--studio-jog-feedback-source",
-        choices=("isaac", "virtual"),
-        default="isaac",
-        help="Feedback pose for studio-jog error control. virtual integrates sent jog commands for Studio-only following.",
-    )
-    parser.add_argument(
         "--state-torque-log-hz",
         type=float,
         default=2.0,
@@ -252,7 +266,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--enable-quest-target-udp",
         action="store_true",
-        help="Listen for Quest target pose UDP packets and move the visual target ball.",
+        help="Listen for Quest target pose UDP packets and move the visual target frame.",
     )
     parser.add_argument(
         "--quest-target-udp-host",
@@ -315,7 +329,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs=3,
         default=DEFAULT_TARGET_POSITION,
         metavar=("X", "Y", "Z"),
-        help="Initial ball position in world frame.",
+        help="Initial target frame position in world frame.",
     )
     parser.add_argument(
         "--target-euler-deg",
@@ -329,7 +343,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--attach-target-to-ee-on-start",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Initialize the visual target ball at the current end-effector pose.",
+        help="Initialize the visual target frame at the current end-effector pose.",
     )
     args = parser.parse_args(argv)
     apply_param_overrides(args)
@@ -342,7 +356,6 @@ PARAM_OVERRIDE_KEYS = {
     "control_source",
     "physics_hz",
     "render_hz",
-    "studio_jog_hz",
     "rdk_target_hz",
     "rdk_network_interface_whitelist",
     "rdk_serial_number",
@@ -350,21 +363,18 @@ PARAM_OVERRIDE_KEYS = {
     "rdk_clear_fault",
     "rdk_servo_on",
     "rdk_verbose",
-    "studio_jog_position_deadband",
-    "studio_jog_max_step_size",
-    "studio_jog_vel_scale",
     "studio_grpc_address",
     "studio_grpc_timeout",
     "command_timeout_ms",
     "target_drive_warmup_cycles",
     "max_target_drive_norm",
     "target_drive_required_valid_cycles",
-    "disable_simplugin_target_drives",
-    "studio_jog_feedback_source",
     "state_torque_log_hz",
     "initial_q",
     "target_position",
     "target_euler_deg",
+    "target_axis_length",
+    "target_axis_radius",
     "attach_target_to_ee_on_start",
     "position_step",
     "rotation_step_deg",
@@ -408,7 +418,7 @@ def apply_param_overrides(args: argparse.Namespace) -> None:
 def initial_q_for_args(args: argparse.Namespace) -> list[float]:
     if args.initial_q is not None:
         return [float(value) for value in args.initial_q]
-    if args.control_source in {"studio-jog", "studio-bridge"}:
+    if args.control_source == "studio-bridge":
         return list(DEFAULT_STUDIO_INITIAL_Q)
     return list(DEFAULT_INITIAL_Q)
 
@@ -450,13 +460,13 @@ def apply_key_nudge(
     return TargetPose(position=position, euler_deg=euler)
 
 
-class KeyboardBallDriver:
-    def __init__(self, ball, initial_pose: TargetPose, position_step: float, rotation_step_deg: float) -> None:
+class KeyboardTargetDriver:
+    def __init__(self, target, initial_pose: TargetPose, position_step: float, rotation_step_deg: float) -> None:
         import carb.input
         import omni.appwindow
 
         self._carb_input = carb.input
-        self._ball = ball
+        self._target = target
         self._pose = initial_pose
         self._position_step = position_step
         self._rotation_step_deg = rotation_step_deg
@@ -472,7 +482,7 @@ class KeyboardBallDriver:
     def apply_pose(self) -> None:
         import numpy as np
 
-        self._ball.set_world_pose(
+        self._target.set_world_pose(
             position=np.array(self._pose.position),
             orientation=np.array(euler_xyz_deg_to_quat_wxyz(self._pose.euler_deg)),
         )
@@ -501,12 +511,39 @@ class KeyboardBallDriver:
         self._pose = next_pose
         self.apply_pose()
         print(
-            "[FlexivStudioBall] ball "
+            "[FlexivTargetFrame] target_frame "
             f"pos={tuple(round(v, 4) for v in self._pose.position)} "
             f"euler_deg={tuple(round(v, 1) for v in self._pose.euler_deg)}",
             flush=True,
         )
         return False
+
+
+def create_xyz_target_frame(world, *, prim_path: str, name: str, initial_pose: TargetPose, axis_length: float, axis_radius: float):
+    import numpy as np
+    from isaacsim.core.api.objects import VisualCone, VisualCylinder
+    from isaacsim.core.prims import SingleXFormPrim
+
+    target = world.scene.add(
+        SingleXFormPrim(
+            prim_path=prim_path,
+            name=name,
+            position=np.array(initial_pose.position),
+            orientation=np.array(euler_xyz_deg_to_quat_wxyz(initial_pose.euler_deg)),
+        )
+    )
+    for spec in target_arrow_specs(axis_length=axis_length, axis_radius=axis_radius):
+        prim_cls = VisualCylinder if spec["kind"] == "shaft" else VisualCone
+        prim_cls(
+            prim_path=f"{prim_path}/{spec['axis']}_{spec['kind']}",
+            name=f"{name}_{spec['axis']}_{spec['kind']}",
+            translation=np.array(spec["translation"]),
+            orientation=np.array(spec["orientation"]),
+            radius=float(spec["radius"]),
+            height=float(spec["height"]),
+            color=np.array(spec["color"]),
+        )
+    return target
 
 
 def _select_target(prim_path: str) -> None:
@@ -566,7 +603,6 @@ def run(args: argparse.Namespace) -> int:
     import numpy as np
     import omni.timeline
     from isaacsim.core.api import World
-    from isaacsim.core.api.objects import VisualSphere
     from isaacsim.core.utils.stage import add_reference_to_stage
     from isaacsim.core.utils.types import ArticulationAction
     from isaacsim.robot.manipulators.examples.flexiv import FlexivSerial
@@ -596,15 +632,13 @@ def run(args: argparse.Namespace) -> int:
     )
     initial_pose = configured_initial_target_pose(args)
     initial_q = initial_q_for_args(args)
-    ball = world.scene.add(
-        VisualSphere(
-            prim_path=args.target_prim_path,
-            name=args.target_name,
-            position=np.array(initial_pose.position),
-            orientation=np.array(euler_xyz_deg_to_quat_wxyz(initial_pose.euler_deg)),
-            radius=float(args.ball_radius),
-            color=np.array([0.0, 0.45, 1.0]),
-        )
+    target_frame = create_xyz_target_frame(
+        world,
+        prim_path=args.target_prim_path,
+        name=args.target_name,
+        initial_pose=initial_pose,
+        axis_length=float(args.target_axis_length),
+        axis_radius=float(args.target_axis_radius),
     )
 
     sim_node = flexivsimplugin.UserNode(args.serial_number)
@@ -612,11 +646,6 @@ def run(args: argparse.Namespace) -> int:
     studio_ik = (
         StudioReachabilityClient(args.studio_grpc_address, args.studio_grpc_timeout)
         if args.control_source == "studio-ik"
-        else None
-    )
-    studio_jog = (
-        StudioJoggingClient(args.studio_grpc_address, args.studio_grpc_timeout)
-        if args.control_source == "studio-jog"
         else None
     )
     target_pose_publisher = None if args.disable_target_pose_udp else TargetPoseUdpPublisher(
@@ -636,7 +665,7 @@ def run(args: argparse.Namespace) -> int:
     )
     if quest_target_receiver is not None:
         print(
-            "[FlexivStudioBall] Quest target UDP listening on "
+            "[FlexivTargetFrame] Quest target UDP listening on "
             f"{quest_target_receiver.address[0]}:{quest_target_receiver.address[1]}",
             flush=True,
         )
@@ -650,7 +679,7 @@ def run(args: argparse.Namespace) -> int:
     )
     if quest_coordinate_observer is not None:
         print(
-            "[FlexivStudioBall] Quest coordinate observation UDP publishing to "
+            "[FlexivTargetFrame] Quest coordinate observation UDP publishing to "
             f"{args.quest_coordinate_observe_udp_host}:{args.quest_coordinate_observe_udp_port}",
             flush=True,
         )
@@ -660,14 +689,12 @@ def run(args: argparse.Namespace) -> int:
         workspace_min=parse_float_list(args.quest_workspace_min, expected=3, name="quest_workspace_min"),
         workspace_max=parse_float_list(args.quest_workspace_max, expected=3, name="quest_workspace_max"),
     )
-    virtual_jog_feedback = VirtualJogFeedback()
     target_pose_publish_gate = TargetPosePublishGate.from_hz(
         float(args.target_pose_publish_hz),
         physics_freq=physics_hz,
     )
     rdk_target_gate = TargetPosePublishGate.from_hz(float(args.rdk_target_hz), physics_freq=physics_hz)
     studio_ik_gate = TargetPosePublishGate.from_hz(float(args.studio_ik_hz), physics_freq=physics_hz)
-    studio_jog_gate = TargetPosePublishGate.from_hz(float(args.studio_jog_hz), physics_freq=physics_hz)
     state_torque_log_gate = TargetPosePublishGate.from_hz(float(args.state_torque_log_hz), physics_freq=physics_hz)
     servo_cycle = 0
     last_connected = False
@@ -676,10 +703,8 @@ def run(args: argparse.Namespace) -> int:
     valid_target_drive_streak = 0
     last_studio_ik_q = None
     last_studio_ik_error_cycle = -10_000
-    last_studio_jog_error_cycle = -10_000
     last_invalid_target_drive_cycle = -10_000
     last_target_drive_log_cycle = -10_000
-    last_jog_command_log_cycle = -10_000
     last_quest_target_log_cycle = -10_000
     last_rdk_error_cycle = -10_000
     last_rdk_command_log_cycle = -10_000
@@ -690,8 +715,8 @@ def run(args: argparse.Namespace) -> int:
     def on_physics_step(_dt):
         nonlocal servo_cycle, last_connected, effort_control_enabled, target_drive_warmup_remaining
         nonlocal valid_target_drive_streak
-        nonlocal last_studio_ik_q, last_studio_ik_error_cycle, last_studio_jog_error_cycle
-        nonlocal last_invalid_target_drive_cycle, last_target_drive_log_cycle, last_jog_command_log_cycle
+        nonlocal last_studio_ik_q, last_studio_ik_error_cycle
+        nonlocal last_invalid_target_drive_cycle, last_target_drive_log_cycle
         nonlocal last_quest_target_log_cycle, last_rdk_error_cycle, last_rdk_command_log_cycle
         nonlocal latest_quest_target, rdk_runtime, rdk_runtime_target_active
         servo_cycle += 1
@@ -705,7 +730,7 @@ def run(args: argparse.Namespace) -> int:
                 if servo_cycle - last_quest_target_log_cycle >= int(physics_hz):
                     rounded_pose = tuple(round(value, 4) for value in quest_target.pose_base_tcp_des[:3])
                     print(
-                        "[FlexivStudioBall] "
+                        "[FlexivTargetFrame] "
                         f"direct_quest_target seq={quest_target.seq} side={quest_target.side} "
                         f"pose_xyz={rounded_pose}",
                         flush=True,
@@ -717,8 +742,7 @@ def run(args: argparse.Namespace) -> int:
             ):
                 latest_quest_target = None
                 quest_relative_mapper.reset()
-                virtual_jog_feedback.reset()
-        target_position, target_orientation = ball.get_world_pose()
+        target_position, target_orientation = target_frame.get_world_pose()
         pose_base_tcp_des = select_pose_base_tcp_des(
             quest_target=latest_quest_target,
             world_position=target_position,
@@ -727,8 +751,8 @@ def run(args: argparse.Namespace) -> int:
             base_orientation_wxyz=base_orientation,
         )
         if latest_quest_target is not None and args.quest_target_mode == "absolute":
-            synced_target_pose = sync_target_ball_to_base_tcp_pose(
-                ball,
+            synced_target_pose = sync_target_to_base_tcp_pose(
+                target_frame,
                 pose_base_tcp_des=pose_base_tcp_des,
                 base_position=base_position,
                 base_orientation_wxyz=base_orientation,
@@ -758,7 +782,7 @@ def run(args: argparse.Namespace) -> int:
                     )
                 except Exception as exc:
                     if servo_cycle - last_studio_ik_error_cycle >= int(physics_hz):
-                        print(f"[FlexivStudioBall] Studio IK failed: {exc}", flush=True)
+                        print(f"[FlexivTargetFrame] Studio IK failed: {exc}", flush=True)
                         last_studio_ik_error_cycle = servo_cycle
             if last_studio_ik_q is not None:
                 robot.apply_action(
@@ -789,8 +813,8 @@ def run(args: argparse.Namespace) -> int:
             control_pose_base_tcp = pose_base_tcp_des
             if latest_quest_target is not None and args.quest_target_mode == "relative":
                 control_pose_base_tcp = quest_relative_mapper.update(latest_quest_target, current_pose_base_tcp)
-                synced_target_pose = sync_target_ball_to_base_tcp_pose(
-                    ball,
+                synced_target_pose = sync_target_to_base_tcp_pose(
+                    target_frame,
                     pose_base_tcp_des=control_pose_base_tcp,
                     base_position=base_position,
                     base_orientation_wxyz=base_orientation,
@@ -825,10 +849,10 @@ def run(args: argparse.Namespace) -> int:
                                 servo_on=bool(args.rdk_servo_on),
                                 verbose=bool(args.rdk_verbose),
                             ),
-                            log=lambda message: print(f"[FlexivStudioBall] {message}", flush=True),
+                            log=lambda message: print(f"[FlexivTargetFrame] {message}", flush=True),
                         )
                         rdk_runtime.connect()
-                        print(f"[FlexivStudioBall] RDK connected {rdk_serial_number}", flush=True)
+                        print(f"[FlexivTargetFrame] RDK connected {rdk_serial_number}", flush=True)
                     rdk_runtime.send_pose(control_pose_base_tcp)
                     rdk_runtime_target_active = True
                     rdk_log_period_cycles = (
@@ -838,7 +862,7 @@ def run(args: argparse.Namespace) -> int:
                     )
                     if rdk_log_period_cycles > 0 and servo_cycle - last_rdk_command_log_cycle >= rdk_log_period_cycles:
                         print(
-                            "[FlexivStudioBall] rdk_target "
+                            "[FlexivTargetFrame] rdk_target "
                             f"cycle={servo_cycle} "
                             f"pose={_format_float_list(control_pose_base_tcp)}",
                             flush=True,
@@ -848,12 +872,12 @@ def run(args: argparse.Namespace) -> int:
                     rdk_runtime = None
                     rdk_runtime_target_active = False
                     if servo_cycle - last_rdk_error_cycle >= int(physics_hz):
-                        print(f"[FlexivStudioBall] RDK Cartesian streaming failed: {exc}", flush=True)
+                        print(f"[FlexivTargetFrame] RDK Cartesian streaming failed: {exc}", flush=True)
                         last_rdk_error_cycle = servo_cycle
 
             if connected and not last_connected:
                 print(
-                    f"[FlexivStudioBall] SimPlugin connected {args.serial_number}; "
+                    f"[FlexivTargetFrame] SimPlugin connected {args.serial_number}; "
                     f"warming up {max(0, int(args.target_drive_warmup_cycles))} cycles",
                     flush=True,
                 )
@@ -863,18 +887,8 @@ def run(args: argparse.Namespace) -> int:
                 robot.switch_control_mode("position")
                 robot.teleport_to(robot.q)
 
-            if args.disable_simplugin_target_drives:
-                if effort_control_enabled:
-                    robot.switch_control_mode("position")
-                    robot.teleport_to(robot.q)
-                    effort_control_enabled = False
-                valid_target_drive_streak = 0
-                last_connected = connected
-                return
-
             if should_poll_simplugin_target_drives(
                 connected=connected,
-                disable_simplugin_target_drives=bool(args.disable_simplugin_target_drives),
                 runtime_target_active=rdk_runtime_target_active,
             ):
                 if sim_node.WaitForRobotCommands(max(0, int(args.command_timeout_ms))):
@@ -894,7 +908,7 @@ def run(args: argparse.Namespace) -> int:
                         valid_target_drive_streak = 0
                         if servo_cycle - last_invalid_target_drive_cycle >= int(physics_hz):
                             print(
-                                f"[FlexivStudioBall] rejected target_drives norm={torque_norm:.3g}; "
+                                f"[FlexivTargetFrame] rejected target_drives norm={torque_norm:.3g}; "
                                 "waiting for Studio/SimPlugin to settle",
                                 flush=True,
                             )
@@ -923,7 +937,7 @@ def run(args: argparse.Namespace) -> int:
                         )
                     robot.apply_torques(target_drives)
                     if servo_cycle - last_target_drive_log_cycle >= int(physics_hz):
-                        print(f"[FlexivStudioBall] target_drives norm={torque_norm:.3f}", flush=True)
+                        print(f"[FlexivTargetFrame] target_drives norm={torque_norm:.3f}", flush=True)
                         last_target_drive_log_cycle = servo_cycle
                 last_connected = True
             else:
@@ -936,187 +950,7 @@ def run(args: argparse.Namespace) -> int:
                     last_connected = True
                     return
                 if last_connected:
-                    print(f"[FlexivStudioBall] SimPlugin disconnected {args.serial_number}", flush=True)
-                    robot.switch_control_mode("position")
-                    robot.teleport_to(robot.q)
-                effort_control_enabled = False
-                valid_target_drive_streak = 0
-                last_connected = False
-            return
-
-        if args.control_source == "studio-jog":
-            if not _is_robot_ready(robot):
-                last_connected = False
-                effort_control_enabled = False
-                return
-            connected = sim_node.connected()
-            quest_target_active = target_pose_control_is_active(
-                quest_target_receiver_enabled=quest_target_receiver is not None,
-                latest_quest_target=latest_quest_target,
-            )
-            current_pose_base_tcp = None
-            tcp_position, tcp_orientation = robot.end_effector.get_world_pose()
-            measured_pose_base_tcp = world_target_to_flexiv_pose(
-                world_position=tcp_position,
-                world_orientation_wxyz=tcp_orientation,
-                base_position=base_position,
-                base_orientation_wxyz=base_orientation,
-            )
-            current_pose_base_tcp = (
-                virtual_jog_feedback.current_pose(measured_pose_base_tcp)
-                if args.studio_jog_feedback_source == "virtual"
-                else measured_pose_base_tcp
-            )
-            control_pose_base_tcp = pose_base_tcp_des
-            if latest_quest_target is not None and args.quest_target_mode == "relative":
-                control_pose_base_tcp = quest_relative_mapper.update(latest_quest_target, current_pose_base_tcp)
-            if latest_quest_target is not None and args.quest_target_mode == "relative":
-                synced_target_pose = sync_target_ball_to_base_tcp_pose(
-                    ball,
-                    pose_base_tcp_des=control_pose_base_tcp,
-                    base_position=base_position,
-                    base_orientation_wxyz=base_orientation,
-                )
-                if keyboard is not None:
-                    keyboard.update_pose_reference(synced_target_pose)
-            if quest_coordinate_observer is not None and target_pose_publish_gate.should_publish(servo_cycle):
-                quest_coordinate_observer.publish(
-                    build_coordinate_observation_packet(
-                        serial_number=args.serial_number,
-                        joint_group=args.joint_group,
-                        servo_cycle=servo_cycle,
-                        quest_target=latest_quest_target,
-                        active=quest_target_active,
-                        current_pose_base_tcp=current_pose_base_tcp,
-                        target_pose_base_tcp=control_pose_base_tcp if quest_target_active else None,
-                        monotonic_time=time.monotonic(),
-                    )
-                )
-            if connected and not last_connected:
-                print(
-                    f"[FlexivStudioBall] SimPlugin connected {args.serial_number}; "
-                    f"warming up {max(0, int(args.target_drive_warmup_cycles))} cycles",
-                    flush=True,
-                )
-                target_drive_warmup_remaining = max(0, int(args.target_drive_warmup_cycles))
-                effort_control_enabled = False
-                valid_target_drive_streak = 0
-                robot.switch_control_mode("position")
-                robot.teleport_to(robot.q)
-
-            if not quest_target_active:
-                virtual_jog_feedback.reset()
-                if studio_jog is not None and studio_jog_gate.should_publish(servo_cycle):
-                    try:
-                        studio_jog.stop()
-                    except Exception as exc:
-                        if servo_cycle - last_studio_jog_error_cycle >= int(physics_hz):
-                            print(f"[FlexivStudioBall] Studio jogging failed: {exc}", flush=True)
-                            last_studio_jog_error_cycle = servo_cycle
-
-            can_jog = bool(args.disable_simplugin_target_drives) or (
-                connected and target_drive_warmup_remaining <= 0
-            )
-            if quest_target_active and studio_jog is not None and studio_jog_gate.should_publish(servo_cycle):
-                try:
-                    command, pose_error_base_tcp = select_cart_jog_command(
-                        control_pose_base_tcp=control_pose_base_tcp,
-                        current_pose_base_tcp=current_pose_base_tcp,
-                        can_jog=can_jog,
-                        position_deadband=float(args.studio_jog_position_deadband),
-                        max_step_size=float(args.studio_jog_max_step_size),
-                        vel_scale=float(args.studio_jog_vel_scale),
-                    )
-                    jog_log_period_cycles = (
-                        int(physics_hz / float(args.state_torque_log_hz))
-                        if float(args.state_torque_log_hz) > 0.0
-                        else 0
-                    )
-                    if jog_log_period_cycles > 0 and servo_cycle - last_jog_command_log_cycle >= jog_log_period_cycles:
-                        print(
-                            format_jog_command_telemetry(
-                                servo_cycle=servo_cycle,
-                                command=command,
-                                pose_error_base_tcp=pose_error_base_tcp,
-                                can_jog=can_jog,
-                            ),
-                            flush=True,
-                        )
-                        last_jog_command_log_cycle = servo_cycle
-                    studio_jog.send(command)
-                    if args.studio_jog_feedback_source == "virtual":
-                        virtual_jog_feedback.advance(command)
-                except Exception as exc:
-                    if servo_cycle - last_studio_jog_error_cycle >= int(physics_hz):
-                        print(f"[FlexivStudioBall] Studio jogging failed: {exc}", flush=True)
-                        last_studio_jog_error_cycle = servo_cycle
-
-            if args.disable_simplugin_target_drives:
-                if effort_control_enabled:
-                    robot.switch_control_mode("position")
-                    robot.teleport_to(robot.q)
-                    effort_control_enabled = False
-                valid_target_drive_streak = 0
-                last_connected = connected
-                return
-
-            if should_poll_simplugin_target_drives(
-                connected=connected,
-                disable_simplugin_target_drives=bool(args.disable_simplugin_target_drives),
-                runtime_target_active=quest_target_active,
-            ):
-                if sim_node.WaitForRobotCommands(max(0, int(args.command_timeout_ms))):
-                    if target_drive_warmup_remaining > 0:
-                        target_drive_warmup_remaining -= 1
-                        last_connected = True
-                        return
-                    target_drives, torque_norm = valid_target_drives_or_none(
-                        sim_node.robot_commands().target_drives,
-                        max_norm=float(args.max_target_drive_norm),
-                    )
-                    if target_drives is None:
-                        if effort_control_enabled:
-                            robot.switch_control_mode("position")
-                            robot.teleport_to(robot.q)
-                            effort_control_enabled = False
-                        valid_target_drive_streak = 0
-                        if servo_cycle - last_invalid_target_drive_cycle >= int(physics_hz):
-                            print(
-                                f"[FlexivStudioBall] rejected target_drives norm={torque_norm:.3g}; "
-                                "waiting for Studio/SimPlugin to settle",
-                                flush=True,
-                            )
-                            last_invalid_target_drive_cycle = servo_cycle
-                        last_connected = True
-                        return
-                    valid_target_drive_streak += 1
-                    if valid_target_drive_streak < max(1, int(args.target_drive_required_valid_cycles)):
-                        last_connected = True
-                        return
-                    if not effort_control_enabled:
-                        robot.switch_control_mode("effort")
-                        effort_control_enabled = True
-                    if state_torque_log_gate.should_publish(servo_cycle):
-                        print(
-                            format_state_torque_telemetry(
-                                servo_cycle=servo_cycle,
-                                q=robot.q,
-                                dq=robot.dq,
-                                target_drives=target_drives,
-                                torque_norm=torque_norm,
-                                current_pose_base_tcp=current_pose_base_tcp,
-                                control_pose_base_tcp=control_pose_base_tcp,
-                            ),
-                            flush=True,
-                        )
-                    robot.apply_torques(target_drives)
-                    if servo_cycle - last_target_drive_log_cycle >= int(physics_hz):
-                        print(f"[FlexivStudioBall] target_drives norm={torque_norm:.3f}", flush=True)
-                        last_target_drive_log_cycle = servo_cycle
-                last_connected = True
-            else:
-                if last_connected:
-                    print(f"[FlexivStudioBall] SimPlugin disconnected {args.serial_number}", flush=True)
+                    print(f"[FlexivTargetFrame] SimPlugin disconnected {args.serial_number}", flush=True)
                     robot.switch_control_mode("position")
                     robot.teleport_to(robot.q)
                 effort_control_enabled = False
@@ -1131,7 +965,7 @@ def run(args: argparse.Namespace) -> int:
                 return
             if not last_connected:
                 print(
-                    f"[FlexivStudioBall] SimPlugin connected {args.serial_number}; "
+                    f"[FlexivTargetFrame] SimPlugin connected {args.serial_number}; "
                     f"warming up {max(0, int(args.target_drive_warmup_cycles))} cycles",
                     flush=True,
                 )
@@ -1157,7 +991,7 @@ def run(args: argparse.Namespace) -> int:
                     valid_target_drive_streak = 0
                     if servo_cycle - last_invalid_target_drive_cycle >= int(physics_hz):
                         print(
-                            f"[FlexivStudioBall] rejected target_drives norm={torque_norm:.3g}; "
+                            f"[FlexivTargetFrame] rejected target_drives norm={torque_norm:.3g}; "
                             "waiting for Studio/SimPlugin to settle",
                             flush=True,
                         )
@@ -1175,7 +1009,7 @@ def run(args: argparse.Namespace) -> int:
             last_connected = True
         else:
             if last_connected:
-                print(f"[FlexivStudioBall] SimPlugin disconnected {args.serial_number}", flush=True)
+                print(f"[FlexivTargetFrame] SimPlugin disconnected {args.serial_number}", flush=True)
                 robot.switch_control_mode("position")
                 robot.teleport_to(robot.q)
             effort_control_enabled = False
@@ -1191,26 +1025,26 @@ def run(args: argparse.Namespace) -> int:
                 end_effector_position=ee_position,
                 end_effector_orientation_wxyz=ee_orientation,
             )
-            ball.set_world_pose(
+            target_frame.set_world_pose(
                 position=np.array(initial_pose.position),
                 orientation=np.array(ee_orientation),
             )
         else:
             initial_pose = configured_initial_target_pose(args)
-            ball.set_world_pose(
+            target_frame.set_world_pose(
                 position=np.array(initial_pose.position),
                 orientation=np.array(euler_xyz_deg_to_quat_wxyz(initial_pose.euler_deg)),
             )
         return initial_pose
 
-    world.add_physics_callback("studio_ball_step", callback_fn=on_physics_step)
+    world.add_physics_callback("target_frame_step", callback_fn=on_physics_step)
     world.reset()
     robot.teleport_to(initial_q)
     robot.switch_control_mode("position")
     reset_target_to_start_pose()
     if not args.smoke_test:
-        keyboard = KeyboardBallDriver(
-            ball,
+        keyboard = KeyboardTargetDriver(
+            target_frame,
             initial_pose,
             position_step=args.position_step,
             rotation_step_deg=args.rotation_step_deg,
@@ -1221,8 +1055,8 @@ def run(args: argparse.Namespace) -> int:
         omni.timeline.get_timeline_interface().play()
 
     print(
-        f"[FlexivStudioBall] Ready. control_source={args.control_source}. "
-        f"physics_hz={physics_hz:g}. Drag /World/TargetBall as the visual task target.",
+        f"[FlexivTargetFrame] Ready. control_source={args.control_source}. "
+        f"physics_hz={physics_hz:g}. Drag {args.target_prim_path} as the visual task target.",
         flush=True,
     )
 
@@ -1251,7 +1085,7 @@ def run(args: argparse.Namespace) -> int:
             rate_limiter.sleep()
     finally:
         try:
-            world.remove_physics_callback("studio_ball_step")
+            world.remove_physics_callback("target_frame_step")
         except Exception:
             pass
         if keyboard is not None:
@@ -1264,14 +1098,8 @@ def run(args: argparse.Namespace) -> int:
             quest_target_receiver.close()
         if studio_ik is not None:
             studio_ik.close()
-        if studio_jog is not None:
-            try:
-                studio_jog.stop()
-            except Exception:
-                pass
-            studio_jog.close()
         if args.smoke_test:
-            print("FLEXIV_STUDIO_BALL_SMOKE_TEST_OK", flush=True)
+            print("FLEXIV_TARGET_FRAME_SMOKE_TEST_OK", flush=True)
         simulation_app.close()
     return 0
 

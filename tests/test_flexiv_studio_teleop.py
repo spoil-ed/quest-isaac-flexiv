@@ -142,6 +142,27 @@ class FlexivStudioTeleopTests(unittest.TestCase):
             (world_position, world_orientation),
         )
 
+    def test_follow_target_default_visual_is_xyz_frame(self):
+        mod = load_follow_ball()
+
+        self.assertEqual(mod.DEFAULT_TARGET_PRIM_PATH, "/World/TargetFrame")
+        self.assertEqual(mod.DEFAULT_TARGET_NAME, "target_frame")
+        self.assertIn("target_axis_length", mod.PARAM_OVERRIDE_KEYS)
+        self.assertNotIn("ball_radius", mod.PARAM_OVERRIDE_KEYS)
+
+    def test_follow_target_arrow_specs_describe_xyz_axes(self):
+        mod = load_follow_ball()
+
+        specs = mod.target_arrow_specs(axis_length=0.12, axis_radius=0.005)
+
+        self.assertEqual([spec["axis"] for spec in specs], ["x", "x", "y", "y", "z", "z"])
+        self.assertEqual([spec["kind"] for spec in specs], ["shaft", "head", "shaft", "head", "shaft", "head"])
+        self.assertEqual(specs[0]["color"], (1.0, 0.05, 0.05))
+        self.assertEqual(specs[2]["color"], (0.05, 0.75, 0.15))
+        self.assertEqual(specs[4]["color"], (0.1, 0.35, 1.0))
+        self.assertEqual(specs[0]["translation"], (0.043199999999999995, 0.0, 0.0))
+        self.assertEqual(specs[4]["translation"], (0.0, 0.0, 0.043199999999999995))
+
     def test_follow_ball_rejects_wrong_quest_target_serial(self):
         mod = load_follow_ball()
         packet = {
@@ -238,33 +259,6 @@ class FlexivStudioTeleopTests(unittest.TestCase):
         self.assertTrue(mod.quest_target_is_fresh(quest_target, now=10.2, max_age_sec=0.5))
         self.assertFalse(mod.quest_target_is_fresh(quest_target, now=10.7, max_age_sec=0.5))
         self.assertFalse(mod.quest_target_is_fresh(None, now=10.2, max_age_sec=0.5))
-
-    def test_follow_ball_negative_jog_direction_uses_studio_direction_two(self):
-        mod = load_follow_ball()
-
-        command = mod.pose_error_to_cart_jog_cmd(
-            [-0.05, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-            position_deadband=0.001,
-            max_step_size=0.01,
-            vel_scale=0.4,
-        )
-
-        self.assertEqual(command.jog_index, 0)
-        self.assertEqual(command.jog_dir, 2)
-        self.assertEqual(command.step_size, 0.01)
-
-    def test_follow_ball_virtual_jog_feedback_advances_pose_from_sent_commands(self):
-        mod = load_follow_ball()
-        feedback = mod.VirtualJogFeedback()
-        measured_pose = [0.1, -0.2, 0.3, 1.0, 0.0, 0.0, 0.0]
-
-        self.assertEqual(feedback.current_pose(measured_pose), measured_pose)
-        feedback.advance(mod.CartJogCommand(jog_index=0, jog_dir=1, step_size=0.01, jog_axis_type=0, vel_scale=0.1))
-        feedback.advance(mod.CartJogCommand(jog_index=2, jog_dir=2, step_size=0.02, jog_axis_type=0, vel_scale=0.1))
-
-        self.assertEqual(feedback.current_pose(measured_pose), [0.11, -0.2, 0.27999999999999997, 1.0, 0.0, 0.0, 0.0])
-        feedback.reset()
-        self.assertEqual(feedback.current_pose([0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0]), [0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0])
 
     def test_follow_ball_coordinate_observation_packet_contains_error(self):
         mod = load_follow_ball()

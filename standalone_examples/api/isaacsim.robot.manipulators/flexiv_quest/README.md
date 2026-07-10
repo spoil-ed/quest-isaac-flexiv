@@ -5,9 +5,8 @@ Isaac Sim Flexiv examples.
 
 Maintained files:
 
-- `follow_ball_with_studio.py`: Isaac visual target ball plus Elements Studio
-  jogging and SimPlugin torque bridge.
-- `flexiv_isaac_bridge_app.py`: editable bridge app for the new workflow.
+- `follow_ball_with_studio.py`: Isaac visual XYZ target frame plus the documented
+  Flexiv SimPlugin torque bridge.
 - `app_config.yaml`: single-arm Rizon4 bridge configuration used by local
   experiments.
 
@@ -17,8 +16,8 @@ Runtime entry points live in the repository `scripts/` directory:
 scripts/start_elements_studio_ui.py
 scripts/start_robot_control_app.py
 scripts/start_flexiv_simulation.py
-scripts/start_flexiv_bridge.py
 scripts/start_isaac_follow.py
+scripts/start_rdk_target_streamer.py
 scripts/flexiv_stack_status.py
 scripts/stop_flexiv_stack.py
 ```

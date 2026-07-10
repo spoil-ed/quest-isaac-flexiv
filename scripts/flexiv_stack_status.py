@@ -18,12 +18,15 @@ PROCESS_LABELS = {
     "RobotControlApp": "ROBOT_CONTROL_APP",
     "FlexivSimulation": "FLEXIV_SIMULATION",
     "follow_ball_with_studio.py": "ISAAC_FOLLOW",
+    "rdk_target_streamer.py": "RDK_TARGET_STREAMER",
 }
 
 
 def matching_processes() -> list[tuple[str, int, str]]:
     rows = []
     for pid, command in flexiv_runtime.pgrep_commands():
+        if command.startswith("/bin/bash -lc") or "pgrep -af" in command:
+            continue
         for needle, label in PROCESS_LABELS.items():
             if needle in command:
                 rows.append((label, pid, command))

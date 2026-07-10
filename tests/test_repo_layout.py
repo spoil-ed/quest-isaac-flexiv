@@ -50,12 +50,12 @@ class RepoLayoutTests(unittest.TestCase):
             "flexiv_runtime.py",
             "flexiv_stack_status.py",
             "flexiv_studio_teleop.py",
-            "install_studio_ball_jog_project.py",
+            "rdk_target_streamer.py",
             "start_elements_studio_ui.py",
             "start_robot_control_app.py",
             "start_flexiv_simulation.py",
             "start_isaac_follow.py",
-            "studio_plan_control.py",
+            "start_rdk_target_streamer.py",
             "stop_flexiv_stack.py",
             "teleop_sdg.py",
         }
@@ -66,23 +66,47 @@ class RepoLayoutTests(unittest.TestCase):
         command = follow.build_command(args)
 
         self.assertIn("flexiv_quest/follow_ball_with_studio.py", str(command[1]))
-        self.assertIn("rdk-cartesian", command)
+        self.assertIn("studio-bridge", command)
+        self.assertNotIn("rdk-cartesian", command)
+        self.assertNotIn("--disable-target-pose-udp", command)
         self.assertNotIn("flexiv_test", " ".join(command))
 
-    def test_isaac_follow_startup_prepends_compatible_rdk_client(self):
-        follow = load_script("start_isaac_follow.py")
+    def test_external_rdk_target_streamer_uses_compatible_rdk_client(self):
+        streamer = load_script("start_rdk_target_streamer.py")
         compat_path = ROOT
-        follow.RDK_COMPAT_PATH = compat_path
+        streamer.RDK_COMPAT_PATH = compat_path
 
-        env = follow.build_env({"PYTHONPATH": "existing"})
+        env = streamer.build_env({"PYTHONPATH": "existing"})
+        command = streamer.build_command(streamer.parse_args([]))
 
         self.assertEqual(env["PYTHONPATH"].split(":")[:2], [str(compat_path), "existing"])
+        self.assertIn("rdk_target_streamer.py", command[1])
+        self.assertNotIn("--network-interface-whitelist", command)
+
+    def test_isaac_follow_startup_does_not_embed_rdk_client(self):
+        follow = load_script("start_isaac_follow.py")
+        command = follow.build_command(follow.parse_args([]))
+
+        self.assertFalse(hasattr(follow, "build_env"))
+        self.assertNotIn("--rdk-target-hz", command)
 
     def test_scripts_do_not_reference_removed_flexiv_test_path(self):
         offenders = []
         for path in SCRIPTS.glob("*.py"):
             if "flexiv_test" in path.read_text(encoding="utf-8"):
                 offenders.append(path.name)
+
+        self.assertEqual(offenders, [])
+
+    def test_maintained_code_does_not_use_studio_jogging(self):
+        offenders = []
+        search_roots = [SCRIPTS, ROOT / "standalone_examples" / "api" / "isaacsim.robot.manipulators"]
+        banned = ("studio-jog", "StudioJogging", "CartJog", "CartesianJogging", "SetCartJoggingCmd")
+        for root in search_roots:
+            for path in root.rglob("*.py"):
+                text = path.read_text(encoding="utf-8")
+                if any(term in text for term in banned):
+                    offenders.append(str(path.relative_to(ROOT)))
 
         self.assertEqual(offenders, [])
 

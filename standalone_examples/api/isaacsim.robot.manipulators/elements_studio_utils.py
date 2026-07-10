@@ -16,15 +16,6 @@ from typing import Iterable, NamedTuple
 
 
 STUDIO_CAL_REACHABILITY_METHOD = "/proto.robot.motion.MotionService/CalReachability"
-STUDIO_SET_CART_JOGGING_CMD_METHOD = "/proto.robot.motion.MotionService/SetCartJoggingCmd"
-
-
-class CartJogCommand(NamedTuple):
-    jog_index: int
-    jog_dir: int
-    step_size: float
-    jog_axis_type: int
-    vel_scale: float
 
 
 @dataclass(frozen=True)
@@ -239,35 +230,6 @@ def parse_cal_reachability_response(response: bytes) -> list[float]:
     return solved
 
 
-def encode_set_cart_jogging_cmd_request(
-    *,
-    coord_type: int,
-    coord_name: str,
-    jog_index: int,
-    jog_dir: int,
-    step_size: float,
-    jog_axis_type: int,
-    vel_scale: float,
-) -> bytes:
-    jog_cmd = b"".join(
-        (
-            encode_int32(1, int(jog_index)),
-            encode_int32(2, int(jog_dir)),
-            encode_double(3, float(step_size)),
-            encode_int32(4, int(jog_axis_type)),
-            encode_double(5, float(vel_scale)),
-        )
-    )
-    cart_jogging_cmd = b"".join(
-        (
-            encode_int32(1, int(coord_type)),
-            encode_length_delimited(2, str(coord_name).encode("utf-8")),
-            encode_length_delimited(3, jog_cmd),
-        )
-    )
-    return encode_length_delimited(1, cart_jogging_cmd)
-
-
 def grpc_dependency_path() -> Path:
     return Path(__file__).absolute().parents[3] / ".deps" / "grpc"
 
@@ -311,41 +273,6 @@ class StudioReachabilityClient:
             target_pose=studio_target_pose_from_rdk_pose(pose_d),
             seed_jnt_pos=joint_positions_rad_to_studio_seed(seed_jnt_pos_rad),
         )
-
-    def close(self) -> None:
-        self._channel.close()
-
-
-class StudioJoggingClient:
-    def __init__(self, address: str, timeout: float, *, coord_type: int = 0, coord_name: str = "WORLD") -> None:
-        try:
-            grpc = import_grpc_module()
-        except ImportError as exc:
-            raise RuntimeError("Studio jogging requires grpcio in this Python environment") from exc
-        self._timeout = float(timeout)
-        self._coord_type = int(coord_type)
-        self._coord_name = str(coord_name)
-        self._channel = grpc.insecure_channel(address)
-        self._call = self._channel.unary_unary(
-            STUDIO_SET_CART_JOGGING_CMD_METHOD,
-            request_serializer=lambda value: value,
-            response_deserializer=lambda value: value,
-        )
-
-    def send(self, command: CartJogCommand) -> bytes:
-        request = encode_set_cart_jogging_cmd_request(
-            coord_type=self._coord_type,
-            coord_name=self._coord_name,
-            jog_index=command.jog_index,
-            jog_dir=command.jog_dir,
-            step_size=command.step_size,
-            jog_axis_type=command.jog_axis_type,
-            vel_scale=command.vel_scale,
-        )
-        return self._call(request, timeout=self._timeout)
-
-    def stop(self) -> bytes:
-        return self.send(CartJogCommand(jog_index=0, jog_dir=0, step_size=0.0, jog_axis_type=0, vel_scale=0.0))
 
     def close(self) -> None:
         self._channel.close()
@@ -461,10 +388,7 @@ def connect_rdk_cartesian_streamer(
             logger(f"[FlexivRDK] enabling {serial_number}")
             robot.Enable()
         if not robot.operational():
-            raise RuntimeError(
-                f"{serial_number} is not operational after Enable(). Connect the simulated robot in Elements Studio "
-                "and check the RDK serial/discovery settings."
-            )
+            logger(f"[FlexivRDK] {serial_number} is not operational immediately after Enable(); continuing to SwitchMode")
     mode = rdk_cartesian_mode(flexivrdk)
     if bool(switch_mode) and robot.mode() != mode:
         logger(f"[FlexivRDK] switching {serial_number} to Cartesian motion force")
