@@ -23,7 +23,7 @@ DEFAULT_HOST_IP = "192.168.32.10"
 DEFAULT_UDP_HOST = "127.0.0.1"
 DEFAULT_UDP_PORT = 45679
 DEFAULT_TCP_ROT_OFFSET_WXYZ = (0.70710678, 0.0, 0.0, 0.70710678)
-DEFAULT_AXIS_MAP = "-z,x,-y"
+DEFAULT_AXIS_MAP = "-z,-x,y"
 
 
 def _as_float_list(values: Iterable[float], expected_len: int, name: str) -> list[float]:
