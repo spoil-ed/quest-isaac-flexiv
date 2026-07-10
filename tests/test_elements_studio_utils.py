@@ -164,10 +164,10 @@ class ElementsStudioUtilsTests(unittest.TestCase):
                     [0.4, -0.1, 0.6, 1.0, 0.0, 0.0, 0.0],
                     [0.0] * 6,
                     [0.0] * 6,
+                    1.5,
                     3.0,
-                    6.0,
+                    5.0,
                     10.0,
-                    20.0,
                 )
             ],
         )
