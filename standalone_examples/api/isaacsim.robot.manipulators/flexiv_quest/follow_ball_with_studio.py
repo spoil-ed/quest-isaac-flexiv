@@ -76,7 +76,7 @@ DEFAULT_TARGET_POSE_UDP_PORT = 45678
 DEFAULT_QUEST_TARGET_UDP_HOST = "127.0.0.1"
 DEFAULT_QUEST_TARGET_UDP_PORT = 45679
 DEFAULT_QUEST_COORD_OBSERVE_UDP_PORT = 45680
-DEFAULT_QUEST_AXIS_MAP = "-z,-x,y"
+DEFAULT_QUEST_AXIS_MAP = "-z,x,-y"
 DEFAULT_QUEST_WORKSPACE_MIN = (0.15, -0.70, 0.20)
 DEFAULT_QUEST_WORKSPACE_MAX = (1.00, 0.70, 1.35)
 DEFAULT_STUDIO_GRPC_ADDRESS = "127.0.0.1:18001"
@@ -306,7 +306,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--quest-axis-map",
         default=DEFAULT_QUEST_AXIS_MAP,
-        help="Relative mode axis map from OpenXR delta to Rizon4 base xyz, e.g. '-z,-x,y'.",
+        help="Relative mode axis map from OpenXR delta to Rizon4 base xyz, e.g. '-z,x,-y'.",
     )
     parser.add_argument(
         "--quest-position-scale",

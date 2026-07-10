@@ -90,8 +90,8 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         up = mapper.update(_pose(0.0, 0.2, 0.0), enabled=True, seq=4, now=10.3)
 
         self.assertEqual(forward["controller_delta_base"], [0.2, 0.0, 0.0])
-        self.assertEqual(left["controller_delta_base"], [0.0, 0.2, 0.0])
-        self.assertEqual(up["controller_delta_base"], [0.0, 0.0, 0.2])
+        self.assertEqual(left["controller_delta_base"], [0.0, -0.2, 0.0])
+        self.assertEqual(up["controller_delta_base"], [0.0, 0.0, -0.2])
 
     def test_mapper_holds_zero_during_engage_settle_window(self):
         mapper = mod.QuestRelativeMapper(position_delta_scale=3.0, engage_settle_sec=0.15)
@@ -110,7 +110,7 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
 
         packet = mapper.update(_rot_z_90_pose(), enabled=True, seq=1, now=10.0)
 
-        expected = [round(math.sqrt(0.5), 4), 0.0, -round(math.sqrt(0.5), 4), 0.0]
+        expected = [0.0, -round(math.sqrt(0.5), 4), 0.0, round(math.sqrt(0.5), 4)]
         actual = [round(value, 4) for value in packet["pose_base_tcp_des"][3:]]
         self.assertEqual(actual, expected)
 
@@ -124,6 +124,11 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
 
         controller_forward_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [0.0, 0.0, -1.0])
         self.assertEqual([round(value, 4) for value in controller_forward_in_base], [1.0, 0.0, 0.0])
+
+        controller_left_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [-1.0, 0.0, 0.0])
+        controller_up_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [0.0, 1.0, 0.0])
+        self.assertEqual([round(value, 4) for value in controller_left_in_base], [0.0, -1.0, 0.0])
+        self.assertEqual([round(value, 4) for value in controller_up_in_base], [0.0, 0.0, -1.0])
 
     def test_default_orientation_maps_controller_x_to_negative_tcp_z_direction(self):
         mapper = mod.QuestRelativeMapper(engage_settle_sec=0.0)

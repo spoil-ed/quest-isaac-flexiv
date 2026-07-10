@@ -60,7 +60,7 @@ python scripts/rizon4_quest_target_publisher.py \
   --udp-port 45679 \
   --side right \
   --enable-button squeeze \
-  --axis-map -z,-x,y \
+  --axis-map=-z,x,-y \
   --position-delta-scale 3.0 \
   --position-deadband 0.05 \
   --engage-settle-sec 0.25 \
