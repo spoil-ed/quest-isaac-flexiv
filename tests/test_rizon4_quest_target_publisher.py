@@ -40,7 +40,7 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertEqual(packet["reason"], "tracking")
 
     def test_mapper_scales_relative_delta_while_enabled(self):
-        mapper = mod.QuestRelativeMapper(position_delta_scale=3.0)
+        mapper = mod.QuestRelativeMapper(position_delta_scale=3.0, engage_settle_sec=0.0)
         mapper.update(_pose(0.2, -0.1, 0.4), enabled=True, seq=1, now=10.0)
 
         packet = mapper.update(_pose(0.21, -0.12, 0.45), enabled=True, seq=2, now=10.1)
@@ -53,6 +53,28 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
             [round(value, 4) for value in packet["controller_delta_base"]],
             [0.03, -0.06, 0.15],
         )
+
+    def test_mapper_holds_zero_during_engage_settle_window(self):
+        mapper = mod.QuestRelativeMapper(position_delta_scale=3.0, engage_settle_sec=0.15)
+        mapper.update(_pose(0.2, -0.1, 0.4), enabled=True, seq=1, now=10.0)
+
+        packet = mapper.update(_pose(0.25, -0.2, 0.5), enabled=True, seq=2, now=10.1)
+
+        self.assertEqual(packet["controller_delta_base"], [0.0, 0.0, 0.0])
+        self.assertEqual(packet["pose_base_tcp_des"][:3], [0.0, 0.0, 0.0])
+
+    def test_mapper_applies_position_deadband_after_settle(self):
+        mapper = mod.QuestRelativeMapper(
+            position_delta_scale=3.0,
+            engage_settle_sec=0.0,
+            position_deadband=0.02,
+        )
+        mapper.update(_pose(0.2, -0.1, 0.4), enabled=True, seq=1, now=10.0)
+
+        packet = mapper.update(_pose(0.205, -0.102, 0.401), enabled=True, seq=2, now=10.1)
+
+        self.assertEqual(packet["controller_delta_base"], [0.0, 0.0, 0.0])
+        self.assertEqual(packet["pose_base_tcp_des"][:3], [0.0, 0.0, 0.0])
 
     def test_mapper_pauses_after_release(self):
         mapper = mod.QuestRelativeMapper(position_delta_scale=2.0)

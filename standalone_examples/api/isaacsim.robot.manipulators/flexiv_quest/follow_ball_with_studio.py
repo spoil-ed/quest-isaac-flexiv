@@ -750,6 +750,25 @@ def run(args: argparse.Namespace) -> int:
             base_position=base_position,
             base_orientation_wxyz=base_orientation,
         )
+        current_pose_base_tcp = None
+        control_pose_base_tcp = pose_base_tcp_des
+        if latest_quest_target is not None and args.quest_target_mode == "relative":
+            tcp_position, tcp_orientation = robot.end_effector.get_world_pose()
+            current_pose_base_tcp = world_target_to_flexiv_pose(
+                world_position=tcp_position,
+                world_orientation_wxyz=tcp_orientation,
+                base_position=base_position,
+                base_orientation_wxyz=base_orientation,
+            )
+            control_pose_base_tcp = quest_relative_mapper.update(latest_quest_target, current_pose_base_tcp)
+            synced_target_pose = sync_target_to_base_tcp_pose(
+                target_frame,
+                pose_base_tcp_des=control_pose_base_tcp,
+                base_position=base_position,
+                base_orientation_wxyz=base_orientation,
+            )
+            if keyboard is not None:
+                keyboard.update_pose_reference(synced_target_pose)
         if latest_quest_target is not None and args.quest_target_mode == "absolute":
             synced_target_pose = sync_target_to_base_tcp_pose(
                 target_frame,
@@ -766,7 +785,7 @@ def run(args: argparse.Namespace) -> int:
                     serial_number=args.serial_number,
                     joint_group=args.joint_group,
                     servo_cycle=servo_cycle,
-                    pose_base_tcp_des=pose_base_tcp_des,
+                    pose_base_tcp_des=control_pose_base_tcp,
                     monotonic_time=time.monotonic(),
                 )
             )
@@ -777,7 +796,7 @@ def run(args: argparse.Namespace) -> int:
             if studio_ik is not None and studio_ik_gate.should_publish(servo_cycle):
                 try:
                     last_studio_ik_q = studio_ik.solve(
-                        target_pose=pose_base_tcp_des_to_studio_target_pose(pose_base_tcp_des),
+                        target_pose=pose_base_tcp_des_to_studio_target_pose(control_pose_base_tcp),
                         seed_jnt_pos=joint_positions_rad_to_studio_seed(robot.q),
                     )
                 except Exception as exc:
@@ -803,24 +822,14 @@ def run(args: argparse.Namespace) -> int:
                 quest_target_receiver_enabled=quest_target_receiver is not None,
                 latest_quest_target=latest_quest_target,
             )
-            tcp_position, tcp_orientation = robot.end_effector.get_world_pose()
-            current_pose_base_tcp = world_target_to_flexiv_pose(
-                world_position=tcp_position,
-                world_orientation_wxyz=tcp_orientation,
-                base_position=base_position,
-                base_orientation_wxyz=base_orientation,
-            )
-            control_pose_base_tcp = pose_base_tcp_des
-            if latest_quest_target is not None and args.quest_target_mode == "relative":
-                control_pose_base_tcp = quest_relative_mapper.update(latest_quest_target, current_pose_base_tcp)
-                synced_target_pose = sync_target_to_base_tcp_pose(
-                    target_frame,
-                    pose_base_tcp_des=control_pose_base_tcp,
+            if current_pose_base_tcp is None:
+                tcp_position, tcp_orientation = robot.end_effector.get_world_pose()
+                current_pose_base_tcp = world_target_to_flexiv_pose(
+                    world_position=tcp_position,
+                    world_orientation_wxyz=tcp_orientation,
                     base_position=base_position,
                     base_orientation_wxyz=base_orientation,
                 )
-                if keyboard is not None:
-                    keyboard.update_pose_reference(synced_target_pose)
             if quest_coordinate_observer is not None and target_pose_publish_gate.should_publish(servo_cycle):
                 quest_coordinate_observer.publish(
                     build_coordinate_observation_packet(
