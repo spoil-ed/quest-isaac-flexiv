@@ -69,6 +69,10 @@ class RepoLayoutTests(unittest.TestCase):
 
         self.assertIn("flexiv_quest/follow_ball_with_studio.py", str(command[1]))
         self.assertIn("studio-bridge", command)
+        self.assertIn("--quest-target-mode", command)
+        self.assertIn("relative", command)
+        self.assertIn("--quest-position-scale", command)
+        self.assertIn("1.0", command)
         self.assertNotIn("rdk-cartesian", command)
         self.assertNotIn("--disable-target-pose-udp", command)
         self.assertNotIn("flexiv_test", " ".join(command))
@@ -137,6 +141,14 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn('eventType=["trigger", "squeeze"]', text)
         self.assertIn("fps=60", text)
         self.assertFalse(FLEXIV_QUEST.is_symlink())
+
+    def test_vendored_televuer_tolerates_missing_controller_pose(self):
+        text = (ROOT / "third_party" / "televuer" / "src" / "televuer" / "televuer.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("def _copy_controller_pose", text)
+        self.assertIn("len(pose) != 16", text)
 
 
 if __name__ == "__main__":

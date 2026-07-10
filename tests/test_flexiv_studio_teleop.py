@@ -333,6 +333,38 @@ class FlexivStudioTeleopTests(unittest.TestCase):
         for actual, expected in zip(mapped, [0.55, -0.15, 0.8, 1.0, 0.0, 0.0, 0.0]):
             self.assertAlmostEqual(actual, expected)
 
+    def test_follow_ball_relative_mapper_prefers_transmitted_base_delta(self):
+        mod = load_follow_ball()
+        mapper = mod.QuestRelativeTargetMapper(
+            axis_map=mod.parse_quest_axis_map("-z,-x,y"),
+            scale=0.5,
+            workspace_min=(0.0, -1.0, 0.2),
+            workspace_max=(1.0, 1.0, 1.4),
+        )
+        first = mod.QuestTargetPacket(
+            seq=1,
+            side="right",
+            pose_base_tcp_des=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            controller_position_openxr=[100.0, 100.0, 100.0],
+            gripper_open_ratio=0.5,
+            monotonic_time=10.0,
+            controller_delta_base=[0.0, 0.0, 0.0],
+        )
+        second = mod.QuestTargetPacket(
+            seq=2,
+            side="right",
+            pose_base_tcp_des=[0.3, -0.2, 0.1, 1.0, 0.0, 0.0, 0.0],
+            controller_position_openxr=[200.0, 200.0, 200.0],
+            gripper_open_ratio=0.5,
+            monotonic_time=10.1,
+            controller_delta_base=[0.3, -0.2, 0.1],
+        )
+
+        current_tcp = [0.40, -0.10, 0.70, 1.0, 0.0, 0.0, 0.0]
+
+        self.assertEqual(mapper.update(first, current_tcp), current_tcp)
+        self.assertEqual(mapper.update(second, current_tcp), [0.7, -0.30000000000000004, 0.7999999999999999, 1.0, 0.0, 0.0, 0.0])
+
     def test_follow_ball_relative_mapper_does_not_clip_position_to_workspace_bounds(self):
         mod = load_follow_ball()
         mapper = mod.QuestRelativeTargetMapper(

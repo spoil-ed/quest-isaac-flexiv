@@ -120,6 +120,7 @@ def build_quest_packet(
     side: str,
     pose_base_tcp_des: list[float],
     controller_position_openxr: list[float],
+    controller_delta_base: list[float],
     now: float,
     reason: str,
     serial_number: str = DEFAULT_SERIAL_NUMBER,
@@ -135,6 +136,7 @@ def build_quest_packet(
         "controller_position_openxr": _as_float_list(
             controller_position_openxr, 3, "controller_position_openxr"
         ),
+        "controller_delta_base": _as_float_list(controller_delta_base, 3, "controller_delta_base"),
         "monotonic_time": float(now),
         "reason": str(reason),
     }
@@ -186,6 +188,7 @@ class QuestRelativeMapper:
             side=self.side,
             pose_base_tcp_des=pose,
             controller_position_openxr=position_openxr,
+            controller_delta_base=delta,
             now=now,
             reason="tracking",
             serial_number=self.serial_number,
@@ -219,8 +222,12 @@ def select_controller_pose(tv, side: str) -> list[list[float]]:
     return [[float(matrix[row, col]) for col in range(4)] for row in range(4)]
 
 
-def select_enable(tv, side: str, button: str) -> bool:
-    return bool(getattr(tv, f"{side}_ctrl_{button}"))
+def select_button_value(tv, side: str, button: str) -> float:
+    return float(getattr(tv, f"{side}_ctrl_{button}Value", 0.0))
+
+
+def select_enable(tv, side: str, button: str, *, threshold: float = 0.5) -> bool:
+    return bool(getattr(tv, f"{side}_ctrl_{button}")) or select_button_value(tv, side, button) >= float(threshold)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -235,6 +242,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--axis-map", default="x,y,z")
     parser.add_argument("--position-delta-scale", type=float, default=3.0)
     parser.add_argument("--right-tcp-rot-offset", default="0.70710678,0.0,0.70710678,0.0")
+    parser.add_argument("--enable-threshold", type=float, default=0.5)
     parser.add_argument("--televuer-root", type=Path, default=DEFAULT_TELEVUER_ROOT)
     parser.add_argument("--cert-file", default=str(DEFAULT_CERT_FILE))
     parser.add_argument("--key-file", default=str(DEFAULT_KEY_FILE))
@@ -283,7 +291,13 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             now = time.monotonic()
             ready = bool(tv.motion_data_ready)
-            enabled = ready and select_enable(tv, args.side, args.enable_button)
+            button_value = select_button_value(tv, args.side, args.enable_button) if ready else 0.0
+            enabled = ready and select_enable(
+                tv,
+                args.side,
+                args.enable_button,
+                threshold=args.enable_threshold,
+            )
             packet = None
             reason = "not_ready" if not ready else "disabled"
             if ready:
@@ -298,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:
                     pose_text = f" pose={[round(value, 4) for value in packet['pose_base_tcp_des']]}"
                 print(
                     f"[Rizon4QuestTargetPublisher] seq={seq} ready={ready} enabled={enabled} "
+                    f"{args.enable_button}Value={button_value:.3f} "
                     f"reason={reason} sent={sent} udp={args.udp_host}:{args.udp_port}{pose_text}",
                     flush=True,
                 )

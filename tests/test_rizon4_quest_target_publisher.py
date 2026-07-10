@@ -36,6 +36,7 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
 
         self.assertIsNotNone(packet)
         self.assertEqual(packet["pose_base_tcp_des"][:3], [0.0, 0.0, 0.0])
+        self.assertEqual(packet["controller_delta_base"], [0.0, 0.0, 0.0])
         self.assertEqual(packet["reason"], "tracking")
 
     def test_mapper_scales_relative_delta_while_enabled(self):
@@ -46,6 +47,10 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
 
         self.assertEqual(
             [round(value, 4) for value in packet["pose_base_tcp_des"][:3]],
+            [0.03, -0.06, 0.15],
+        )
+        self.assertEqual(
+            [round(value, 4) for value in packet["controller_delta_base"]],
             [0.03, -0.06, 0.15],
         )
 
@@ -64,6 +69,7 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
             side="right",
             pose_base_tcp_des=[0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0],
             controller_position_openxr=[1.0, 2.0, 3.0],
+            controller_delta_base=[0.1, 0.2, 0.3],
             now=12.0,
             reason="tracking",
         )
@@ -72,7 +78,22 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertEqual(packet["serial"], "Rizon4-I0LIRN")
         self.assertEqual(packet["joint_group"], "ARM_1")
         self.assertEqual(len(packet["pose_base_tcp_des"]), 7)
+        self.assertEqual(packet["controller_delta_base"], [0.1, 0.2, 0.3])
         self.assertTrue(all(math.isfinite(value) for value in packet["pose_base_tcp_des"]))
+
+    def test_select_enable_accepts_analog_squeeze_threshold(self):
+        class FakeTeleVuer:
+            right_ctrl_squeeze = False
+            right_ctrl_squeezeValue = 0.7
+
+        self.assertTrue(mod.select_enable(FakeTeleVuer(), "right", "squeeze", threshold=0.5))
+
+    def test_select_enable_rejects_small_analog_squeeze_value(self):
+        class FakeTeleVuer:
+            right_ctrl_squeeze = False
+            right_ctrl_squeezeValue = 0.2
+
+        self.assertFalse(mod.select_enable(FakeTeleVuer(), "right", "squeeze", threshold=0.5))
 
 
 if __name__ == "__main__":

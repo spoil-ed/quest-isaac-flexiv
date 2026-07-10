@@ -35,6 +35,10 @@ def build_command(args: argparse.Namespace) -> list[str]:
         "studio-bridge",
         "--serial-number",
         str(args.serial_number),
+        "--quest-target-mode",
+        "relative",
+        "--quest-position-scale",
+        "1.0",
         "--initial-q",
         *flexiv_runtime.DEFAULT_INITIAL_Q,
     ]

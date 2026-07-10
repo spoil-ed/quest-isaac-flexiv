@@ -22,7 +22,7 @@ Quest controller pose
 
 控制语义：
 
-- 按住右手柄 `squeeze` 时，使用手柄相对位移控制 TCP 相对目标。
+- 按住右手柄 `squeeze` 时，publisher 只发送按下后的相对位移 `controller_delta_base`，Isaac 侧把该 delta 加到按下瞬间的 TCP 位姿上。
 - 松开 `squeeze` 时暂停发送目标，不回到固定零点。
 - 默认 Rizon4 序列号为 `Rizon4-I0LIRN`。
 

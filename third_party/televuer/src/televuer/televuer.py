@@ -211,12 +211,19 @@ class TeleVuer:
         return MotionControllers(
             stream=True,
             key="motionControllers",
-            left=True,
+            left=False,
             right=True,
             fps=60,
             eventType=["trigger", "squeeze"],
             eventTypes=("trigger", "squeeze"),
         )
+
+    def _copy_controller_pose(self, pose, pose_shared):
+        if not isinstance(pose, (list, tuple)) or len(pose) != 16:
+            return False
+        with pose_shared.get_lock():
+            pose_shared[:] = pose
+        return True
 
     def close(self):
         self.process.terminate()
@@ -242,13 +249,11 @@ class TeleVuer:
         """https://docs.vuer.ai/en/latest/examples/20_motion_controllers.html"""
         try:
             # ControllerData
-            with self.left_arm_pose_shared.get_lock():
-                self.left_arm_pose_shared[:] = event.value["left"]
-            with self.right_arm_pose_shared.get_lock():
-                self.right_arm_pose_shared[:] = event.value["right"]
+            left_pose_ready = self._copy_controller_pose(event.value.get("left"), self.left_arm_pose_shared)
+            right_pose_ready = self._copy_controller_pose(event.value.get("right"), self.right_arm_pose_shared)
             # ControllerState
-            left_controller = event.value["leftState"]
-            right_controller = event.value["rightState"]
+            left_controller = event.value.get("leftState", {})
+            right_controller = event.value.get("rightState", {})
 
             def extract_controllers(controllerState, prefix):
                 # trigger
@@ -274,8 +279,9 @@ class TeleVuer:
 
             extract_controllers(left_controller, "left")
             extract_controllers(right_controller, "right")
-            with self.motion_data_ready_shared.get_lock():
-                self.motion_data_ready_shared.value = True
+            if left_pose_ready or right_pose_ready:
+                with self.motion_data_ready_shared.get_lock():
+                    self.motion_data_ready_shared.value = True
         except Exception:
             print("[TeleVuer] CONTROLLER_MOVE parse failed", flush=True)
             try:

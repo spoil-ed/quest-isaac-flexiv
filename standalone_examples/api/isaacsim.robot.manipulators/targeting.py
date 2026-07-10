@@ -21,6 +21,7 @@ class QuestTargetPacket(NamedTuple):
     controller_position_openxr: list[float] | None
     gripper_open_ratio: float | None
     monotonic_time: float
+    controller_delta_base: list[float] | None = None
 
 
 class QuestAxisMapEntry(NamedTuple):
@@ -98,6 +99,18 @@ class QuestRelativeTargetMapper:
         current_pose = [float(value) for value in current_pose_base_tcp]
         if len(current_pose) != 7:
             raise ValueError("current_pose_base_tcp must contain 7 values")
+        if quest_target.controller_delta_base is not None:
+            delta_base = [float(value) for value in quest_target.controller_delta_base]
+            if len(delta_base) != 3 or not all(math.isfinite(value) for value in delta_base):
+                return current_pose
+            if self.reference is None:
+                self.reference = QuestRelativeReference(
+                    controller_position_openxr=[0.0, 0.0, 0.0],
+                    tcp_pose_base=list(current_pose),
+                )
+                return list(current_pose)
+            xyz = [self.reference.tcp_pose_base[index] + delta_base[index] for index in range(3)]
+            return xyz + list(self.reference.tcp_pose_base[3:7])
         if quest_target.controller_position_openxr is None:
             return current_pose
         controller_position = [float(value) for value in quest_target.controller_position_openxr]
@@ -405,6 +418,14 @@ def parse_quest_target_packet(
             math.isfinite(value) for value in controller_position_openxr
         ):
             return None
+    controller_delta_base = None
+    if packet.get("controller_delta_base") is not None:
+        try:
+            controller_delta_base = [float(value) for value in packet["controller_delta_base"]]
+        except (TypeError, ValueError):
+            return None
+        if len(controller_delta_base) != 3 or not all(math.isfinite(value) for value in controller_delta_base):
+            return None
     if max_age_sec > 0.0 and packet.get("monotonic_time") is not None:
         current = time.monotonic() if now is None else float(now)
         try:
@@ -430,6 +451,7 @@ def parse_quest_target_packet(
         controller_position_openxr=controller_position_openxr,
         gripper_open_ratio=gripper_open_ratio,
         monotonic_time=monotonic_time,
+        controller_delta_base=controller_delta_base,
     )
 
 
