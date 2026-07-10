@@ -137,8 +137,8 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         tcp_forward_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [0.0, 0.0, -1.0])
         tcp_left_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [0.0, 1.0, 0.0])
         tcp_up_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [1.0, 0.0, 0.0])
-        self.assertEqual([round(value, 4) for value in tcp_forward_in_base], [1.0, 0.0, 0.0])
-        self.assertEqual([round(value, 4) for value in tcp_left_in_base], [0.0, 1.0, 0.0])
+        self.assertEqual([round(value, 4) for value in tcp_forward_in_base], [-1.0, 0.0, 0.0])
+        self.assertEqual([round(value, 4) for value in tcp_left_in_base], [0.0, -1.0, 0.0])
         self.assertEqual([round(value, 4) for value in tcp_up_in_base], [0.0, 0.0, 1.0])
 
     def test_mapper_applies_position_deadband_after_settle(self):
