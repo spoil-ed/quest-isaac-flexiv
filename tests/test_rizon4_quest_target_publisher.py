@@ -40,7 +40,11 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertEqual(packet["reason"], "tracking")
 
     def test_mapper_scales_relative_delta_while_enabled(self):
-        mapper = mod.QuestRelativeMapper(position_delta_scale=3.0, engage_settle_sec=0.0)
+        mapper = mod.QuestRelativeMapper(
+            position_delta_scale=3.0,
+            engage_settle_sec=0.0,
+            position_deadband=0.0,
+        )
         mapper.update(_pose(0.2, -0.1, 0.4), enabled=True, seq=1, now=10.0)
 
         packet = mapper.update(_pose(0.21, -0.12, 0.45), enabled=True, seq=2, now=10.1)

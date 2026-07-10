@@ -152,8 +152,8 @@ class QuestRelativeMapper:
         axis_map: str = "x,y,z",
         position_delta_scale: float = 3.0,
         tcp_rot_offset_wxyz: Iterable[float] = DEFAULT_TCP_ROT_OFFSET_WXYZ,
-        engage_settle_sec: float = 0.15,
-        position_deadband: float = 0.02,
+        engage_settle_sec: float = 0.25,
+        position_deadband: float = 0.05,
     ) -> None:
         self.side = side
         self.serial_number = serial_number
@@ -267,8 +267,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--enable-button", choices=["squeeze", "trigger", "thumbstick"], default="squeeze")
     parser.add_argument("--axis-map", default="x,y,z")
     parser.add_argument("--position-delta-scale", type=float, default=3.0)
-    parser.add_argument("--position-deadband", type=float, default=0.02)
-    parser.add_argument("--engage-settle-sec", type=float, default=0.15)
+    parser.add_argument("--position-deadband", type=float, default=0.05)
+    parser.add_argument("--engage-settle-sec", type=float, default=0.25)
     parser.add_argument("--right-tcp-rot-offset", default="0.70710678,0.0,0.70710678,0.0")
     parser.add_argument("--enable-threshold", type=float, default=0.5)
     parser.add_argument("--televuer-root", type=Path, default=DEFAULT_TELEVUER_ROOT)
