@@ -41,6 +41,7 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
 
     def test_mapper_scales_relative_delta_while_enabled(self):
         mapper = mod.QuestRelativeMapper(
+            axis_map="x,y,z",
             position_delta_scale=3.0,
             engage_settle_sec=0.0,
             position_deadband=0.0,
@@ -57,6 +58,22 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
             [round(value, 4) for value in packet["controller_delta_base"]],
             [0.03, -0.06, 0.15],
         )
+
+    def test_default_axis_map_converts_local_controller_axes_to_base_axes(self):
+        mapper = mod.QuestRelativeMapper(
+            position_delta_scale=1.0,
+            engage_settle_sec=0.0,
+            position_deadband=0.0,
+        )
+        mapper.update(_pose(0.0, 0.0, 0.0), enabled=True, seq=1, now=10.0)
+
+        forward = mapper.update(_pose(0.0, 0.0, -0.2), enabled=True, seq=2, now=10.1)
+        left = mapper.update(_pose(-0.2, 0.0, 0.0), enabled=True, seq=3, now=10.2)
+        up = mapper.update(_pose(0.0, 0.2, 0.0), enabled=True, seq=4, now=10.3)
+
+        self.assertEqual(forward["controller_delta_base"], [0.2, 0.0, 0.0])
+        self.assertEqual(left["controller_delta_base"], [0.0, 0.2, 0.0])
+        self.assertEqual(up["controller_delta_base"], [0.0, 0.0, 0.2])
 
     def test_mapper_holds_zero_during_engage_settle_window(self):
         mapper = mod.QuestRelativeMapper(position_delta_scale=3.0, engage_settle_sec=0.15)

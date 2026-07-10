@@ -24,6 +24,7 @@ Quest controller pose
 
 - 按住右手柄 `squeeze` 时，publisher 只发送按下后的相对位移 `controller_delta_base`，Isaac 侧把该 delta 加到按下瞬间的 TCP 位姿上。
 - 松开 `squeeze` 时暂停发送目标，不回到固定零点。
+- 手柄 local 坐标到 Rizon4 base 坐标的默认映射为 `base_x=-local_z`、`base_y=-local_x`、`base_z=local_y`。也就是手柄向前 `-Z` 对应 base `+X`，向左 `-X` 对应 base `+Y`，向上 `+Y` 对应 base `+Z`。
 - 默认 Rizon4 序列号为 `Rizon4-I0LIRN`。
 
 ## 目录
@@ -59,8 +60,10 @@ python scripts/rizon4_quest_target_publisher.py \
   --udp-port 45679 \
   --side right \
   --enable-button squeeze \
-  --axis-map x,y,z \
+  --axis-map -z,-x,y \
   --position-delta-scale 3.0 \
+  --position-deadband 0.05 \
+  --engage-settle-sec 0.25 \
   --rate-hz 60
 ```
 

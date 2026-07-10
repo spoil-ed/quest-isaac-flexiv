@@ -23,6 +23,7 @@ DEFAULT_HOST_IP = "192.168.32.10"
 DEFAULT_UDP_HOST = "127.0.0.1"
 DEFAULT_UDP_PORT = 45679
 DEFAULT_TCP_ROT_OFFSET_WXYZ = (0.70710678, 0.0, 0.70710678, 0.0)
+DEFAULT_AXIS_MAP = "-z,-x,y"
 
 
 def _as_float_list(values: Iterable[float], expected_len: int, name: str) -> list[float]:
@@ -149,7 +150,7 @@ class QuestRelativeMapper:
         side: str = "right",
         serial_number: str = DEFAULT_SERIAL_NUMBER,
         joint_group: str = DEFAULT_JOINT_GROUP,
-        axis_map: str = "x,y,z",
+        axis_map: str = DEFAULT_AXIS_MAP,
         position_delta_scale: float = 3.0,
         tcp_rot_offset_wxyz: Iterable[float] = DEFAULT_TCP_ROT_OFFSET_WXYZ,
         engage_settle_sec: float = 0.25,
@@ -265,7 +266,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--joint-group", default=DEFAULT_JOINT_GROUP)
     parser.add_argument("--side", choices=["left", "right"], default="right")
     parser.add_argument("--enable-button", choices=["squeeze", "trigger", "thumbstick"], default="squeeze")
-    parser.add_argument("--axis-map", default="x,y,z")
+    parser.add_argument("--axis-map", default=DEFAULT_AXIS_MAP)
     parser.add_argument("--position-delta-scale", type=float, default=3.0)
     parser.add_argument("--position-deadband", type=float, default=0.05)
     parser.add_argument("--engage-settle-sec", type=float, default=0.25)
