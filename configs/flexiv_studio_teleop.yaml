@@ -1,0 +1,30 @@
+# Flexiv Studio/RDK teleop configuration.
+# This uses one Rizon4 from the flexiv_quest asset set and maps the right Quest
+# controller to a Flexiv RT Cartesian target for ARM_1.
+robots:
+  - serial_number: "Rizon4-I0LIRN"
+    name: "Rizon4_I0LIRN"
+    usd: "/home/simate/workspace/isaacsim-flexiv/isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4.usd"
+    position:
+      x: 0.07108
+      y: -0.86763
+      z: 0.0
+    orientation:
+      w: 0.0
+      x: 0.0
+      y: 0.0
+      z: 1.0
+    initial_q: [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
+    teleop:
+      enabled: true
+      side: "right"
+      joint_group: "ARM_1"
+      ee_link: "flange"
+      ee_rot_x_deg: 0.0
+      ee_rot_y_deg: 0.0
+      ee_rot_z_deg: 0.0
+
+env_usd: ""
+
+motion:
+  enabled: false

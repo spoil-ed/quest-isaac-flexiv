@@ -1,0 +1,26 @@
+# Minimal single-arm Flexiv bridge configuration.
+robots:
+  - serial_number: "Rizon4-I0LIRN"
+    name: "Rizon4_I0LIRN"
+    usd: "/home/simate/workspace/isaacsim-flexiv/isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4.usd"
+    position:
+      x: 0.07108
+      y: -0.86763
+      z: 0.0
+    orientation:
+      w: 0.0
+      x: 0.0
+      y: 0.0
+      z: 1.0
+    initial_q: [0.0, 0.0, 0.0, 0.0, 0.0, 4.7124, 0.0]
+
+env_usd: ""
+
+motion:
+  enabled: false
+  mode: "bridge_only"
+  amplitude: 0.035
+  frequency: 0.3
+  joint_index: 3
+  kp: 1200.0
+  kd: 80.0

@@ -1,0 +1,16 @@
+[package]
+version = "0.1.0"
+category = "Simulation"
+title = "Teleop SDG Workflow Loader"
+description = "Loads Isaac Sim teleop demo, recording, and replay workflows at startup."
+authors = ["local"]
+
+[dependencies]
+"isaacsim.replicator.teleop" = {}
+"isaacsim.replicator.teleop.ui" = {}
+"isaacsim.replicator.episode_recorder.ui" = {}
+"isaacsim.storage.native" = {}
+"omni.usd" = {}
+
+[[python.module]]
+name = "simate.teleop_demo_loader"

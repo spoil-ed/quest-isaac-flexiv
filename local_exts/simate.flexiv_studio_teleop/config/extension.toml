@@ -1,0 +1,16 @@
+[package]
+version = "0.1.0"
+category = "Simulation"
+title = "Flexiv Studio Teleop"
+description = "Replaces Isaac Teleop IK with a Flexiv Studio/RDK Cartesian control path."
+authors = ["local"]
+
+[dependencies]
+"isaacsim.replicator.teleop" = {}
+"isaacsim.replicator.teleop.ui" = {}
+"isaacsim.replicator.episode_recorder.ui" = {}
+"omni.timeline" = {}
+"omni.usd" = {}
+
+[[python.module]]
+name = "simate.flexiv_studio_teleop.extension"
