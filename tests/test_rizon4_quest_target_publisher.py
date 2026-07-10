@@ -30,6 +30,15 @@ def _rot_z_90_pose(x=0.0, y=0.0, z=0.0):
     ]
 
 
+def _rotate_vector_wxyz(quat, vector):
+    pure = [0.0, *vector]
+    rotated = mod.quat_multiply_wxyz(
+        mod.quat_multiply_wxyz(quat, pure),
+        mod.quat_inverse_wxyz(quat),
+    )
+    return rotated[1:]
+
+
 class Rizon4QuestTargetPublisherTests(unittest.TestCase):
     def test_default_televuer_root_is_inside_repo(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -104,6 +113,14 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         expected = [round(math.sqrt(0.5), 4), 0.0, 0.0, round(math.sqrt(0.5), 4)]
         actual = [round(value, 4) for value in packet["pose_base_tcp_des"][3:]]
         self.assertEqual(actual, expected)
+
+    def test_default_orientation_maps_controller_x_to_tcp_z_direction(self):
+        mapper = mod.QuestRelativeMapper(engage_settle_sec=0.0)
+
+        packet = mapper.update(_pose(0.0, 0.0, 0.0), enabled=True, seq=1, now=10.0)
+
+        tcp_x_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [1.0, 0.0, 0.0])
+        self.assertEqual([round(value, 4) for value in tcp_x_in_base], [0.0, 0.0, 1.0])
 
     def test_mapper_applies_position_deadband_after_settle(self):
         mapper = mod.QuestRelativeMapper(
