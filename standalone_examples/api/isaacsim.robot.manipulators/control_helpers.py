@@ -42,6 +42,13 @@ def format_float_list(values, *, precision: int = 4) -> str:
     return "[" + ", ".join(f"{float(value):.{precision}f}" for value in values) + "]"
 
 
+def format_pose_xyz_quat(pose_base_tcp, *, precision: int = 4) -> str:
+    pose = [float(value) for value in pose_base_tcp]
+    if len(pose) != 7:
+        raise ValueError("pose_base_tcp must contain 7 values")
+    return f"pose_xyz={format_float_list(pose[:3], precision=precision)} pose_quat={format_float_list(pose[3:], precision=precision)}"
+
+
 def format_state_torque_telemetry(
     *,
     servo_cycle: int,

@@ -24,6 +24,16 @@ def load_control_helpers():
 
 
 class ControlHelpersTests(unittest.TestCase):
+    def test_format_pose_xyz_quat_includes_full_7d_pose(self):
+        helpers = load_control_helpers()
+
+        text = helpers.format_pose_xyz_quat([0.12345, -0.2, 0.35, 0.707106, 0.0, -0.707106, 0.0])
+
+        self.assertEqual(
+            text,
+            "pose_xyz=[0.1235, -0.2000, 0.3500] pose_quat=[0.7071, 0.0000, -0.7071, 0.0000]",
+        )
+
     def test_simplugin_target_drives_wait_for_runtime_target(self):
         helpers = load_control_helpers()
 

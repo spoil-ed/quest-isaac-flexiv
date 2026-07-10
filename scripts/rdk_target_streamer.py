@@ -21,6 +21,7 @@ for path in (str(RDK_COMPAT_PATH), str(UTILS_DIR)):
         sys.path.insert(0, path)
 
 from elements_studio_utils import RdkRuntimeController, RdkRuntimeSettings
+from control_helpers import format_pose_xyz_quat
 
 
 DEFAULT_SERIAL_NUMBER = "Rizon4-I0LIRN"
@@ -123,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         now = time.monotonic()
         if float(args.log_hz) > 0.0 and now - last_log_time >= 1.0 / float(args.log_hz):
-            print(f"[RdkTargetStreamer] sent pose_xyz={[round(value, 4) for value in pose[:3]]}", flush=True)
+            print(f"[RdkTargetStreamer] sent {format_pose_xyz_quat(pose)}", flush=True)
             last_log_time = now
 
 

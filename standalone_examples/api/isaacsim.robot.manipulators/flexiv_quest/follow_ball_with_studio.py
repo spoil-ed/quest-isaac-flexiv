@@ -26,6 +26,7 @@ from control_helpers import (
     StepRateLimiter,
     TargetPosePublishGate,
     format_float_list as _format_float_list,
+    format_pose_xyz_quat,
     format_state_torque_telemetry,
     should_poll_simplugin_target_drives,
     target_pose_control_is_active,
@@ -728,11 +729,10 @@ def run(args: argparse.Namespace) -> int:
             if quest_target is not None:
                 latest_quest_target = quest_target
                 if servo_cycle - last_quest_target_log_cycle >= int(physics_hz):
-                    rounded_pose = tuple(round(value, 4) for value in quest_target.pose_base_tcp_des[:3])
                     print(
                         "[FlexivTargetFrame] "
                         f"direct_quest_target seq={quest_target.seq} side={quest_target.side} "
-                        f"pose_xyz={rounded_pose}",
+                        f"{format_pose_xyz_quat(quest_target.pose_base_tcp_des)}",
                         flush=True,
                     )
                     last_quest_target_log_cycle = servo_cycle
@@ -873,7 +873,7 @@ def run(args: argparse.Namespace) -> int:
                         print(
                             "[FlexivTargetFrame] rdk_target "
                             f"cycle={servo_cycle} "
-                            f"pose={_format_float_list(control_pose_base_tcp)}",
+                            f"{format_pose_xyz_quat(control_pose_base_tcp)}",
                             flush=True,
                         )
                         last_rdk_command_log_cycle = servo_cycle
