@@ -22,7 +22,7 @@ DEFAULT_KEY_FILE = REPO_ROOT / "configs" / "xr_teleoperate" / "key.pem"
 DEFAULT_HOST_IP = "192.168.32.10"
 DEFAULT_UDP_HOST = "127.0.0.1"
 DEFAULT_UDP_PORT = 45679
-DEFAULT_TCP_ROT_OFFSET_WXYZ = (0.70710678, 0.0, 0.70710678, 0.0)
+DEFAULT_TCP_ROT_OFFSET_WXYZ = (0.70710678, 0.0, 0.0, -0.70710678)
 DEFAULT_AXIS_MAP = "-z,-x,y"
 
 
@@ -57,6 +57,20 @@ def parse_axis_map(value: str) -> list[tuple[int, float]]:
 def apply_axis_map(position: Iterable[float], axis_map: list[tuple[int, float]]) -> list[float]:
     values = _as_float_list(position, 3, "position")
     return [sign * values[index] for index, sign in axis_map]
+
+
+def axis_map_matrix(axis_map: list[tuple[int, float]]) -> list[list[float]]:
+    matrix = [[0.0, 0.0, 0.0] for _ in range(3)]
+    for output_index, (input_index, sign) in enumerate(axis_map):
+        matrix[output_index][input_index] = float(sign)
+    return matrix
+
+
+def multiply_matrix3(a: list[list[float]], b: list[list[float]]) -> list[list[float]]:
+    return [
+        [sum(float(a[row][inner]) * float(b[inner][col]) for inner in range(3)) for col in range(3)]
+        for row in range(3)
+    ]
 
 
 def normalize_quat_wxyz(values: Iterable[float]) -> list[float]:
@@ -109,10 +123,13 @@ def pose_matrix_position(matrix: list[list[float]]) -> list[float]:
     return [float(matrix[0][3]), float(matrix[1][3]), float(matrix[2][3])]
 
 
-def pose_matrix_quat_wxyz(matrix: list[list[float]]) -> list[float]:
+def pose_matrix_quat_wxyz(matrix: list[list[float]], axis_map: list[tuple[int, float]] | None = None) -> list[float]:
     if len(matrix) != 4 or any(len(row) != 4 for row in matrix):
         raise ValueError("pose matrix must be 4x4")
-    return rotation_matrix_to_quat_wxyz(matrix)
+    rotation = [row[:3] for row in matrix[:3]]
+    if axis_map is not None:
+        rotation = multiply_matrix3(axis_map_matrix(axis_map), rotation)
+    return rotation_matrix_to_quat_wxyz(rotation)
 
 
 def build_quest_packet(
@@ -170,7 +187,7 @@ class QuestRelativeMapper:
     def update(self, pose_matrix: list[list[float]], *, enabled: bool, seq: int, now: float) -> dict | None:
         position_openxr = pose_matrix_position(pose_matrix)
         mapped_position = apply_axis_map(position_openxr, self.axis_map)
-        hand_quat = pose_matrix_quat_wxyz(pose_matrix)
+        hand_quat = pose_matrix_quat_wxyz(pose_matrix, axis_map=self.axis_map)
         if not enabled:
             self._position_zero = None
             self._engage_time = None
@@ -263,7 +280,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--position-delta-scale", type=float, default=3.0)
     parser.add_argument("--position-deadband", type=float, default=0.05)
     parser.add_argument("--engage-settle-sec", type=float, default=0.25)
-    parser.add_argument("--right-tcp-rot-offset", default="0.70710678,0.0,0.70710678,0.0")
+    parser.add_argument("--right-tcp-rot-offset", default="0.70710678,0.0,0.0,-0.70710678")
     parser.add_argument("--enable-threshold", type=float, default=0.5)
     parser.add_argument("--televuer-root", type=Path, default=DEFAULT_TELEVUER_ROOT)
     parser.add_argument("--cert-file", default=str(DEFAULT_CERT_FILE))
