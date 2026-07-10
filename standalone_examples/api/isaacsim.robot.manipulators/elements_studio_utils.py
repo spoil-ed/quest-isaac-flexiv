@@ -16,6 +16,7 @@ from typing import Iterable, NamedTuple
 
 
 STUDIO_CAL_REACHABILITY_METHOD = "/proto.robot.motion.MotionService/CalReachability"
+UNLIMITED_CARTESIAN_LIMIT = 1_000_000.0
 
 
 @dataclass(frozen=True)
@@ -312,10 +313,10 @@ class RdkCartesianStreamer:
             list(command.pose_d),
             list(command.wrench_d),
             list(command.twist_d),
-            0.25,
-            0.5,
-            1.0,
-            2.0,
+            UNLIMITED_CARTESIAN_LIMIT,
+            UNLIMITED_CARTESIAN_LIMIT,
+            UNLIMITED_CARTESIAN_LIMIT,
+            UNLIMITED_CARTESIAN_LIMIT,
         )
 
 
