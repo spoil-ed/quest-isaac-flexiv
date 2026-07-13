@@ -29,9 +29,12 @@ class RepoLayoutTests(unittest.TestCase):
             "README.md",
             "configs",
             "datasets",
+            "docs",
+            "flexiv_data_collection",
             "isaac_sim_ws",
             "local_exts",
             "logs",
+            "requirements.txt",
             "scripts",
             "spec",
             "standalone_examples",
@@ -51,8 +54,14 @@ class RepoLayoutTests(unittest.TestCase):
             "flexiv_runtime.py",
             "flexiv_stack_status.py",
             "flexiv_studio_teleop.py",
+            "convert_unitree_json_to_lerobot.py",
+            "fake_rizon4_quest_sender.py",
             "rdk_target_streamer.py",
+            "record_unitree_json.py",
             "rizon4_quest_target_publisher.py",
+            "run_stage1_data_collection_smoke.py",
+            "run_stage1_single_rizon4_real_validation.py",
+            "start_data_gateway.py",
             "start_elements_studio_ui.py",
             "start_robot_control_app.py",
             "start_flexiv_simulation.py",
@@ -60,6 +69,7 @@ class RepoLayoutTests(unittest.TestCase):
             "start_rdk_target_streamer.py",
             "stop_flexiv_stack.py",
             "teleop_sdg.py",
+            "validate_data_artifacts.py",
         }
 
         self.assertEqual({path.name for path in SCRIPTS.glob("*.py")}, expected)
@@ -102,6 +112,54 @@ class RepoLayoutTests(unittest.TestCase):
 
         self.assertIn("--rdk-target-hz", command)
         self.assertIn("60.0", command)
+
+    def test_isaac_follow_startup_can_override_stage1_runtime_paths_and_ports(self):
+        follow = load_script("start_isaac_follow.py")
+        command = follow.build_command(
+            follow.parse_args(
+                [
+                    "--serial-number",
+                    "Rizon4-CUSTOM",
+                    "--rdk-serial-number",
+                    "Rizon4-CUSTOM",
+                    "--joint-group",
+                    "ARM_CUSTOM",
+                    "--scene-config",
+                    "/tmp/scene.yaml",
+                    "--robot-prim-path",
+                    "/World/Flexiv/Custom",
+                    "--usd",
+                    "/tmp/Rizon4.usd",
+                    "--examples-ext",
+                    "/tmp/examples_ext",
+                    "--quest-target-udp-port",
+                    "55679",
+                    "--target-pose-udp-port",
+                    "55678",
+                    "--command-timeout-ms",
+                    "1",
+                ]
+            )
+        )
+
+        self.assertIn("--rdk-serial-number", command)
+        self.assertIn("Rizon4-CUSTOM", command)
+        self.assertIn("--joint-group", command)
+        self.assertIn("ARM_CUSTOM", command)
+        self.assertIn("--scene-config", command)
+        self.assertIn("/tmp/scene.yaml", command)
+        self.assertIn("--robot-prim-path", command)
+        self.assertIn("/World/Flexiv/Custom", command)
+        self.assertIn("--usd", command)
+        self.assertIn("/tmp/Rizon4.usd", command)
+        self.assertIn("--examples-ext", command)
+        self.assertIn("/tmp/examples_ext", command)
+        self.assertIn("--quest-target-udp-port", command)
+        self.assertIn("55679", command)
+        self.assertIn("--target-pose-udp-port", command)
+        self.assertIn("55678", command)
+        self.assertIn("--command-timeout-ms", command)
+        self.assertIn("1", command)
 
     def test_scripts_do_not_reference_removed_flexiv_test_path(self):
         offenders = []

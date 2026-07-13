@@ -1,0 +1,45 @@
+# Stage1 single-Rizon4 data collection pipeline.
+# This file references environment and scene configs, then defines only the
+# data-collection, conversion, fake-input, and validation behavior.
+
+environment_config: "../environments/local_flexiv_runtime.yaml"
+scene_config: "../scenes/single_rizon4_cam_front.yaml"
+
+gateway:
+  sample_endpoint: "tcp://127.0.0.1:5690"
+  bridge_endpoint: "tcp://127.0.0.1:5691"
+  fps: 30
+  jpeg_quality: 90
+
+target_pose:
+  host: "127.0.0.1"
+  port: 55678
+
+quest_target:
+  host: "127.0.0.1"
+  port: 55679
+
+record:
+  task_name: "quest_isaac_flexiv_stage1_single_rizon4"
+  fps: 10
+  image_size: "640x480"
+  max_frames: 50
+  task_goal: "quest-isaac-flexiv stage1 data collection"
+  task_desc: "Old Isaac TargetFrame/RDK/Studio loop with Stage1 Unitree JSON recording"
+
+convert:
+  repo_id: "qiming/quest_isaac_flexiv_stage1_single_rizon4"
+  action_mode: "qpos"
+
+validation:
+  min_left_q_delta: 0.005
+  min_left_torque_norm: 1e-8
+
+fake_sender:
+  host: "127.0.0.1"
+  side: "right"
+  axis: "x"
+  amplitude_m: 0.02
+  frames: 900
+  rate_hz: 30
+  quat_wxyz: "0.0,0.70710678,0.0,0.70710678"

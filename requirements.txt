@@ -1,0 +1,21 @@
+# Stage1 full Python requirements for data collection, conversion and validation.
+#
+# External runtimes are still installed separately because they are not ordinary
+# PyPI project dependencies: Isaac Sim 6.0.1, Flexiv Elements Studio,
+# flexivsimplugin==1.2.0, the Flexiv RDK environment, and system ffmpeg/ffprobe
+# with libx264. See README.md for those runtime setup steps.
+
+# Gateway, recorder, fake sender/smoke tests, config loading and camera JPEGs.
+numpy>=1.26
+opencv-python>=4.8
+PyYAML>=6.0
+
+# Unitree JSON -> LeRobot-style conversion and validation helpers.
+tqdm>=4.66
+pyarrow>=14.0
+tyro>=0.9; python_version >= "3.10"
+av>=12.0
+
+# Optional future integration:
+# - lerobot: the current converter writes a self-contained LeRobot-style dataset
+#   without importing unitree_lerobot or requiring the official LeRobot package.

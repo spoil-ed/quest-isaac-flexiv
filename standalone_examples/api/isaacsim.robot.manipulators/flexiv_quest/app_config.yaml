@@ -2,7 +2,9 @@
 robots:
   - serial_number: "Rizon4-I0LIRN"
     name: "Rizon4_I0LIRN"
-    usd: "/home/simate/workspace/isaacsim-flexiv/isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4.usd"
+    # Legacy bridge config: set explicitly for your local Flexiv Isaac workspace,
+    # or copy from configs/scenes/single_rizon4_cam_front.yaml.
+    usd: ""
     position:
       x: 0.07108
       y: -0.86763

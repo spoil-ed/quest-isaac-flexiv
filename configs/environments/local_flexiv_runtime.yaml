@@ -1,0 +1,11 @@
+# Local Flexiv/Isaac runtime environment for Stage1 validation.
+# Keep machine-specific paths here instead of embedding them in Python files.
+
+rdk_python: "/data/qiming/flexiv_runtime/rdk_v1_venv/bin/python"
+isaac_python: "/data/qiming/isaacsim/python.sh"
+isaacsim_root: "/data/qiming/isaacsim"
+isaac_sim_ws: "/data/qiming/isaac_sim_ws"
+studio_root: "/home/simate/workspace/elements_studio/FlexivElementsStudio"
+
+record_output_root: "/data/qiming/flexiv_runtime/records"
+lerobot_output_root: "/home/qiming/lerobot_datasets"

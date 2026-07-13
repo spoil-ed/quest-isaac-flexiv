@@ -12,14 +12,12 @@ import time
 from pathlib import Path
 
 
-PYTHON_BIN = Path("/home/simate/miniconda3/envs/isaacsim/bin/python")
-ISAACSIM_BIN = Path("/home/simate/miniconda3/envs/isaacsim/bin/isaacsim")
-CLOUDXR_ENV = Path("/home/simate/.cloudxr/run/cloudxr.env")
-CLOUDXR_RUN_DIR = Path("/home/simate/.cloudxr/run")
-CLOUDXR_RUNTIME_JSON = Path("/home/simate/.cloudxr/openxr_cloudxr.json")
-FLEXIV_EXAMPLES_PATH = Path(
-    "/home/simate/workspace/isaacsim-flexiv/isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
-)
+PYTHON_BIN = Path(os.environ.get("ISAAC_PYTHON", sys.executable)).expanduser()
+ISAACSIM_BIN = Path(os.environ.get("ISAACSIM_BIN", "isaacsim")).expanduser()
+CLOUDXR_ENV = Path(os.environ.get("CLOUDXR_ENV", "~/.cloudxr/run/cloudxr.env")).expanduser()
+CLOUDXR_RUN_DIR = Path(os.environ.get("CLOUDXR_RUN_DIR", "~/.cloudxr/run")).expanduser()
+CLOUDXR_RUNTIME_JSON = Path(os.environ.get("CLOUDXR_RUNTIME_JSON", "~/.cloudxr/openxr_cloudxr.json")).expanduser()
+FLEXIV_EXAMPLES_PATH = Path(os.environ.get("FLEXIV_EXAMPLES_EXT", "")).expanduser()
 DEFAULT_FLEXIV_TELEOP_CONFIG = Path("configs/flexiv_studio_teleop.yaml")
 
 
@@ -34,8 +32,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         subparser.add_argument("--dry-run", action="store_true", help="Print launch command and exit.")
         subparser.add_argument("--stage", help="USD stage to open instead of the built-in teleop demo.")
         subparser.add_argument("--profile", help="Teleop profile YAML to load instead of floating_xarm_dex3.yaml.")
+        subparser.add_argument("--isaacsim-bin", type=Path, default=ISAACSIM_BIN, help="Isaac Sim launcher path.")
+        subparser.add_argument("--python-bin", type=Path, default=PYTHON_BIN, help="Python used to start CloudXR.")
+        subparser.add_argument("--flexiv-examples-path", type=Path, default=FLEXIV_EXAMPLES_PATH, help="Flexiv examples extension path.")
         if cloudxr:
             subparser.add_argument("--no-cloudxr", action="store_true", help="Do not start or source CloudXR.")
+            subparser.add_argument("--cloudxr-env", type=Path, default=CLOUDXR_ENV, help="CloudXR exported environment file.")
+            subparser.add_argument("--cloudxr-run-dir", type=Path, default=CLOUDXR_RUN_DIR, help="CloudXR runtime directory.")
+            subparser.add_argument("--cloudxr-runtime-json", type=Path, default=CLOUDXR_RUNTIME_JSON, help="CloudXR OpenXR runtime JSON.")
 
     teleop = subparsers.add_parser("teleop", help="Start the normal teleop demo.")
     add_launch_options(teleop, cloudxr=True)
@@ -90,6 +94,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     replay.add_argument("--load-only", action="store_true", help="Load the replay file without starting playback.")
     replay.add_argument("--foreground", action="store_true", help="Run Isaac Sim in the foreground.")
     replay.add_argument("--dry-run", action="store_true", help="Print launch command and exit.")
+    replay.add_argument("--isaacsim-bin", type=Path, default=ISAACSIM_BIN, help="Isaac Sim launcher path.")
 
     return parser.parse_args(argv)
 
@@ -155,7 +160,7 @@ def workflow_env(args: argparse.Namespace, root: Path) -> dict[str, str]:
         env.update(
             {
                 "SIMATE_FLEXIV_TELEOP_CONFIG": str(resolve_path(args.config, root)),
-                "SIMATE_FLEXIV_EXAMPLES_PATH": str(FLEXIV_EXAMPLES_PATH),
+                "SIMATE_FLEXIV_EXAMPLES_PATH": str(Path(args.flexiv_examples_path).expanduser()),
                 "SIMATE_FLEXIV_RDK_STREAM_HZ": str(max(1.0, args.stream_hz)),
                 "SIMATE_FLEXIV_RDK_SWITCH_MODE": "0" if args.no_switch_mode else "1",
                 "SIMATE_FLEXIV_RDK_CLEAR_FAULT": "1" if args.clear_fault else "0",
@@ -177,9 +182,11 @@ def workflow_env(args: argparse.Namespace, root: Path) -> dict[str, str]:
     return env
 
 
-def build_isaac_command(root: Path) -> list[str]:
+def build_isaac_command(root: Path, args: argparse.Namespace | None = None) -> list[str]:
+    if args is None:
+        args = argparse.Namespace(isaacsim_bin=ISAACSIM_BIN)
     return [
-        str(ISAACSIM_BIN),
+        str(Path(args.isaacsim_bin).expanduser()),
         "--ext-folder",
         str(root / "local_exts"),
         "--enable",
@@ -205,7 +212,7 @@ def cloudxr_is_running() -> bool:
     return result.returncode == 0
 
 
-def ensure_cloudxr(root: Path, env: dict[str, str]) -> None:
+def ensure_cloudxr(root: Path, env: dict[str, str], args: argparse.Namespace) -> None:
     log_dir = root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -215,7 +222,7 @@ def ensure_cloudxr(root: Path, env: dict[str, str]) -> None:
         log_path = log_dir / f"cloudxr_{time.strftime('%Y%m%d_%H%M%S')}.stdout.log"
         log_file = log_path.open("w")
         process = subprocess.Popen(
-            [str(PYTHON_BIN), "-m", "isaacteleop.cloudxr", "--accept-eula"],
+            [str(Path(args.python_bin).expanduser()), "-m", "isaacteleop.cloudxr", "--accept-eula"],
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,
@@ -224,14 +231,18 @@ def ensure_cloudxr(root: Path, env: dict[str, str]) -> None:
         print(f"Started CloudXR PID: {process.pid}")
         print(f"CloudXR log: {log_path}")
 
+    cloudxr_env = Path(args.cloudxr_env).expanduser()
+    cloudxr_run_dir = Path(args.cloudxr_run_dir).expanduser()
+    cloudxr_runtime_json = Path(args.cloudxr_runtime_json).expanduser()
+
     for _ in range(30):
-        if CLOUDXR_ENV.is_file():
+        if cloudxr_env.is_file():
             break
         time.sleep(1)
 
-    env.update(load_export_file(CLOUDXR_ENV))
-    env.setdefault("NV_CXR_RUNTIME_DIR", str(CLOUDXR_RUN_DIR))
-    env.setdefault("XR_RUNTIME_JSON", str(CLOUDXR_RUNTIME_JSON))
+    env.update(load_export_file(cloudxr_env))
+    env.setdefault("NV_CXR_RUNTIME_DIR", str(cloudxr_run_dir))
+    env.setdefault("XR_RUNTIME_JSON", str(cloudxr_runtime_json))
 
 
 def add_graphics_env(env: dict[str, str]) -> None:
@@ -245,10 +256,10 @@ def launch(args: argparse.Namespace, root: Path) -> int:
     env.update(workflow_env(args, root))
 
     if args.command in {"teleop", "record", "flexiv-studio"} and not getattr(args, "no_cloudxr", False):
-        ensure_cloudxr(root, env)
+        ensure_cloudxr(root, env, args)
     add_graphics_env(env)
 
-    command = build_isaac_command(root)
+    command = build_isaac_command(root, args)
     log_dir = root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"isaacsim_teleop_sdg_{args.command}_{time.strftime('%Y%m%d_%H%M%S')}.stdout.log"

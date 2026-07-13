@@ -29,7 +29,7 @@ Quest -> TeleVuer -> UDP :45679 -> Isaac TargetFrame
 - Elements Studio：`/home/simate/workspace/elements_studio/FlexivElementsStudio`
 - Rizon4 USD：仓库下被忽略的 `isaac_sim_ws/.../Rizon4.usd`
 
-启动脚本允许用 `--isaac-python`、`--studio-root` 覆盖前两项；USD 默认值需要修改 `configs/flexiv_studio_teleop.yaml`，或直接运行底层示例并传 `--usd`。本仓库没有锁定依赖的 `requirements.txt`/Conda 文件，也没有自动取得 Elements Studio 的安装器，因此环境安装目前不是完全自动化的。
+启动脚本允许用 `--isaac-python`、`--studio-root` 或环境变量 `ISAAC_PYTHON`、`STUDIO_ROOT` 覆盖前两项；`start_isaac_follow.py` 也支持 `--usd`、`--examples-ext` 覆盖 Isaac 资源路径。Stage1 数据采集/转换工具的 Python 依赖由 `requirements.txt` 统一安装；Isaac Sim、Elements Studio、Flexiv RDK/SimPlugin 和 `ffmpeg` 仍是外部运行时，因此环境安装不是纯 pip 自动化。
 
 ## 平台和硬件
 
@@ -201,6 +201,129 @@ python3 scripts/start_rdk_target_streamer.py \
 
 默认端口：Quest 目标 `UDP 45679`，Isaac 到 RDK 目标 `UDP 45678`，TeleVuer HTTPS/WSS `TCP 8012`。防火墙至少需要允许 Quest 到主机的 TCP 8012。
 
+## Stage1 数据采集与转换
+
+Stage1 在旧控制闭环上增加可选数据采集功能，不改变默认 Quest/TargetFrame 控制行为。只有给 Isaac app 传入 `--gateway-endpoint` 时，才会创建相机、向 gateway 推送 RGB/state/action，并允许 recorder 写 Unitree JSON。
+
+本仓库默认验收配置使用本机可用的单臂 serial：
+
+```text
+Rizon4-VIHhZM
+```
+
+这不是代码层面的硬限制。Stage1 配置拆成三层：
+
+- `configs/environments/local_flexiv_runtime.yaml`：本机 Isaac/Flexiv/输出目录路径。
+- `configs/scenes/single_rizon4_cam_front.yaml`：单 Rizon4、USD、examples extension、`cam_front` 相机。
+- `configs/pipelines/stage1_single_rizon4_data_collection.yaml`：gateway、UDP、record、convert、fake sender、validation 参数。
+
+严格真实验收脚本默认读取 pipeline config，再加载 environment 和 scene config；也可以用 CLI 覆盖。serial、RDK、Isaac app、fake sender 和 validator 必须保持一致：
+
+```bash
+/data/conda/env/flexiv/bin/python scripts/run_stage1_single_rizon4_real_validation.py \
+  --config configs/pipelines/stage1_single_rizon4_data_collection.yaml \
+  --serial-number Rizon4-YOUR-SERIAL \
+  --rdk-python /path/to/rdk_venv/bin/python \
+  --isaac-python /path/to/isaacsim/python.sh \
+  --isaacsim-root /path/to/isaacsim \
+  --usd /path/to/Rizon4_with_Grav.usd \
+  --examples-ext /path/to/isaacsim.robot.manipulators.examples
+```
+
+也可以通过环境变量覆盖常见本机路径：`FLEXIV_ENVIRONMENT_CONFIG`、`FLEXIV_RDK_PYTHON`、`ISAAC_PYTHON`、`ISAACSIM_ROOT`、`ISAAC_SIM_WS`、`FLEXIV_RIZON4_USD`、`FLEXIV_EXAMPLES_EXT`、`FLEXIV_STAGE1_OUTPUT_ROOT`、`LEROBOT_OUTPUT_ROOT`。
+
+安装 Stage1 完整 Python 功能依赖：
+
+```bash
+/data/conda/env/flexiv/bin/python -m pip install -r requirements.txt
+```
+
+先跑无 Isaac 快速 smoke，验证数据工具链本身：gateway -> recorder -> Unitree JSON -> LeRobot-style dataset -> H264 MP4。这个 smoke 不代表真实控制闭环验收：
+
+```bash
+/data/conda/env/flexiv/bin/python scripts/run_stage1_data_collection_smoke.py
+```
+
+严格真实闭环验收只使用本仓库启动的单 Rizon4 Stage1 gateway，不复用已有 `unitree_lerobot` 或 `flexiv_studio_pipeline` gateway。默认 scene config 使用 `Rizon4-VIHhZM`，但可通过 YAML/CLI 覆盖；验收仍严格限定一个 `/World/Flexiv/Rizon4`、一个 `cam_front`，并要求视频中有可见运动：
+
+```bash
+/data/conda/env/flexiv/bin/python scripts/run_stage1_single_rizon4_real_validation.py
+```
+
+验收通过时会输出：
+
+- `raw/episode_0000/data.json`
+- LeRobot-style dataset 目录
+- `videos/observation.images.cam_front/chunk-000/file-000.mp4`
+- `stage1_single_rizon4_real_validation.json`
+
+严格验收条件包括：`sim_state.backend == quest_isaac_flexiv_stage1`、sample serial 等于当前 scene serial、右臂 16D 占位全零、只有 `color_0/cam_front`、`left_q_delta_norm >= 0.005`、MP4 codec 为 `h264`。验收报告会写入 pipeline/environment/scene config 路径，以及解析后的 serial、USD 和 camera。
+
+Isaac app 新入口使用 `--scene-config`。旧 `--camera-config` 仍可作为兼容别名读取 `cameras`，但新配置中相机属于 scene config，不再属于 data pipeline config。
+
+调试时也可以分步启动同一条单臂闭环：
+
+```bash
+# 1. Stage1 gateway
+/data/conda/env/flexiv/bin/python scripts/start_data_gateway.py \
+  --backend bridge \
+  --sample-endpoint tcp://127.0.0.1:5690 \
+  --bridge-endpoint tcp://127.0.0.1:5691 \
+  --fps 30 \
+  --camera-keys color_0
+
+# 2. Isaac app，旧控制闭环不变，只额外打开 gateway/camera 发布
+python3 scripts/start_isaac_follow.py \
+  --isaac-python "$ISAAC_PYTHON" \
+  --serial-number Rizon4-VIHhZM \
+  --scene-config configs/scenes/single_rizon4_cam_front.yaml \
+  --enable-quest-target-udp \
+  --rdk-target-hz 60 \
+  --gateway-endpoint tcp://127.0.0.1:5691 \
+  --gateway-fps 30
+
+# 3. Isaac :55678 -> Flexiv RDK
+python3 scripts/start_rdk_target_streamer.py \
+  --python "$ISAAC_PYTHON" \
+  --serial-number Rizon4-VIHhZM \
+  --port 55678
+
+# 4. Recorder，默认保存时不 reset bridge
+/data/conda/env/flexiv/bin/python scripts/record_unitree_json.py \
+  --gateway-endpoint tcp://127.0.0.1:5690 \
+  --fps 10 \
+  --episodes 1 \
+  --task-dir /data/qiming/flexiv_runtime/records/quest_isaac_flexiv_stage1_single_rizon4 \
+  --image-size 640x480 \
+  --max-frames 50 \
+  --auto-start
+
+# 5. 无 Quest 时，用 fake sender 给旧 Isaac UDP target 口发送小幅目标
+/data/conda/env/flexiv/bin/python scripts/fake_rizon4_quest_sender.py \
+  --serial-number Rizon4-VIHhZM \
+  --host 127.0.0.1 \
+  --port 55679 \
+  --amplitude-m 0.02 \
+  --frames 900
+
+# 6. 转换并验收 H264 MP4
+/data/conda/env/flexiv/bin/python scripts/convert_unitree_json_to_lerobot.py \
+  --raw-dir /data/qiming/flexiv_runtime/records/quest_isaac_flexiv_stage1_single_rizon4 \
+  --repo-id qiming/quest_isaac_flexiv_stage1_single_rizon4 \
+  --output-root /home/qiming/lerobot_datasets
+
+/data/conda/env/flexiv/bin/python scripts/validate_data_artifacts.py \
+  --raw-dir /data/qiming/flexiv_runtime/records/quest_isaac_flexiv_stage1_single_rizon4 \
+  --dataset-root /home/qiming/lerobot_datasets/qiming/quest_isaac_flexiv_stage1_single_rizon4 \
+  --strict-single-arm \
+  --expected-serial Rizon4-VIHhZM \
+  --min-left-q-delta 0.005 \
+  --min-left-torque-norm 1e-8 \
+  --min-servo-cycle-delta 5
+```
+
+H264 验收使用系统 `ffprobe`，要求生成的 MP4 video stream codec 为 `h264`。如果机器上已有双臂 gateway（如 `tcp://127.0.0.1:5790`），不要把它作为 Stage1 输入；严格脚本会拒绝复用外部 gateway。Stage1 文档见 `docs/stage1_data_collection_report_zh.md`。
+
 ## 运行检查与停止
 
 ```bash
@@ -237,6 +360,8 @@ python3 scripts/stop_flexiv_stack.py
 - `standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/`：Isaac 场景和桥接实现。
 - `local_exts/`：Isaac Sim 本地扩展。
 - `third_party/televuer/`：仓库内 vendored Quest/Vuer 输入层。
+- `flexiv_data_collection/`：Stage1 gateway、recorder、Unitree JSON、LeRobot-style 转换和验收工具。
 - `configs/`：项目配置；PEM 证书不提交。
+- `docs/`：Stage1 开发汇报和后续数据采集文档。
 - `spec/`：目标和控制链路说明。
 - `tests/`：快速回归测试。

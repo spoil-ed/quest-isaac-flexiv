@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -13,6 +14,9 @@ from pathlib import Path
 UTILS_DIR = Path(__file__).resolve().parents[1]
 if str(UTILS_DIR) not in sys.path:
     sys.path.insert(0, str(UTILS_DIR))
+REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from elements_studio_utils import (
     RdkRuntimeController,
@@ -52,17 +56,17 @@ from targeting import (
     triple as _triple,
     world_target_to_flexiv_pose,
 )
+from flexiv_data_collection.protocol import BRIDGE_SAMPLE_TYPE, JsonLinePushClient, encode_image_bgr, now_ns
+from flexiv_data_collection.schema import unitree_parts_from_single_arm
 
 
-DEFAULT_RIZON4_USD = Path(
-    "/home/simate/workspace/isaacsim-flexiv/isaac_sim_ws/exts/"
-    "isaacsim.robot.manipulators.examples/data/flexiv/Rizon4.usd"
-)
-DEFAULT_EXAMPLES_EXT = Path(
-    "/home/simate/workspace/isaacsim-flexiv/isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
-)
+DEFAULT_RIZON4_USD = Path(os.environ["FLEXIV_RIZON4_USD"]) if os.environ.get("FLEXIV_RIZON4_USD") else None
+DEFAULT_EXAMPLES_EXT = Path(os.environ["FLEXIV_EXAMPLES_EXT"]) if os.environ.get("FLEXIV_EXAMPLES_EXT") else None
 DEFAULT_SERIAL_NUMBER = "Rizon4-I0LIRN"
 DEFAULT_JOINT_GROUP = "ARM_1"
+DEFAULT_ROBOT_PRIM_PATH = "/World/Flexiv/Rizon4"
+DEFAULT_ROBOT_NAME = "Rizon4"
+DEFAULT_END_EFFECTOR_PRIM_NAME = "flange"
 DEFAULT_TARGET_PRIM_PATH = "/World/TargetFrame"
 DEFAULT_TARGET_NAME = "target_frame"
 DEFAULT_TARGET_POSITION = (0.45, 0.0, 0.35)
@@ -80,6 +84,8 @@ DEFAULT_QUEST_AXIS_MAP = "-z,-x,y"
 DEFAULT_QUEST_WORKSPACE_MIN = (0.15, -0.70, 0.20)
 DEFAULT_QUEST_WORKSPACE_MAX = (1.00, 0.70, 1.35)
 DEFAULT_STUDIO_GRPC_ADDRESS = "127.0.0.1:18001"
+DEFAULT_STAGE1_GATEWAY_FPS = 30.0
+DEFAULT_STAGE1_GATEWAY_JPEG_QUALITY = 90
 PHYSICS_FREQ = 2000.0
 RENDER_FREQ = 60.0
 DEFAULT_PHYSICS_HZ = PHYSICS_FREQ
@@ -164,10 +170,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Optional JSON file containing parameter overrides by argument name.",
     )
-    parser.add_argument("--serial-number", default=DEFAULT_SERIAL_NUMBER, help="Elements Studio simulated robot serial.")
-    parser.add_argument("--joint-group", default=DEFAULT_JOINT_GROUP, help="Studio joint group label, normally ARM_1.")
-    parser.add_argument("--usd", type=Path, default=DEFAULT_RIZON4_USD, help="Rizon4 USD asset.")
-    parser.add_argument("--examples-ext", type=Path, default=DEFAULT_EXAMPLES_EXT, help="Flexiv examples extension path.")
+    parser.add_argument("--scene-config", type=Path, default=None, help="Optional Stage1 scene YAML containing robot and camera definitions.")
+    parser.add_argument("--serial-number", default=None, help="Elements Studio simulated robot serial.")
+    parser.add_argument("--joint-group", default=None, help="Studio joint group label, normally ARM_1.")
+    parser.add_argument("--robot-prim-path", default=None, help="USD prim path for the Rizon4 robot.")
+    parser.add_argument("--robot-name", default=None, help="Isaac scene object name for the Rizon4 robot.")
+    parser.add_argument("--end-effector-prim-name", default=None, help="End-effector prim name used by the Flexiv articulation.")
+    parser.add_argument("--usd", type=Path, default=None, help="Rizon4 USD asset. Defaults to scene config or FLEXIV_RIZON4_USD.")
+    parser.add_argument("--examples-ext", type=Path, default=None, help="Flexiv examples extension path. Defaults to scene config or FLEXIV_EXAMPLES_EXT.")
     parser.add_argument("--headless", action="store_true", help="Run without a GUI.")
     parser.add_argument("--smoke-test", action="store_true", help="Run headless and exit after --max-frames.")
     parser.add_argument("--max-frames", type=int, default=0, help="Frame limit for smoke tests. 0 means unlimited.")
@@ -346,8 +356,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=True,
         help="Initialize the visual target frame at the current end-effector pose.",
     )
+    parser.add_argument(
+        "--gateway-endpoint",
+        default="",
+        help="Optional Stage1 data gateway bridge endpoint, e.g. tcp://127.0.0.1:5591.",
+    )
+    parser.add_argument("--gateway-fps", type=float, default=DEFAULT_STAGE1_GATEWAY_FPS)
+    parser.add_argument("--gateway-jpeg-quality", type=int, default=DEFAULT_STAGE1_GATEWAY_JPEG_QUALITY)
+    parser.add_argument(
+        "--camera-config",
+        type=Path,
+        default=None,
+        help="Legacy alias for --scene-config when only camera definitions are needed.",
+    )
     args = parser.parse_args(argv)
     apply_param_overrides(args)
+    apply_scene_config(args)
+    args.serial_number = args.serial_number or DEFAULT_SERIAL_NUMBER
+    args.joint_group = args.joint_group or DEFAULT_JOINT_GROUP
+    args.robot_prim_path = args.robot_prim_path or DEFAULT_ROBOT_PRIM_PATH
+    args.robot_name = args.robot_name or DEFAULT_ROBOT_NAME
+    args.end_effector_prim_name = args.end_effector_prim_name or DEFAULT_END_EFFECTOR_PRIM_NAME
+    args.usd = args.usd or DEFAULT_RIZON4_USD
+    args.examples_ext = args.examples_ext or DEFAULT_EXAMPLES_EXT
     if args.smoke_test:
         args.headless = True
     return args
@@ -360,6 +391,9 @@ PARAM_OVERRIDE_KEYS = {
     "rdk_target_hz",
     "rdk_network_interface_whitelist",
     "rdk_serial_number",
+    "robot_prim_path",
+    "robot_name",
+    "end_effector_prim_name",
     "rdk_switch_mode",
     "rdk_clear_fault",
     "rdk_servo_on",
@@ -393,7 +427,51 @@ PARAM_OVERRIDE_KEYS = {
     "quest_position_scale",
     "quest_workspace_min",
     "quest_workspace_max",
+    "gateway_endpoint",
+    "gateway_fps",
+    "gateway_jpeg_quality",
+    "scene_config",
+    "camera_config",
 }
+
+
+def _read_structured_config(path: Path) -> dict | list:
+    config_path = Path(path).expanduser().resolve()
+    raw = config_path.read_text(encoding="utf-8")
+    if config_path.suffix.lower() == ".json":
+        return json.loads(raw)
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("PyYAML is required for YAML scene/camera config files") from exc
+    return yaml.safe_load(raw) or {}
+
+
+def apply_scene_config(args: argparse.Namespace) -> None:
+    if args.scene_config is None:
+        return
+    data = _read_structured_config(args.scene_config)
+    if not isinstance(data, dict):
+        raise ValueError("--scene-config must contain a YAML/JSON object")
+    robot = data.get("robot") or {}
+    if not isinstance(robot, dict):
+        raise ValueError("--scene-config robot must be an object")
+    if args.serial_number is None and robot.get("serial_number") is not None:
+        args.serial_number = str(robot["serial_number"])
+    if args.joint_group is None and robot.get("joint_group") is not None:
+        args.joint_group = str(robot["joint_group"])
+    if args.robot_prim_path is None and robot.get("prim_path") is not None:
+        args.robot_prim_path = str(robot["prim_path"])
+    if args.robot_name is None and robot.get("name") is not None:
+        args.robot_name = str(robot["name"])
+    if args.end_effector_prim_name is None and robot.get("end_effector_prim_name") is not None:
+        args.end_effector_prim_name = str(robot["end_effector_prim_name"])
+    if args.usd is None and robot.get("usd") is not None:
+        args.usd = Path(str(robot["usd"]))
+    if args.examples_ext is None and robot.get("examples_ext") is not None:
+        args.examples_ext = Path(str(robot["examples_ext"]))
+    if args.camera_config is None and data.get("cameras") is not None:
+        args.camera_config = args.scene_config
 
 
 def apply_param_overrides(args: argparse.Namespace) -> None:
@@ -570,6 +648,35 @@ def _add_default_lighting() -> None:
     distant.AddRotateXYZOp().Set(Gf.Vec3f(-45.0, 0.0, 35.0))
 
 
+def _load_camera_config(path: Path | None):
+    if path is None:
+        raise ValueError("Stage1 gateway requires --scene-config or legacy --camera-config with a non-empty cameras list")
+    data = _read_structured_config(path)
+    if isinstance(data, dict):
+        cameras = data.get("cameras", [])
+    else:
+        cameras = data
+    if not isinstance(cameras, list) or not cameras:
+        raise ValueError("--scene-config/--camera-config must define a non-empty cameras list")
+    return cameras
+
+
+def _camera_rgba_to_bgr(image):
+    import cv2
+    import numpy as np
+
+    arr = np.asarray(image)
+    if arr.dtype != np.uint8:
+        arr = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+    if arr.ndim != 3:
+        raise ValueError(f"Unexpected camera image shape: {arr.shape}")
+    if arr.shape[2] == 4:
+        return cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+    if arr.shape[2] == 3:
+        return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+    raise ValueError(f"Unexpected camera channels: {arr.shape}")
+
+
 def _is_robot_ready(robot) -> bool:
     articulation_view = getattr(robot, "_articulation_view", None)
     if articulation_view is None:
@@ -581,12 +688,17 @@ def _is_robot_ready(robot) -> bool:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.examples_ext is None:
+        raise RuntimeError("Flexiv examples extension is not configured; pass --scene-config, --examples-ext, or set FLEXIV_EXAMPLES_EXT")
+    if args.usd is None:
+        raise RuntimeError("Rizon4 USD is not configured; pass --scene-config, --usd, or set FLEXIV_RIZON4_USD")
     examples_ext = Path(args.examples_ext).expanduser().resolve()
-    if str(examples_ext) not in sys.path:
-        sys.path.insert(0, str(examples_ext))
     physics_hz = physics_hz_for_args(args)
 
     from isaacsim import SimulationApp
+
+    if str(examples_ext) not in sys.path:
+        sys.path.append(str(examples_ext))
 
     simulation_app = SimulationApp(
         {
@@ -607,6 +719,7 @@ def run(args: argparse.Namespace) -> int:
     from isaacsim.core.utils.stage import add_reference_to_stage
     from isaacsim.core.utils.types import ArticulationAction
     from isaacsim.robot.manipulators.examples.flexiv import FlexivSerial
+    from isaacsim.sensors.camera import Camera
 
     if flexivsimplugin.__version__ != COMPATIBLE_SIM_PLUGIN_VER:
         raise ImportError(
@@ -622,13 +735,31 @@ def run(args: argparse.Namespace) -> int:
     world.scene.add_default_ground_plane()
     _add_default_lighting()
 
+    stage1_cameras = []
+    if args.gateway_endpoint:
+        for idx, camera_cfg in enumerate(_load_camera_config(args.camera_config)):
+            name = str(camera_cfg.get("name", f"cam_{idx}"))
+            pos = [float(camera_cfg["position"][key]) for key in ("x", "y", "z")]
+            ori = [float(camera_cfg["orientation"][key]) for key in ("w", "x", "y", "z")]
+            camera = Camera(
+                prim_path="/World/" + name,
+                frequency=float(camera_cfg.get("fps", args.gateway_fps)),
+                resolution=tuple(camera_cfg.get("resolution", [640, 480])),
+                position=pos,
+                orientation=ori,
+            )
+            camera.set_focal_length(float(camera_cfg.get("focal_length", 2.5)))
+            camera.set_world_pose(position=pos, orientation=ori, camera_axes="usd")
+            stage1_cameras.append(camera)
+        print(f"[FlexivTargetFrame] Stage1 gateway cameras enabled: {len(stage1_cameras)}", flush=True)
+
     usd = str(Path(args.usd).expanduser().resolve())
-    add_reference_to_stage(usd_path=usd, prim_path="/World/Flexiv/Rizon4")
+    add_reference_to_stage(usd_path=usd, prim_path=args.robot_prim_path)
     robot = world.scene.add(
         FlexivSerial(
-            prim_path="/World/Flexiv/Rizon4",
-            name="Rizon4",
-            end_effector_prim_name="flange",
+            prim_path=args.robot_prim_path,
+            name=args.robot_name,
+            end_effector_prim_name=args.end_effector_prim_name,
         )
     )
     initial_pose = configured_initial_target_pose(args)
@@ -712,6 +843,10 @@ def run(args: argparse.Namespace) -> int:
     latest_quest_target = None
     rdk_runtime = None
     rdk_runtime_target_active = False
+    latest_target_drives = [0.0] * 7
+    gateway_client = None
+    gateway_last_connect_attempt = 0.0
+    gateway_last_publish = 0.0
 
     def on_physics_step(_dt):
         nonlocal servo_cycle, last_connected, effort_control_enabled, target_drive_warmup_remaining
@@ -719,7 +854,7 @@ def run(args: argparse.Namespace) -> int:
         nonlocal last_studio_ik_q, last_studio_ik_error_cycle
         nonlocal last_invalid_target_drive_cycle, last_target_drive_log_cycle
         nonlocal last_quest_target_log_cycle, last_rdk_error_cycle, last_rdk_command_log_cycle
-        nonlocal latest_quest_target, rdk_runtime, rdk_runtime_target_active
+        nonlocal latest_quest_target, rdk_runtime, rdk_runtime_target_active, latest_target_drives
         servo_cycle += 1
         sim_node.SendRobotStates(flexivsimplugin.SimRobotStates(servo_cycle, robot.q, robot.dq))
 
@@ -936,6 +1071,7 @@ def run(args: argparse.Namespace) -> int:
                     if not effort_control_enabled:
                         robot.switch_control_mode("effort")
                         effort_control_enabled = True
+                    latest_target_drives = list(target_drives[:7])
                     if state_torque_log_gate.should_publish(servo_cycle):
                         print(
                             format_state_torque_telemetry(
@@ -1019,6 +1155,7 @@ def run(args: argparse.Namespace) -> int:
                 if not effort_control_enabled:
                     robot.switch_control_mode("effort")
                     effort_control_enabled = True
+                latest_target_drives = list(target_drives[:7])
                 robot.apply_torques(target_drives)
             last_connected = True
         else:
@@ -1053,6 +1190,8 @@ def run(args: argparse.Namespace) -> int:
 
     world.add_physics_callback("target_frame_step", callback_fn=on_physics_step)
     world.reset()
+    for camera in stage1_cameras:
+        camera.initialize()
     robot.teleport_to(initial_q)
     robot.switch_control_mode("position")
     reset_target_to_start_pose()
@@ -1078,10 +1217,79 @@ def run(args: argparse.Namespace) -> int:
     frame_count = 0
     rate_limiter = StepRateLimiter(physics_hz)
     render_gate = TargetPosePublishGate.from_hz(float(args.render_hz), physics_freq=physics_hz)
+
+    def publish_gateway_sample() -> None:
+        nonlocal gateway_client, gateway_last_connect_attempt, gateway_last_publish
+        if not args.gateway_endpoint:
+            return
+        now = time.monotonic()
+        if now - gateway_last_publish < 1.0 / max(float(args.gateway_fps), 1e-6):
+            return
+        gateway_last_publish = now
+        if gateway_client is None:
+            if now - gateway_last_connect_attempt < 1.0:
+                return
+            gateway_last_connect_attempt = now
+            try:
+                gateway_client = JsonLinePushClient(args.gateway_endpoint, timeout=0.2, retry=False)
+                print(f"[FlexivTargetFrame] Stage1 gateway connected {args.gateway_endpoint}", flush=True)
+            except Exception as exc:
+                print(f"[FlexivTargetFrame] Stage1 gateway connect failed: {exc}", flush=True)
+                gateway_client = None
+                return
+
+        colors = {}
+        for idx, camera in enumerate(stage1_cameras):
+            try:
+                rgba = camera.get_rgba()
+                if rgba is None:
+                    continue
+                colors[f"color_{idx}"] = encode_image_bgr(
+                    _camera_rgba_to_bgr(rgba),
+                    quality=int(args.gateway_jpeg_quality),
+                )
+            except Exception as exc:
+                print(f"[FlexivTargetFrame] Stage1 camera {idx} publish failed: {exc}", flush=True)
+        if stage1_cameras and len(colors) != len(stage1_cameras):
+            return
+
+        torque = list(latest_target_drives[:7])
+        if len(torque) < 7:
+            torque = [*torque, *([0.0] * (7 - len(torque)))]
+        states = unitree_parts_from_single_arm(robot.q, qvel=robot.dq, torque=torque, arm="left")
+        actions = unitree_parts_from_single_arm(robot.q, qvel=robot.dq, torque=torque, arm="left")
+        sample = {
+            "type": BRIDGE_SAMPLE_TYPE,
+            "version": 1,
+            "seq": int(servo_cycle),
+            "stamp_ns": now_ns(),
+            "colors": colors,
+            "states": states,
+            "actions": actions,
+            "sim_state": {
+                "backend": "quest_isaac_flexiv_stage1",
+                "servo_cycle": int(servo_cycle),
+                "serial": str(args.serial_number),
+                "target_drives": torque,
+                "robot_q": [float(value) for value in robot.q],
+                "robot_dq": [float(value) for value in robot.dq],
+            },
+        }
+        try:
+            gateway_client.send_json(sample)
+        except Exception as exc:
+            print(f"[FlexivTargetFrame] Stage1 gateway send failed: {exc}", flush=True)
+            try:
+                gateway_client.close()
+            except Exception:
+                pass
+            gateway_client = None
+
     try:
         while simulation_app.is_running():
             frame_count += 1
             world.step(render=render_gate.should_publish(frame_count))
+            publish_gateway_sample()
             if world.is_stopped() and not reset_needed:
                 reset_needed = True
             if world.is_playing():
@@ -1112,6 +1320,8 @@ def run(args: argparse.Namespace) -> int:
             quest_target_receiver.close()
         if studio_ik is not None:
             studio_ik.close()
+        if gateway_client is not None:
+            gateway_client.close()
         if args.smoke_test:
             print("FLEXIV_TARGET_FRAME_SMOKE_TEST_OK", flush=True)
         simulation_app.close()

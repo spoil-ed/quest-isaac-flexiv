@@ -13,8 +13,26 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOG_DIR = REPO_ROOT / "logs"
-ISAAC_PYTHON = Path("/home/simate/miniconda3/envs/isaacsim/bin/python")
-STUDIO_ROOT = Path("/home/simate/workspace/elements_studio/FlexivElementsStudio")
+DEFAULT_ENVIRONMENT_CONFIG = Path(
+    os.environ.get("FLEXIV_ENVIRONMENT_CONFIG", REPO_ROOT / "configs/environments/local_flexiv_runtime.yaml")
+)
+
+
+def load_environment_config(path: Path = DEFAULT_ENVIRONMENT_CONFIG) -> dict[str, str]:
+    config_path = Path(path).expanduser()
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml
+    except ImportError:
+        return {}
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    return data if isinstance(data, dict) else {}
+
+
+_ENVIRONMENT_CONFIG = load_environment_config()
+ISAAC_PYTHON = Path(os.environ.get("ISAAC_PYTHON") or _ENVIRONMENT_CONFIG.get("isaac_python", "python"))
+STUDIO_ROOT = Path(os.environ.get("STUDIO_ROOT") or _ENVIRONMENT_CONFIG.get("studio_root", "FlexivElementsStudio"))
 FLEXIV_QUEST_FOLLOW = (
     REPO_ROOT
     / "standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/follow_ball_with_studio.py"
