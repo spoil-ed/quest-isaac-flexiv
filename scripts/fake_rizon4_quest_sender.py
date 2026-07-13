@@ -14,6 +14,7 @@ from typing import Iterable
 
 
 DEFAULT_SERIAL_NUMBER = "Rizon4-VIHhZM"
+DEFAULT_RIGHT_SERIAL_NUMBER = "Rizon4-WE7ssd"
 DEFAULT_JOINT_GROUP = "ARM_1"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 45679
@@ -39,12 +40,12 @@ def normalize_quat_wxyz(values: Iterable[float]) -> list[float]:
     return [value / norm for value in quat]
 
 
-def delta_for_frame(frame: int, frames: int, axis: str, amplitude_m: float) -> list[float]:
+def delta_for_frame(frame: int, frames: int, axis: str, amplitude_m: float, *, cycles: float = 0.5) -> list[float]:
     if frames <= 1:
         phase = 1.0
     else:
         phase = frame / float(frames - 1)
-    value = float(amplitude_m) * math.sin(math.pi * phase)
+    value = float(amplitude_m) * math.sin(2.0 * math.pi * float(cycles) * phase)
     delta = [0.0, 0.0, 0.0]
     axis_index = {"x": 0, "y": 1, "z": 2}[axis]
     delta[axis_index] = value
@@ -60,6 +61,7 @@ def build_fake_quest_packet(
     controller_delta_base: list[float],
     quat_wxyz: list[float],
     now: float,
+    reason: str = "fake_stage1",
 ) -> dict:
     return {
         "schema": "rizon4_quest_target.v1",
@@ -71,8 +73,43 @@ def build_fake_quest_packet(
         "controller_position_openxr": [0.0, 0.0, 0.0],
         "controller_delta_base": [float(value) for value in controller_delta_base],
         "monotonic_time": float(now),
-        "reason": "fake_stage1",
+        "reason": str(reason),
     }
+
+
+def build_fake_dual_quest_packets(
+    *,
+    seq: int,
+    left_serial_number: str,
+    right_serial_number: str,
+    joint_group: str,
+    left_delta_base: list[float],
+    right_delta_base: list[float],
+    quat_wxyz: list[float],
+    now: float,
+) -> list[dict]:
+    return [
+        build_fake_quest_packet(
+            seq=seq,
+            side="left",
+            serial_number=left_serial_number,
+            joint_group=joint_group,
+            controller_delta_base=left_delta_base,
+            quat_wxyz=quat_wxyz,
+            now=now,
+            reason="fake_stage2_dual",
+        ),
+        build_fake_quest_packet(
+            seq=seq,
+            side="right",
+            serial_number=right_serial_number,
+            joint_group=joint_group,
+            controller_delta_base=right_delta_base,
+            quat_wxyz=quat_wxyz,
+            now=now,
+            reason="fake_stage2_dual",
+        ),
+    ]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -80,10 +117,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--serial-number", default=DEFAULT_SERIAL_NUMBER)
+    parser.add_argument("--left-serial-number", default=None)
+    parser.add_argument("--right-serial-number", default=DEFAULT_RIGHT_SERIAL_NUMBER)
     parser.add_argument("--joint-group", default=DEFAULT_JOINT_GROUP)
     parser.add_argument("--side", choices=["left", "right"], default="right")
+    parser.add_argument("--dual", action="store_true", help="Send left and right controller packets to one endpoint.")
     parser.add_argument("--axis", choices=["x", "y", "z"], default="x")
+    parser.add_argument("--right-axis", choices=["x", "y", "z"], default=None)
     parser.add_argument("--amplitude-m", type=float, default=0.005)
+    parser.add_argument(
+        "--cycles",
+        type=float,
+        default=0.5,
+        help="Number of sine cycles across --frames. Default 0.5 preserves the legacy single half-sine motion.",
+    )
+    parser.add_argument(
+        "--same-direction",
+        action="store_true",
+        help="In --dual mode, move both arms in the same signed direction instead of opposed motion.",
+    )
     parser.add_argument("--frames", type=int, default=120)
     parser.add_argument("--rate-hz", type=float, default=30.0)
     parser.add_argument("--quat-wxyz", default=",".join(str(value) for value in DEFAULT_QUAT_WXYZ))
@@ -100,23 +152,61 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for frame in range(max(1, int(args.frames))):
             now = time.monotonic()
-            packet = build_fake_quest_packet(
-                seq=frame,
-                side=args.side,
-                serial_number=args.serial_number,
-                joint_group=args.joint_group,
-                controller_delta_base=delta_for_frame(frame, max(1, int(args.frames)), args.axis, args.amplitude_m),
-                quat_wxyz=quat,
-                now=now,
-            )
+            if args.dual:
+                left_delta = delta_for_frame(
+                    frame,
+                    max(1, int(args.frames)),
+                    args.axis,
+                    args.amplitude_m,
+                    cycles=float(args.cycles),
+                )
+                right_amplitude = float(args.amplitude_m) if args.same_direction else -float(args.amplitude_m)
+                right_delta = delta_for_frame(
+                    frame,
+                    max(1, int(args.frames)),
+                    args.right_axis or args.axis,
+                    right_amplitude,
+                    cycles=float(args.cycles),
+                )
+                packets = build_fake_dual_quest_packets(
+                    seq=frame,
+                    left_serial_number=args.left_serial_number or args.serial_number,
+                    right_serial_number=args.right_serial_number,
+                    joint_group=args.joint_group,
+                    left_delta_base=left_delta,
+                    right_delta_base=right_delta,
+                    quat_wxyz=quat,
+                    now=now,
+                )
+            else:
+                packets = [
+                    build_fake_quest_packet(
+                        seq=frame,
+                        side=args.side,
+                        serial_number=args.serial_number,
+                        joint_group=args.joint_group,
+                        controller_delta_base=delta_for_frame(
+                            frame,
+                            max(1, int(args.frames)),
+                            args.axis,
+                            args.amplitude_m,
+                            cycles=float(args.cycles),
+                        ),
+                        quat_wxyz=quat,
+                        now=now,
+                    )
+                ]
             if args.dry_run:
-                print(json.dumps(packet, indent=2, sort_keys=True))
+                payload = packets if args.dual else packets[0]
+                print(json.dumps(payload, indent=2, sort_keys=True))
                 break
-            sock.sendto(json.dumps(packet, separators=(",", ":"), sort_keys=True).encode("utf-8"), address)
+            for packet in packets:
+                sock.sendto(json.dumps(packet, separators=(",", ":"), sort_keys=True).encode("utf-8"), address)
             if frame % max(1, int(args.rate_hz)) == 0:
                 print(
                     f"[fake_rizon4_quest_sender] sent seq={frame} "
-                    f"delta={[round(v, 5) for v in packet['controller_delta_base']]} "
+                    f"packets={len(packets)} "
+                    f"delta={[round(v, 5) for v in packets[0]['controller_delta_base']]} "
                     f"to {args.host}:{args.port}",
                     flush=True,
                 )

@@ -70,6 +70,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--joint-group", default=DEFAULT_JOINT_GROUP)
     parser.add_argument("--max-age-sec", type=float, default=0.5)
     parser.add_argument("--network-interface-whitelist", default="")
+    parser.add_argument("--switch-mode", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--clear-fault", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--strict-clear-fault", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--servo-on", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--retry-last-pose-sec", type=float, default=1.0)
     parser.add_argument("--log-hz", type=float, default=2.0)
     return parser.parse_args(argv)
 
@@ -84,9 +89,10 @@ def main(argv: list[str] | None = None) -> int:
             serial_number=args.serial_number,
             joint_group=args.joint_group,
             network_interface_whitelist=args.network_interface_whitelist,
-            switch_mode=True,
-            clear_fault=True,
-            servo_on=False,
+            switch_mode=bool(args.switch_mode),
+            clear_fault=bool(args.clear_fault),
+            strict_clear_fault=bool(args.strict_clear_fault),
+            servo_on=bool(args.servo_on),
             verbose=True,
         ),
         log=lambda message: print(f"[RdkTargetStreamer] {message}", flush=True),
@@ -96,23 +102,32 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
     last_log_time = 0.0
+    last_retry_time = 0.0
+    last_pose: list[float] | None = None
     while True:
         try:
             data, _addr = sock.recvfrom(65536)
         except socket.timeout:
-            continue
-        try:
-            packet = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        pose = parse_target_pose_packet(
-            packet,
-            serial_number=args.serial_number,
-            joint_group=args.joint_group,
-            max_age_sec=float(args.max_age_sec),
-        )
-        if pose is None:
-            continue
+            now = time.monotonic()
+            if last_pose is None or now - last_retry_time < max(0.0, float(args.retry_last_pose_sec)):
+                continue
+            pose = list(last_pose)
+            last_retry_time = now
+        else:
+            try:
+                packet = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            pose = parse_target_pose_packet(
+                packet,
+                serial_number=args.serial_number,
+                joint_group=args.joint_group,
+                max_age_sec=float(args.max_age_sec),
+            )
+            if pose is None:
+                continue
+            last_pose = list(pose)
+            last_retry_time = time.monotonic()
         try:
             controller.send_pose(pose)
         except Exception as exc:

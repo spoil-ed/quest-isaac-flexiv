@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert Stage1 Unitree JSON into a LeRobot-style dataset."""
+"""Convert Flexiv Unitree JSON into a LeRobot-style dataset."""
 
 from __future__ import annotations
 

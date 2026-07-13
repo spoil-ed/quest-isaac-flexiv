@@ -221,6 +221,33 @@ class FlexivStudioTeleopTests(unittest.TestCase):
             )
         )
 
+    def test_relative_mapper_reference_orientation_ignores_packet_quat(self):
+        mod = load_follow_ball()
+        mapper = mod.QuestRelativeTargetMapper(
+            axis_map=mod.parse_quest_axis_map("x,y,z"),
+            scale=1.0,
+            workspace_min=(-1.0, -1.0, -1.0),
+            workspace_max=(1.0, 1.0, 1.0),
+            position_deadband_m=0.0,
+            orientation_mode="reference",
+        )
+        current = [0.30, 0.0, 0.40, 1.0, 0.0, 0.0, 0.0]
+        packet = mod.QuestTargetPacket(
+            seq=1,
+            side="right",
+            pose_base_tcp_des=[0.0, 0.0, 0.0, 0.0, 0.70710678, 0.0, 0.70710678],
+            controller_position_openxr=[0.0, 0.0, 0.0],
+            gripper_open_ratio=None,
+            monotonic_time=1.0,
+            controller_delta_base=[0.0, 0.0, 0.0],
+        )
+        self.assertEqual(mapper.update(packet, current), current)
+
+        moved = mapper.update(packet._replace(seq=2, controller_delta_base=[0.02, 0.0, 0.0]), current)
+
+        self.assertEqual(moved[:3], [0.32, 0.0, 0.4])
+        self.assertEqual(moved[3:], [1.0, 0.0, 0.0, 0.0])
+
     def test_follow_ball_accepts_matching_quest_target_packet(self):
         mod = load_follow_ball()
         packet = {

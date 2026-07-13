@@ -62,7 +62,10 @@ class RepoLayoutTests(unittest.TestCase):
             "rizon4_quest_target_publisher.py",
             "run_stage1_data_collection_smoke.py",
             "run_stage1_single_rizon4_real_validation.py",
+            "run_stage2_dual_data_collection_smoke.py",
+            "run_stage2_dual_rizon4_real_validation.py",
             "start_data_gateway.py",
+            "start_dual_isaac_follow.py",
             "start_elements_studio_ui.py",
             "start_robot_control_app.py",
             "start_flexiv_simulation.py",
@@ -90,6 +93,31 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertNotIn("flexiv_test", " ".join(command))
         self.assertIn("--coordinated-reset", command)
         self.assertEqual(command[command.index("--reset-settle-sec") + 1], "2.0")
+
+        dual_follow = load_script("start_dual_isaac_follow.py")
+        dual_command = dual_follow.build_command(
+            dual_follow.parse_args(
+                [
+                    "--scene-config",
+                    "/tmp/dual_scene.yaml",
+                    "--left-serial-number",
+                    "Rizon4-L",
+                    "--right-serial-number",
+                    "Rizon4-R",
+                    "--left-target-pose-udp-port",
+                    "57680",
+                    "--right-target-pose-udp-port",
+                    "57681",
+                    "--gateway-endpoint",
+                    "tcp://127.0.0.1:5791",
+                ]
+            )
+        )
+        self.assertIn("flexiv_quest/dual_follow_with_studio.py", str(dual_command[1]))
+        self.assertIn("--left-serial-number", dual_command)
+        self.assertIn("Rizon4-L", dual_command)
+        self.assertIn("--right-serial-number", dual_command)
+        self.assertIn("Rizon4-R", dual_command)
 
     def test_external_rdk_target_streamer_uses_compatible_rdk_client(self):
         streamer = load_script("start_rdk_target_streamer.py")
@@ -199,6 +227,7 @@ class RepoLayoutTests(unittest.TestCase):
         allowed = {
             "README.md",
             "app_config.yaml",
+            "dual_follow_with_studio.py",
             "follow_ball_with_studio.py",
         }
         actual = {path.name for path in FLEXIV_QUEST.iterdir() if path.is_file()}

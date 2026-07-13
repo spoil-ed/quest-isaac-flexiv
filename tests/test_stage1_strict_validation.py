@@ -13,7 +13,7 @@ from flexiv_data_collection.validators import parse_args as parse_validator_args
 from flexiv_data_collection.validators import validate_unitree_json
 
 
-def _sample(*, cycle=1, q_offset=0.0, torque=0.1, colors=None):
+def _sample(*, cycle=1, q_offset=0.0, torque=0.1, target_x=0.3, colors=None):
     parts = schema.unitree_parts_from_single_arm(
         [q_offset, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         qvel=[0.0] * 7,
@@ -29,6 +29,10 @@ def _sample(*, cycle=1, q_offset=0.0, torque=0.1, colors=None):
                 "backend": EXPECTED_STAGE1_BACKEND,
                 "serial": EXPECTED_STAGE1_SERIAL,
                 "servo_cycle": cycle,
+                "target_frame": {
+                    "base_tcp_pose": [target_x, 0.0, 0.4, 1.0, 0.0, 0.0, 0.0],
+                    "world_position": [target_x, 0.0, 0.4],
+                },
             }
         },
     }
@@ -88,6 +92,25 @@ class Stage1StrictValidationTests(unittest.TestCase):
 
         result = summarize_stage1_single_arm_frames(frames, min_left_q_delta=0.003, min_left_torque_norm=1e-8)
         self.assertTrue(result["right_arm_zero"])
+
+    def test_episode_summary_enforces_target_frame_motion(self):
+        frames = [_sample(cycle=1, q_offset=0.0, target_x=0.3), _sample(cycle=5, q_offset=0.01, target_x=0.304)]
+
+        with self.assertRaisesRegex(ValueError, "target_frame_delta_norm"):
+            summarize_stage1_single_arm_frames(
+                frames,
+                min_left_q_delta=0.005,
+                min_left_torque_norm=1e-8,
+                min_target_frame_delta=0.01,
+            )
+
+        result = summarize_stage1_single_arm_frames(
+            [_sample(cycle=1, q_offset=0.0, target_x=0.3), _sample(cycle=5, q_offset=0.01, target_x=0.315)],
+            min_left_q_delta=0.005,
+            min_left_torque_norm=1e-8,
+            min_target_frame_delta=0.01,
+        )
+        self.assertGreaterEqual(result["target_frame_delta_norm"], 0.01)
 
 
 if __name__ == "__main__":

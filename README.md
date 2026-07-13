@@ -1,10 +1,13 @@
 # Quest Isaac Flexiv
 
-使用 Meta Quest 右手柄控制 Isaac Sim 中的 Flexiv Rizon4，并将相机、机器人状态和控制量录制为 Unitree JSON，再转换为 LeRobot 数据集。
+使用 Meta Quest/fake sender 控制 Isaac Sim 中的 Flexiv Rizon4，并将相机、机器人状态和控制量录制为 Unitree JSON，再转换为 LeRobot 数据集。Stage1 保留单臂主线，Stage2 新增双臂主线。
 
 ```text
 Quest -> Isaac TargetFrame -> Flexiv RDK -> Elements Studio/FlexivSimulation
       -> SimPlugin target_drives -> Isaac -> Stage1 recorder
+
+Dual Quest/fake -> Isaac Dual TargetFrame -> 2x Flexiv RDK/Studio
+      -> 2x SimPlugin target_drives -> Isaac -> Stage2 recorder
 ```
 
 ## 仓库分布
@@ -45,6 +48,7 @@ export TASK_NAME="pick_cube"
 | `--studio-root` | Elements Studio 安装根目录。 |
 | `--isaac-python` / `--python` | Isaac 和 RDK streamer 使用的 Python。 |
 | `--serial-number` | RDK 别名序列号；Studio、Isaac、Quest 和验证必须一致。 |
+| `--left-serial-number` / `--right-serial-number` | Stage2 双臂左右 RDK 别名序列号。 |
 | `--scene-config` | 机器人、USD 和 `cam_front` 相机配置。 |
 | `--sample-endpoint` | recorder 从 gateway 获取样本及发送 reset 的地址。 |
 | `--bridge-endpoint` / `--gateway-endpoint` | Isaac 向 gateway 推送数据的同一地址。 |
@@ -179,6 +183,76 @@ tail -f logs/*.stderr.log
 python scripts/stop_flexiv_stack.py
 ```
 
+## Stage2 双臂流程
+
+Stage2 使用独立配置，不改变上面的 Stage1 单臂流程：
+
+- scene config：`configs/scenes/dual_rizon4_cam_front.yaml`
+- pipeline config：`configs/pipelines/stage2_dual_rizon4_data_collection.yaml`
+- 默认本机样例 serial：left `Rizon4-VIHhZM`，right `Rizon4-WE7ssd`，可用 CLI 或 scene config 覆盖。
+- 默认端口：gateway `5790/5791`，Quest target `57679`，left/right target pose `57680/57681`。
+
+无 Isaac 的双臂数据工具链 smoke：
+
+```bash
+python scripts/run_stage2_dual_data_collection_smoke.py
+```
+
+真实双臂闭环验收：
+
+```bash
+python scripts/run_stage2_dual_rizon4_real_validation.py \
+  --config configs/pipelines/stage2_dual_rizon4_data_collection.yaml \
+  --left-serial-number "$LEFT_ROBOT_SERIAL" \
+  --right-serial-number "$RIGHT_ROBOT_SERIAL"
+```
+
+验收会启动本仓库 gateway、两个 RDK target streamer、双臂 Isaac app、fake dual sender、recorder、converter 和 strict dual validator。成功后输出：
+
+```text
+datasets/stage1_records/quest_isaac_flexiv_stage2_dual_rizon4_real_<stamp>/
+├── raw/episode_001/data.json
+├── logs/
+├── stage2_dual_rizon4_real_validation.json
+└── stage2_dual_rizon4_real_summary.json
+
+datasets/lerobot/qiming/quest_isaac_flexiv_stage2_dual_rizon4_<stamp>/
+└── videos/observation.images.cam_front/chunk-000/file-000.mp4
+```
+
+手动拆分启动时使用：
+
+```bash
+python scripts/start_dual_isaac_follow.py \
+  --isaac-python "$ISAAC_PYTHON" \
+  --scene-config configs/scenes/dual_rizon4_cam_front.yaml \
+  --left-serial-number "$LEFT_ROBOT_SERIAL" \
+  --right-serial-number "$RIGHT_ROBOT_SERIAL" \
+  --enable-quest-target-udp \
+  --quest-target-udp-port 57679 \
+  --left-target-pose-udp-port 57680 \
+  --right-target-pose-udp-port 57681 \
+  --gateway-endpoint tcp://127.0.0.1:5791
+```
+
+双臂严格验证示例：
+
+```bash
+python scripts/validate_data_artifacts.py \
+  --raw-dir "$STAGE2_RAW_DIR" \
+  --dataset-root "$STAGE2_DATASET_ROOT" \
+  --strict-dual-arm \
+  --expected-left-serial "$LEFT_ROBOT_SERIAL" \
+  --expected-right-serial "$RIGHT_ROBOT_SERIAL" \
+  --required-camera-names cam_front \
+  --required-camera-keys color_0 \
+  --min-left-q-delta 0.005 \
+  --min-right-q-delta 0.005 \
+  --min-left-torque-norm 1e-8 \
+  --min-right-torque-norm 1e-8 \
+  --min-servo-cycle-delta 5
+```
+
 ## 产物说明
 
 ```text
@@ -201,6 +275,7 @@ datasets/lerobot/qiming/<task_name>/
 - `*.mp4`：H264 相机视频。
 - `meta/`：数据集特征、episode 索引和统计信息。
 - 严格验证会检查 serial、单臂占位、相机完整性、运动量、力矩、servo cycle 和 H264 codec。
+- Stage2 双臂严格验证会要求左右臂都有运动和非零力矩，不允许把右臂当作 Stage1 零占位。
 
 ## 其他说明
 

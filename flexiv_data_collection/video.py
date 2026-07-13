@@ -67,6 +67,28 @@ def make_h264_video(image_paths: list[Path], output_path: Path, *, fps: float = 
 
 
 def probe_video_codec(path: Path) -> str:
+    return str(probe_video_stream_info(path).get("codec_name", ""))
+
+
+def _ratio_to_float(value: str | None) -> float | None:
+    if not value:
+        return None
+    if "/" not in value:
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    num_s, den_s = value.split("/", 1)
+    try:
+        den = float(den_s)
+        if den == 0.0:
+            return None
+        return float(num_s) / den
+    except ValueError:
+        return None
+
+
+def probe_video_stream_info(path: Path) -> dict:
     ffprobe = require_ffprobe()
     result = subprocess.run(
         [
@@ -76,7 +98,7 @@ def probe_video_codec(path: Path) -> str:
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=codec_name",
+            "stream=codec_name,width,height,avg_frame_rate,r_frame_rate,nb_frames,duration",
             "-of",
             "json",
             str(path),
@@ -90,4 +112,11 @@ def probe_video_codec(path: Path) -> str:
     streams = payload.get("streams") or []
     if not streams:
         raise RuntimeError(f"No video stream found in {path}")
-    return str(streams[0].get("codec_name", ""))
+    stream = dict(streams[0])
+    stream["avg_fps"] = _ratio_to_float(stream.get("avg_frame_rate"))
+    stream["r_fps"] = _ratio_to_float(stream.get("r_frame_rate"))
+    if stream.get("nb_frames") not in (None, "N/A"):
+        stream["nb_frames_int"] = int(stream["nb_frames"])
+    if stream.get("duration") not in (None, "N/A"):
+        stream["duration_sec"] = float(stream["duration"])
+    return stream

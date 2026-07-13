@@ -58,6 +58,7 @@ class RdkRuntimeSettings:
     network_interface_whitelist: str | Iterable[str] | None = ""
     switch_mode: bool = True
     clear_fault: bool = False
+    strict_clear_fault: bool = True
     servo_on: bool = False
     verbose: bool = False
 
@@ -361,6 +362,7 @@ def connect_rdk_cartesian_streamer(
     network_interface_whitelist: str | Iterable[str] | None = None,
     switch_mode: bool = True,
     clear_fault: bool = False,
+    strict_clear_fault: bool = True,
     servo_on: bool = False,
     verbose: bool = False,
     log=None,
@@ -381,7 +383,10 @@ def connect_rdk_cartesian_streamer(
         try:
             ok = robot.ClearFault(30)
             if ok is False:
-                raise RuntimeError(f"failed to clear fault on {serial_number}")
+                message = f"failed to clear fault on {serial_number}"
+                if strict_clear_fault:
+                    raise RuntimeError(message)
+                logger(f"[FlexivRDK] {message}; continuing")
         except TypeError:
             robot.ClearFault()
     if bool(servo_on) and hasattr(robot, "ServoOn"):
@@ -427,6 +432,7 @@ class RdkRuntimeController:
             network_interface_whitelist=self.settings.network_interface_whitelist,
             switch_mode=self.settings.switch_mode,
             clear_fault=self.settings.clear_fault,
+            strict_clear_fault=self.settings.strict_clear_fault,
             servo_on=self.settings.servo_on,
             verbose=self.settings.verbose,
             log=self._log,

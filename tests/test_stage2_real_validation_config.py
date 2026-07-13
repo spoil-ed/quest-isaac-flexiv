@@ -1,0 +1,175 @@
+import importlib.util
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts/run_stage2_dual_rizon4_real_validation.py"
+DUAL_APP = ROOT / "standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/dual_follow_with_studio.py"
+
+
+def load_validation_script():
+    spec = importlib.util.spec_from_file_location("run_stage2_dual_rizon4_real_validation", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_dual_app():
+    spec = importlib.util.spec_from_file_location("dual_follow_with_studio", DUAL_APP)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class Stage2RealValidationConfigTests(unittest.TestCase):
+    def test_json_config_supplies_dual_serials_paths_ports_and_outputs(self):
+        module = load_validation_script()
+        with tempfile.TemporaryDirectory(prefix="stage2_real_config_") as tmp:
+            tmp_path = Path(tmp)
+            env_config = tmp_path / "environment.json"
+            scene_config = tmp_path / "scene.json"
+            pipeline_config = tmp_path / "pipeline.json"
+            env_config.write_text(
+                json.dumps(
+                    {
+                        "rdk_python": str(tmp_path / "rdk/bin/python"),
+                        "isaac_python": str(tmp_path / "isaac/python.sh"),
+                        "isaacsim_root": str(tmp_path / "isaac"),
+                        "record_output_root": str(tmp_path / "records"),
+                        "lerobot_output_root": str(tmp_path / "datasets"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            scene_config.write_text(
+                json.dumps(
+                    {
+                        "robots": [
+                            {
+                                "side": "left",
+                                "serial_number": "Rizon4-L",
+                                "joint_group": "ARM_CUSTOM",
+                                "prim_path": "/World/Left",
+                                "usd": str(tmp_path / "rizon.usd"),
+                                "examples_ext": str(tmp_path / "examples"),
+                                "target_pose": {"host": "127.0.0.1", "port": 6102},
+                            },
+                            {
+                                "side": "right",
+                                "serial_number": "Rizon4-R",
+                                "joint_group": "ARM_CUSTOM",
+                                "prim_path": "/World/Right",
+                                "usd": str(tmp_path / "rizon.usd"),
+                                "examples_ext": str(tmp_path / "examples"),
+                                "target_pose": {"host": "127.0.0.1", "port": 6103},
+                            },
+                        ],
+                        "cameras": [{"name": "cam_front"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pipeline_config.write_text(
+                json.dumps(
+                    {
+                        "environment_config": "environment.json",
+                        "scene_config": "scene.json",
+                        "gateway": {
+                            "sample_endpoint": "tcp://127.0.0.1:6100",
+                            "bridge_endpoint": "tcp://127.0.0.1:6101",
+                            "camera_keys": ["color_0"],
+                        },
+                        "quest_target": {"host": "127.0.0.1", "port": 6104},
+                        "record": {"max_frames": 9, "fps": 7, "image_size": "320x240"},
+                        "convert": {"repo_id": "local/stage2", "action_mode": "full"},
+                        "validation": {"min_left_q_delta": 0.01, "min_right_q_delta": 0.02},
+                        "fake_sender": {"axis": "y", "right_axis": "z", "frames": 11, "rate_hz": 44},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            args = module.parse_args(["--config", str(pipeline_config)])
+
+            self.assertEqual(args.left_serial_number, "Rizon4-L")
+            self.assertEqual(args.right_serial_number, "Rizon4-R")
+            self.assertEqual(args.joint_group, "ARM_CUSTOM")
+            self.assertEqual(args.left_robot_prim_path, "/World/Left")
+            self.assertEqual(args.right_robot_prim_path, "/World/Right")
+            self.assertEqual(args.sample_endpoint, "tcp://127.0.0.1:6100")
+            self.assertEqual(args.bridge_endpoint, "tcp://127.0.0.1:6101")
+            self.assertEqual(args.left_target_pose_udp_port, 6102)
+            self.assertEqual(args.right_target_pose_udp_port, 6103)
+            self.assertEqual(args.quest_target_udp_port, 6104)
+            self.assertEqual(args.scene_camera_names, ["cam_front"])
+            self.assertEqual(args.scene_camera_keys, ["color_0"])
+            self.assertEqual(args.repo_id_prefix, "local/stage2")
+            self.assertEqual(args.action_mode, "full")
+            self.assertEqual(args.record_frames, 9)
+            self.assertEqual(args.record_fps, 7.0)
+            self.assertEqual(args.fake_axis, "y")
+            self.assertEqual(args.fake_right_axis, "z")
+
+    def test_prepare_rejects_identical_dual_serials(self):
+        module = load_validation_script()
+        with tempfile.TemporaryDirectory(prefix="stage2_same_serial_") as tmp:
+            args = module.parse_args(
+                [
+                    "--config",
+                    str(Path(tmp) / "missing.json"),
+                    "--left-serial-number",
+                    "Rizon4-SAME",
+                    "--right-serial-number",
+                    "Rizon4-SAME",
+                ]
+            )
+            runner = module.RealValidationRunner(args)
+
+            with self.assertRaisesRegex(RuntimeError, "serials must be different"):
+                runner.prepare()
+
+    def test_dual_isaac_app_scene_config_supplies_robot_and_camera_config(self):
+        dual_app = load_dual_app()
+        with tempfile.TemporaryDirectory(prefix="stage2_dual_app_scene_") as tmp:
+            tmp_path = Path(tmp)
+            scene_config = tmp_path / "scene.json"
+            scene_config.write_text(
+                json.dumps(
+                    {
+                        "robots": [
+                            {
+                                "side": "left",
+                                "serial_number": "Rizon4-L",
+                                "joint_group": "ARM_SCENE",
+                                "usd": "scene.usd",
+                                "examples_ext": "examples",
+                            },
+                            {
+                                "side": "right",
+                                "serial_number": "Rizon4-R",
+                                "joint_group": "ARM_SCENE",
+                            },
+                        ],
+                        "cameras": [{"name": "cam_front"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            args = dual_app.parse_args(["--scene-config", str(scene_config)])
+
+            self.assertEqual(args.left_serial_number, "Rizon4-L")
+            self.assertEqual(args.right_serial_number, "Rizon4-R")
+            self.assertEqual(args.joint_group, "ARM_SCENE")
+            self.assertEqual(args.usd, tmp_path / "scene.usd")
+            self.assertEqual(args.examples_ext, tmp_path / "examples")
+
+
+if __name__ == "__main__":
+    unittest.main()

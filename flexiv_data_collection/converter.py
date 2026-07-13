@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert Stage1 Unitree JSON episodes into a minimal LeRobot-style dataset."""
+"""Convert Flexiv Unitree JSON episodes into a minimal LeRobot-style dataset."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ class EpisodeData:
     @property
     def task(self) -> str:
         text = self.payload.get("text") or {}
-        return str(text.get("goal") or text.get("desc") or "Flexiv Stage1 data collection")
+        return str(text.get("goal") or text.get("desc") or "Flexiv data collection")
 
     @property
     def fps(self) -> float:
@@ -181,6 +181,7 @@ def convert_unitree_json_to_lerobot(
             },
         },
         "videos": video_meta,
+        "minimal_quest_isaac_flexiv": True,
         "minimal_quest_isaac_flexiv_stage1": True,
     }
     with (meta_dir / "info.json").open("w", encoding="utf-8") as file_obj:
@@ -210,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
         action_mode=args.action_mode,
         fps=args.fps,
     )
-    print(f"Created Stage1 LeRobot-style dataset: {dataset_root}")
+    print(f"Created LeRobot-style dataset: {dataset_root}")
     return 0
 
 

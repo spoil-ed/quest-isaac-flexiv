@@ -7,7 +7,7 @@ from pathlib import Path
 from flexiv_data_collection.converter import convert_unitree_json_to_lerobot
 from flexiv_data_collection.gateway import FakeBackend, LatestBridgeData
 from flexiv_data_collection.recorder import FlexivEpisodeWriter
-from flexiv_data_collection.validators import validate_lerobot_dataset, validate_unitree_json
+from flexiv_data_collection.validators import validate_lerobot_dataset, validate_raw_frame_diffs, validate_unitree_json
 
 
 def _has_runtime_deps() -> bool:
@@ -59,6 +59,24 @@ class Stage1ConverterTests(unittest.TestCase):
             videos = result["lerobot_dataset"]["videos"]
             self.assertEqual(len(videos), 1)
             self.assertTrue(all(item["codec"] == "h264" for item in videos))
+
+    def test_frame_diff_validator_rejects_duplicate_raw_frames(self):
+        import cv2
+        import numpy as np
+
+        with tempfile.TemporaryDirectory(prefix="stage1_frame_diff_test_") as tmp:
+            colors = Path(tmp) / "episode_001" / "colors"
+            colors.mkdir(parents=True)
+            image = np.zeros((24, 32, 3), dtype=np.uint8)
+            cv2.imwrite(str(colors / "000000_color_0.jpg"), image)
+            cv2.imwrite(str(colors / "000001_color_0.jpg"), image)
+
+            with self.assertRaisesRegex(ValueError, "duplicate_ratio"):
+                validate_raw_frame_diffs(
+                    Path(tmp),
+                    camera_keys=("color_0",),
+                    max_duplicate_ratio=0.0,
+                )
 
 
 if __name__ == "__main__":

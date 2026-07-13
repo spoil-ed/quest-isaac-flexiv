@@ -1,0 +1,51 @@
+# Dual Rizon4 scene used by Stage2 real validation.
+# The two robot serials are local validation examples and may be overridden by
+# CLI or by editing this scene config.
+
+robots:
+  - side: "left"
+    serial_number: "Rizon4-VIHhZM"
+    joint_group: "ARM_1"
+    prim_path: "/World/Flexiv/LeftRizon4"
+    name: "LeftRizon4"
+    end_effector_prim_name: "flange"
+    usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+    examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+    position: {x: 0.0, y: 0.35, z: 0.0}
+    orientation: {w: 1.0, x: 0.0, y: 0.0, z: 0.0}
+    target:
+      prim_path: "/World/TargetFrameLeft"
+      name: "target_frame_left"
+      position: {x: 0.45, y: 0.35, z: 0.35}
+      euler_deg: {x: 0.0, y: 0.0, z: 0.0}
+    target_pose:
+      host: "127.0.0.1"
+      port: 57680
+
+  - side: "right"
+    serial_number: "Rizon4-WE7ssd"
+    joint_group: "ARM_1"
+    prim_path: "/World/Flexiv/RightRizon4"
+    name: "RightRizon4"
+    end_effector_prim_name: "flange"
+    usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+    examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+    position: {x: 0.0, y: -0.35, z: 0.0}
+    orientation: {w: 1.0, x: 0.0, y: 0.0, z: 0.0}
+    target:
+      prim_path: "/World/TargetFrameRight"
+      name: "target_frame_right"
+      position: {x: 0.45, y: -0.35, z: 0.35}
+      euler_deg: {x: 0.0, y: 0.0, z: 0.0}
+    target_pose:
+      host: "127.0.0.1"
+      port: 57681
+
+cameras:
+  - name: "cam_front"
+    resolution: [640, 480]
+    fps: 30
+    focal_length: 2.0
+    position: {x: 2.40, y: 0.0, z: 1.60}
+    look_at: {x: 0.0, y: 0.0, z: 0.55}
+    up: {x: 0.0, y: 0.0, z: 1.0}

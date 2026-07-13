@@ -137,10 +137,22 @@ class BridgeReceiver(threading.Thread):
 
 
 class FakeBackend:
-    def __init__(self, fps: float, image_size: tuple[int, int], camera_keys: list[str]) -> None:
+    def __init__(
+        self,
+        fps: float,
+        image_size: tuple[int, int],
+        camera_keys: list[str],
+        *,
+        sim_backend: str = "fake",
+        left_serial: str = "",
+        right_serial: str = "",
+    ) -> None:
         self.fps = fps
         self.image_size = image_size
         self.camera_keys = camera_keys
+        self.sim_backend = str(sim_backend)
+        self.left_serial = str(left_serial)
+        self.right_serial = str(right_serial)
         self.seq = 0
 
     def sample(self, latest: LatestBridgeData) -> dict[str, Any]:
@@ -169,8 +181,11 @@ class FakeBackend:
             actions=actions,
             colors=colors,
             sim_state={
-                "backend": "fake",
+                "backend": self.sim_backend,
                 "sample_id": self.seq,
+                "servo_cycle": self.seq,
+                "servo_cycles": {"left": self.seq, "right": self.seq},
+                "serials": {"left": self.left_serial, "right": self.right_serial},
                 "timestamps": {
                     "action_time_ns": now_ns(),
                     "state_time_ns": now_ns(),
@@ -253,6 +268,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=",".join(FLEXIV_CAMERA_TO_IMAGE_KEY.keys()),
         help="Comma-separated Unitree color keys, e.g. color_0,color_1,color_2.",
     )
+    parser.add_argument("--fake-sim-backend", default="fake")
+    parser.add_argument("--fake-left-serial", default="")
+    parser.add_argument("--fake-right-serial", default="")
     return parser.parse_args(argv)
 
 
@@ -264,7 +282,18 @@ def main(argv: list[str] | None = None) -> int:
     bridge_receiver = BridgeReceiver(args.bridge_endpoint, latest)
     bridge_receiver.start()
 
-    backend = FakeBackend(args.fps, image_size, camera_keys) if args.backend == "fake" else BridgeBackend()
+    backend = (
+        FakeBackend(
+            args.fps,
+            image_size,
+            camera_keys,
+            sim_backend=args.fake_sim_backend,
+            left_serial=args.fake_left_serial,
+            right_serial=args.fake_right_serial,
+        )
+        if args.backend == "fake"
+        else BridgeBackend()
+    )
     server = JsonLineRepServer(args.sample_endpoint)
     print(f"[data-gateway] sample endpoint ready on {args.sample_endpoint}, backend={args.backend}", flush=True)
     try:

@@ -90,9 +90,17 @@ class JsonLinePushClient:
         """Return one server message without blocking the publisher loop."""
         if self.connection is None:
             return None
-        readable, _writable, _exceptional = select.select(
-            [self.connection.conn], [], [], max(0.0, float(timeout))
-        )
+        # Isaac Sim can keep enough descriptors open that this socket fd exceeds
+        # select()'s FD_SETSIZE on Linux. Reset commands are optional for the
+        # bridge publisher loop, so skip the poll instead of forcing a reconnect.
+        if self.connection.conn.fileno() >= 1024:
+            return None
+        try:
+            readable, _writable, _exceptional = select.select(
+                [self.connection.conn], [], [], max(0.0, float(timeout))
+            )
+        except ValueError:
+            return None
         if not readable:
             return None
         return self.connection.recv_json(timeout=max(0.01, float(timeout)))

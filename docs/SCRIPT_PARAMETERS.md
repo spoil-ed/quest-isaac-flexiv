@@ -43,6 +43,8 @@
 | `--fps` | `30` | fake backend 生成频率及其时间基准；真实 bridge 的相机频率由 Isaac 控制。 |
 | `--image-size` | `640x480` | fake backend 图像尺寸。 |
 | `--camera-keys` | schema 中全部相机键 | 逗号分隔的颜色键；单相机流程使用 `color_0`。 |
+| `--fake-sim-backend` | `fake` | fake backend 写入 `sim_state.backend`；Stage2 smoke 使用 `quest_isaac_flexiv_stage2_dual`。 |
+| `--fake-left-serial/right-serial` | 空 | fake backend 写入左右 serial，用于 Stage2 strict dual smoke。 |
 
 ## RDK target streamer
 
@@ -135,6 +137,19 @@ Hydra 参数来自 `configs/control/quest_teleop.yaml`，使用 `键=值` 覆盖
 
 示例：`python scripts/start_isaac_follow_hydra.py robot.serial_number="$ROBOT_SERIAL" safety.max_linear_speed_m_s=0.05`。
 
+### `start_dual_isaac_follow.py`
+
+Stage2 双臂 Isaac 启动入口，参数语义与单臂入口一致，差异如下：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--scene-config` | 无 | 推荐使用 `configs/scenes/dual_rizon4_cam_front.yaml`。 |
+| `--left-serial-number/right-serial-number` | scene 或本机样例 | 左右 SimPlugin/RDK serial。 |
+| `--left-target-pose-udp-host/port` | `127.0.0.1:57680` | 左臂发给 RDK streamer 的目标位姿地址。 |
+| `--right-target-pose-udp-host/port` | `127.0.0.1:57681` | 右臂发给 RDK streamer 的目标位姿地址。 |
+| `--quest-target-udp-port` | `57679` | 一个 Quest/fake UDP endpoint，通过 packet `side` 字段分流左右臂。 |
+| `--gateway-endpoint` | 空 | 非空时发布 Stage2 dual gateway sample。 |
+
 ## Quest publisher
 
 ### `rizon4_quest_target_publisher.py`
@@ -157,6 +172,15 @@ Hydra 参数来自 `configs/control/quest_teleop.yaml`，使用 `键=值` 覆盖
 | `--cert-file/--key-file` | `configs/xr_teleoperate` | HTTPS 证书和私钥。 |
 | `--rate-hz` | `30` | Quest 包发布频率。 |
 | `--log-hz` | `2` | 状态日志频率。 |
+
+### `fake_rizon4_quest_sender.py`
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--dual` | 关闭 | 同一 UDP endpoint 发送 left/right 两个 Quest target packet。 |
+| `--left-serial-number/right-serial-number` | Stage2 样例 | `--dual` 模式下左右 serial。 |
+| `--axis/right-axis` | `x` | 左右 fake 位移轴。 |
+| `--same-direction` | 关闭 | 默认左右相反方向运动；开启后同方向运动。 |
 
 ## Recorder
 
@@ -201,10 +225,26 @@ Hydra 参数来自 `configs/control/quest_teleop.yaml`，使用 `键=值` 覆盖
 | `--dataset-root` | 必填 | 转换后的 LeRobot 数据集目录。 |
 | `--out` | 无 | 可选 JSON 验证报告路径。 |
 | `--strict-single-arm` | 关闭 | 开启 Stage1 单 Rizon4 严格检查。 |
+| `--strict-dual-arm` | 关闭 | 开启 Stage2 双 Rizon4 严格检查。 |
 | `--expected-serial` | 严格模式必填 | 必须与数据中的 serial 一致，不能是空字符串。 |
+| `--expected-left-serial/right-serial` | 双臂严格模式必填 | 必须与 Stage2 数据中的左右 serial 一致。 |
+| `--required-camera-names` | `cam_front` | 双臂严格模式下要求 LeRobot dataset 至少包含这些视频。 |
+| `--required-camera-keys` | 按 camera names 推导 | 双臂严格模式下要求 Unitree JSON 包含这些 color key。 |
 | `--min-left-q-delta` | `0` | episode 相对首帧的最小关节位移范数。 |
+| `--min-right-q-delta` | `0` | Stage2 右臂相对首帧的最小关节位移范数。 |
 | `--min-left-torque-norm` | `0` | 最大左臂力矩范数必须严格大于该值。 |
+| `--min-right-torque-norm` | `0` | Stage2 最大右臂力矩范数必须严格大于该值。 |
 | `--min-servo-cycle-delta` | `0` | episode 内最小 servo cycle 跨度。 |
+
+## Stage2 验收脚本
+
+### `run_stage2_dual_data_collection_smoke.py`
+
+无 Isaac/Studio 的数据工具链 smoke：fake gateway -> recorder -> Unitree JSON -> LeRobot-style dataset -> H264 MP4 -> strict dual validator。
+
+### `run_stage2_dual_rizon4_real_validation.py`
+
+真实双臂闭环验收：读取 `configs/pipelines/stage2_dual_rizon4_data_collection.yaml`，启动本仓库 gateway、两个 RDK streamer、dual Isaac app、fake dual sender、recorder、converter 和 validator。常用覆盖参数包括 `--left-serial-number`、`--right-serial-number`、`--config`、`--record-frames`、`--keep-running-on-failure`。
 
 ## 状态与停止
 

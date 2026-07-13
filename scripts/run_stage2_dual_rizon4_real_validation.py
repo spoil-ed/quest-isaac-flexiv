@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run strict Stage1 single-Rizon4 real-runtime validation."""
+"""Run strict Stage2 dual-Rizon4 real-runtime validation."""
 
 from __future__ import annotations
 
@@ -14,38 +14,35 @@ import time
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FLEXIV_PYTHON = Path(sys.executable)
-DEFAULT_CONFIG = REPO_ROOT / "configs/pipelines/stage1_single_rizon4_data_collection.yaml"
+DEFAULT_CONFIG = REPO_ROOT / "configs/pipelines/stage2_dual_rizon4_data_collection.yaml"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "datasets/stage1_records"
 DEFAULT_LEROBOT_OUTPUT_ROOT = REPO_ROOT / "datasets/lerobot"
-DEFAULT_SAMPLE_ENDPOINT = os.environ.get("FLEXIV_STAGE1_SAMPLE_ENDPOINT", "tcp://127.0.0.1:5690")
-DEFAULT_BRIDGE_ENDPOINT = os.environ.get("FLEXIV_STAGE1_BRIDGE_ENDPOINT", "tcp://127.0.0.1:5691")
-DEFAULT_TARGET_POSE_UDP_HOST = os.environ.get("FLEXIV_TARGET_POSE_UDP_HOST", "127.0.0.1")
-DEFAULT_TARGET_POSE_UDP_PORT = int(os.environ.get("FLEXIV_TARGET_POSE_UDP_PORT", "55678"))
-DEFAULT_QUEST_TARGET_UDP_HOST = os.environ.get("FLEXIV_QUEST_TARGET_UDP_HOST", "127.0.0.1")
-DEFAULT_QUEST_TARGET_UDP_PORT = int(os.environ.get("FLEXIV_QUEST_TARGET_UDP_PORT", "55679"))
+DEFAULT_SAMPLE_ENDPOINT = os.environ.get("FLEXIV_STAGE2_SAMPLE_ENDPOINT", "tcp://127.0.0.1:5790")
+DEFAULT_BRIDGE_ENDPOINT = os.environ.get("FLEXIV_STAGE2_BRIDGE_ENDPOINT", "tcp://127.0.0.1:5791")
+DEFAULT_QUEST_TARGET_UDP_HOST = os.environ.get("FLEXIV_STAGE2_QUEST_TARGET_UDP_HOST", "127.0.0.1")
+DEFAULT_QUEST_TARGET_UDP_PORT = int(os.environ.get("FLEXIV_STAGE2_QUEST_TARGET_UDP_PORT", "57679"))
+DEFAULT_LEFT_TARGET_POSE_UDP_PORT = int(os.environ.get("FLEXIV_STAGE2_LEFT_TARGET_POSE_UDP_PORT", "57680"))
+DEFAULT_RIGHT_TARGET_POSE_UDP_PORT = int(os.environ.get("FLEXIV_STAGE2_RIGHT_TARGET_POSE_UDP_PORT", "57681"))
 
 
-def _import_stage1_helpers() -> None:
+def _import_helpers() -> None:
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
 
 
-_import_stage1_helpers()
+_import_helpers()
 
-from flexiv_data_collection.protocol import JsonLineReqClient, parse_tcp_endpoint  # noqa: E402
-from flexiv_data_collection.real_validation import (  # noqa: E402
-    EXPECTED_STAGE1_BACKEND,
-    STAGE1_CAMERA_KEYS,
-    Stage1SampleMonitor,
-    extract_stage1_bridge_state,
-    summarize_stage1_single_arm_frames,
-    validate_stage1_single_arm_sample,
+from flexiv_data_collection.dual_validation import (  # noqa: E402
+    EXPECTED_STAGE2_BACKEND,
+    STAGE2_DEFAULT_CAMERA_KEYS,
+    Stage2SampleMonitor,
+    extract_stage2_bridge_state,
+    summarize_stage2_dual_arm_frames,
+    validate_stage2_dual_arm_sample,
 )
+from flexiv_data_collection.protocol import JsonLineReqClient, parse_tcp_endpoint  # noqa: E402
 
 
 def json_print(payload: dict[str, Any]) -> None:
@@ -58,6 +55,15 @@ def load_config(path: Path | None) -> dict[str, Any]:
     config_path = path.expanduser()
     if not config_path.exists():
         return {}
+    if config_path.suffix.lower() == ".json":
+        data = json.loads(config_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            raise ValueError(f"Config must be a JSON mapping: {config_path}")
+        return data
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("PyYAML is required to load Stage2 pipeline configs") from exc
     data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         raise ValueError(f"Config must be a YAML mapping: {config_path}")
@@ -210,6 +216,27 @@ def wait_tcp(host: str, port: int, *, timeout: float, check_processes) -> None:
     raise TimeoutError(f"Timed out waiting for TCP {host}:{port}")
 
 
+def robot_by_side(scene_config: dict[str, Any], side: str) -> dict[str, Any]:
+    for robot in scene_config.get("robots") or []:
+        if isinstance(robot, dict) and str(robot.get("side", "")).lower() == side:
+            return robot
+    return {}
+
+
+def camera_names(scene_config: dict[str, Any], pipeline_config: dict[str, Any]) -> list[str]:
+    cameras = scene_config.get("cameras") or pipeline_config.get("cameras") or []
+    return [str(camera.get("name", f"cam_{idx}")) for idx, camera in enumerate(cameras) if isinstance(camera, dict)]
+
+
+def camera_keys_for_names(names: list[str], pipeline_config: dict[str, Any]) -> list[str]:
+    configured = cfg_get(pipeline_config, "gateway", "camera_keys")
+    if configured:
+        return [str(item) for item in configured]
+    if not names:
+        return list(STAGE2_DEFAULT_CAMERA_KEYS)
+    return [f"color_{idx}" for idx, _name in enumerate(names)]
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -217,11 +244,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rdk-python", type=Path)
     parser.add_argument("--isaac-python", type=Path)
     parser.add_argument("--isaacsim-root", type=Path)
-    parser.add_argument("--serial-number")
+    parser.add_argument("--left-serial-number")
+    parser.add_argument("--right-serial-number")
     parser.add_argument("--joint-group")
     parser.add_argument("--usd", type=Path)
     parser.add_argument("--examples-ext", type=Path)
-    parser.add_argument("--camera-config", type=Path)
+    parser.add_argument("--scene-config", type=Path)
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--lerobot-output-root", type=Path)
     parser.add_argument("--repo-id-prefix")
@@ -231,13 +259,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--image-size")
     parser.add_argument("--sample-endpoint")
     parser.add_argument("--bridge-endpoint")
-    parser.add_argument("--target-pose-udp-host")
-    parser.add_argument("--target-pose-udp-port", type=int)
     parser.add_argument("--quest-target-udp-host")
     parser.add_argument("--quest-target-udp-port", type=int)
+    parser.add_argument("--left-target-pose-udp-host")
+    parser.add_argument("--left-target-pose-udp-port", type=int)
+    parser.add_argument("--right-target-pose-udp-host")
+    parser.add_argument("--right-target-pose-udp-port", type=int)
     parser.add_argument("--fake-host")
-    parser.add_argument("--fake-side")
     parser.add_argument("--fake-axis")
+    parser.add_argument("--fake-right-axis")
     parser.add_argument("--fake-quat-wxyz")
     parser.add_argument("--fake-amplitude-m", type=float)
     parser.add_argument("--fake-cycles", type=float)
@@ -258,7 +288,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--target-drive-scale", type=float)
     parser.add_argument("--isaac-max-frames", type=int)
     parser.add_argument("--target-pose-publish-hz", type=float)
-    parser.add_argument("--rdk-target-hz", type=float)
     parser.add_argument("--rdk-clear-fault", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--rdk-strict-clear-fault", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--rdk-servo-on", action=argparse.BooleanOptionalAction, default=None)
@@ -268,12 +297,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--target-axis-radius", type=float)
     parser.add_argument("--max-target-drive-norm", type=float)
     parser.add_argument("--max-target-drive-abs", type=float)
-    parser.add_argument("--probe-timeout-sec", type=float, default=150.0)
-    parser.add_argument("--startup-timeout-sec", type=float, default=240.0)
+    parser.add_argument("--probe-timeout-sec", type=float, default=180.0)
+    parser.add_argument("--startup-timeout-sec", type=float, default=300.0)
     parser.add_argument("--min-left-q-delta", type=float)
+    parser.add_argument("--min-right-q-delta", type=float)
     parser.add_argument("--min-probe-left-q-delta", type=float, default=1e-4)
+    parser.add_argument("--min-probe-right-q-delta", type=float, default=1e-4)
     parser.add_argument("--min-left-torque-norm", type=float)
-    parser.add_argument("--min-target-frame-delta", type=float)
+    parser.add_argument("--min-right-torque-norm", type=float)
+    parser.add_argument("--min-left-target-frame-delta", type=float)
+    parser.add_argument("--min-right-target-frame-delta", type=float)
     parser.add_argument("--expected-video-fps", type=float)
     parser.add_argument("--max-duplicate-frame-ratio", type=float)
     parser.add_argument("--min-mean-frame-diff", type=float)
@@ -287,13 +320,12 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.config = Path(args.config).expanduser().resolve()
     pipeline_config = load_config(args.config)
     config_base = args.config.parent
-
     environment_config_path = resolve_config_path(
         first_defined(cfg_get(pipeline_config, "environment_config"), cfg_get(pipeline_config, "environment")),
         base=config_base,
     )
     scene_config_path = resolve_config_path(
-        first_defined(cfg_get(pipeline_config, "scene_config"), cfg_get(pipeline_config, "scene")),
+        first_defined(args.scene_config, cfg_get(pipeline_config, "scene_config"), cfg_get(pipeline_config, "scene")),
         base=config_base,
     )
     environment_config = load_config(environment_config_path) if environment_config_path is not None else {}
@@ -301,13 +333,10 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
     environment_base = environment_config_path.parent if environment_config_path is not None else config_base
     scene_base = scene_config_path.parent if scene_config_path is not None else config_base
     cli_base = Path.cwd()
-
-    # Backward compatibility for the previous single-file Stage1 config shape.
-    legacy_runtime_config = cfg_get(pipeline_config, "runtime") or {}
-    environment = {**legacy_runtime_config, **environment_config}
-    scene_robot = cfg_get(scene_config, "robot") or {}
+    left_robot = robot_by_side(scene_config, "left")
+    right_robot = robot_by_side(scene_config, "right")
     runtime_ws = first_path(
-        (cfg_get(environment, "isaac_sim_ws"), environment_base),
+        (cfg_get(environment_config, "isaac_sim_ws"), environment_base),
         (env_path("ISAAC_SIM_WS"), cli_base),
     )
     configured_usd = (
@@ -320,7 +349,6 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
         if runtime_ws is not None
         else None
     )
-
     record_task_dir = path_value(cfg_get(pipeline_config, "record", "task_dir"), base=config_base)
     configured_output_root = record_task_dir.parent if record_task_dir is not None else None
 
@@ -329,79 +357,73 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.pipeline_config_data = pipeline_config
     args.environment_config_data = environment_config
     args.scene_config_data = scene_config
+    args.scene_camera_names = camera_names(scene_config, pipeline_config)
+    args.scene_camera_keys = camera_keys_for_names(args.scene_camera_names, pipeline_config)
 
     args.flexiv_python = path_value(args.flexiv_python, base=cli_base)
     args.rdk_python = first_path(
         (args.rdk_python, cli_base),
-        (cfg_get(environment, "rdk_python"), environment_base),
+        (cfg_get(environment_config, "rdk_python"), environment_base),
         (env_path("FLEXIV_RDK_PYTHON"), cli_base),
     )
     args.isaac_python = first_path(
         (args.isaac_python, cli_base),
-        (cfg_get(environment, "isaac_python"), environment_base),
+        (cfg_get(environment_config, "isaac_python"), environment_base),
         (env_path("ISAAC_PYTHON"), cli_base),
     )
     args.isaacsim_root = first_path(
         (args.isaacsim_root, cli_base),
-        (cfg_get(environment, "isaacsim_root"), environment_base),
+        (cfg_get(environment_config, "isaacsim_root"), environment_base),
         (env_path("ISAACSIM_ROOT"), cli_base),
     )
     args.usd = first_path(
         (args.usd, cli_base),
-        (cfg_get(scene_robot, "usd"), scene_base),
-        (cfg_get(environment, "usd"), environment_base),
+        (cfg_get(left_robot, "usd"), scene_base),
+        (cfg_get(right_robot, "usd"), scene_base),
+        (cfg_get(environment_config, "usd"), environment_base),
         (env_path("FLEXIV_RIZON4_USD"), cli_base),
         (configured_usd, cli_base),
     )
     args.examples_ext = first_path(
         (args.examples_ext, cli_base),
-        (cfg_get(scene_robot, "examples_ext"), scene_base),
-        (cfg_get(environment, "examples_ext"), environment_base),
+        (cfg_get(left_robot, "examples_ext"), scene_base),
+        (cfg_get(right_robot, "examples_ext"), scene_base),
+        (cfg_get(environment_config, "examples_ext"), environment_base),
         (env_path("FLEXIV_EXAMPLES_EXT"), cli_base),
         (configured_examples_ext, cli_base),
-    )
-    args.camera_config = first_path(
-        (args.camera_config, cli_base),
-        (scene_config_path, cli_base),
-        (args.config, cli_base),
     )
     args.output_root = first_path(
         (args.output_root, cli_base),
         (cfg_get(pipeline_config, "validation", "output_root"), config_base),
-        (cfg_get(environment, "record_output_root"), environment_base),
+        (cfg_get(environment_config, "record_output_root"), environment_base),
         (configured_output_root, config_base),
-        (env_path("FLEXIV_STAGE1_OUTPUT_ROOT"), cli_base),
+        (env_path("FLEXIV_STAGE2_OUTPUT_ROOT"), cli_base),
         (DEFAULT_OUTPUT_ROOT, cli_base),
     )
     args.lerobot_output_root = first_path(
         (args.lerobot_output_root, cli_base),
         (cfg_get(pipeline_config, "convert", "output_root"), config_base),
-        (cfg_get(environment, "lerobot_output_root"), environment_base),
+        (cfg_get(environment_config, "lerobot_output_root"), environment_base),
         (env_path("LEROBOT_OUTPUT_ROOT"), cli_base),
         (DEFAULT_LEROBOT_OUTPUT_ROOT, cli_base),
     )
-
-    serial_value = first_defined(args.serial_number, cfg_get(scene_robot, "serial_number"), cfg_get(pipeline_config, "serial_number"))
-    args.serial_number = "" if serial_value is None else str(serial_value)
-    args.joint_group = str(first_defined(args.joint_group, cfg_get(scene_robot, "joint_group"), cfg_get(pipeline_config, "joint_group"), "ARM_1"))
-    args.robot_prim_path = str(first_defined(cfg_get(scene_robot, "prim_path"), "/World/Flexiv/Rizon4"))
-    args.scene_camera_names = [str(camera.get("name", f"cam_{idx}")) for idx, camera in enumerate(cfg_get(scene_config, "cameras") or cfg_get(pipeline_config, "cameras") or [])]
-    args.repo_id_prefix = str(
-        first_defined(args.repo_id_prefix, cfg_get(pipeline_config, "convert", "repo_id"), "qiming/quest_isaac_flexiv_stage1_single_rizon4_real")
-    )
+    args.left_serial_number = str(first_defined(args.left_serial_number, cfg_get(left_robot, "serial_number"), ""))
+    args.right_serial_number = str(first_defined(args.right_serial_number, cfg_get(right_robot, "serial_number"), ""))
+    args.joint_group = str(first_defined(args.joint_group, cfg_get(left_robot, "joint_group"), cfg_get(right_robot, "joint_group"), "ARM_1"))
+    args.left_robot_prim_path = str(first_defined(cfg_get(left_robot, "prim_path"), "/World/Flexiv/LeftRizon4"))
+    args.right_robot_prim_path = str(first_defined(cfg_get(right_robot, "prim_path"), "/World/Flexiv/RightRizon4"))
+    args.repo_id_prefix = str(first_defined(args.repo_id_prefix, cfg_get(pipeline_config, "convert", "repo_id"), "qiming/quest_isaac_flexiv_stage2_dual_rizon4_real"))
     args.action_mode = str(first_defined(args.action_mode, cfg_get(pipeline_config, "convert", "action_mode"), "qpos"))
-
     args.run_name_prefix = str(
         first_defined(
             cfg_get(pipeline_config, "validation", "run_name_prefix"),
             cfg_get(pipeline_config, "record", "task_name"),
-            "quest_isaac_flexiv_stage1_single_rizon4_real",
+            "quest_isaac_flexiv_stage2_dual_rizon4_real",
         )
     )
     args.record_frames = int(first_defined(args.record_frames, cfg_get(pipeline_config, "record", "max_frames"), 120))
     args.record_fps = float(first_defined(args.record_fps, cfg_get(pipeline_config, "record", "fps"), 10.0))
     args.image_size = str(first_defined(args.image_size, cfg_get(pipeline_config, "record", "image_size"), "640x480"))
-
     args.sample_endpoint = str(first_defined(args.sample_endpoint, cfg_get(pipeline_config, "gateway", "sample_endpoint"), DEFAULT_SAMPLE_ENDPOINT))
     args.bridge_endpoint = str(first_defined(args.bridge_endpoint, cfg_get(pipeline_config, "gateway", "bridge_endpoint"), DEFAULT_BRIDGE_ENDPOINT))
     args.gateway_fps = float(first_defined(args.gateway_fps, cfg_get(pipeline_config, "gateway", "fps"), 15.0))
@@ -437,12 +459,11 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
         )
     )
     args.target_drive_scale = float(first_defined(args.target_drive_scale, cfg_get(pipeline_config, "control", "target_drive_scale"), 1.0))
-    args.isaac_max_frames = int(first_defined(args.isaac_max_frames, cfg_get(pipeline_config, "control", "isaac_max_frames"), 9000))
+    args.isaac_max_frames = int(first_defined(args.isaac_max_frames, cfg_get(pipeline_config, "control", "isaac_max_frames"), 12000))
     args.probe_timeout_sec = float(first_defined(args.probe_timeout_sec, cfg_get(pipeline_config, "validation", "probe_timeout_sec"), args.probe_timeout_sec))
     args.target_pose_publish_hz = float(
         first_defined(args.target_pose_publish_hz, cfg_get(pipeline_config, "control", "target_pose_publish_hz"), 30.0)
     )
-    args.rdk_target_hz = float(first_defined(args.rdk_target_hz, cfg_get(pipeline_config, "control", "rdk_target_hz"), 30.0))
     args.rdk_clear_fault = bool(first_defined(args.rdk_clear_fault, cfg_get(pipeline_config, "control", "rdk_clear_fault"), True))
     args.rdk_strict_clear_fault = bool(
         first_defined(args.rdk_strict_clear_fault, cfg_get(pipeline_config, "control", "rdk_strict_clear_fault"), True)
@@ -464,42 +485,45 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.max_target_drive_abs = float(
         first_defined(args.max_target_drive_abs, cfg_get(pipeline_config, "control", "max_target_drive_abs"), 100.0)
     )
-
-    args.target_pose_udp_host = str(
-        first_defined(args.target_pose_udp_host, cfg_get(pipeline_config, "target_pose", "host"), DEFAULT_TARGET_POSE_UDP_HOST)
+    args.quest_target_udp_host = str(first_defined(args.quest_target_udp_host, cfg_get(pipeline_config, "quest_target", "host"), DEFAULT_QUEST_TARGET_UDP_HOST))
+    args.quest_target_udp_port = int(first_defined(args.quest_target_udp_port, cfg_get(pipeline_config, "quest_target", "port"), DEFAULT_QUEST_TARGET_UDP_PORT))
+    args.left_target_pose_udp_host = str(
+        first_defined(args.left_target_pose_udp_host, cfg_get(pipeline_config, "target_pose", "left", "host"), cfg_get(left_robot, "target_pose", "host"), "127.0.0.1")
     )
-    args.target_pose_udp_port = int(
-        first_defined(args.target_pose_udp_port, cfg_get(pipeline_config, "target_pose", "port"), DEFAULT_TARGET_POSE_UDP_PORT)
+    args.left_target_pose_udp_port = int(
+        first_defined(args.left_target_pose_udp_port, cfg_get(pipeline_config, "target_pose", "left", "port"), cfg_get(left_robot, "target_pose", "port"), DEFAULT_LEFT_TARGET_POSE_UDP_PORT)
     )
-    args.quest_target_udp_host = str(
-        first_defined(
-            args.quest_target_udp_host,
-            cfg_get(pipeline_config, "quest_target", "host"),
-            cfg_get(pipeline_config, "fake_sender", "host"),
-            DEFAULT_QUEST_TARGET_UDP_HOST,
-        )
+    args.right_target_pose_udp_host = str(
+        first_defined(args.right_target_pose_udp_host, cfg_get(pipeline_config, "target_pose", "right", "host"), cfg_get(right_robot, "target_pose", "host"), "127.0.0.1")
     )
-    args.quest_target_udp_port = int(
-        first_defined(
-            args.quest_target_udp_port,
-            cfg_get(pipeline_config, "quest_target", "port"),
-            cfg_get(pipeline_config, "fake_sender", "port"),
-            DEFAULT_QUEST_TARGET_UDP_PORT,
-        )
+    args.right_target_pose_udp_port = int(
+        first_defined(args.right_target_pose_udp_port, cfg_get(pipeline_config, "target_pose", "right", "port"), cfg_get(right_robot, "target_pose", "port"), DEFAULT_RIGHT_TARGET_POSE_UDP_PORT)
     )
-
     args.fake_host = str(first_defined(args.fake_host, cfg_get(pipeline_config, "fake_sender", "host"), args.quest_target_udp_host))
-    args.fake_side = str(first_defined(args.fake_side, cfg_get(pipeline_config, "fake_sender", "side"), "right"))
     args.fake_axis = str(first_defined(args.fake_axis, cfg_get(pipeline_config, "fake_sender", "axis"), "x"))
+    args.fake_right_axis = str(first_defined(args.fake_right_axis, cfg_get(pipeline_config, "fake_sender", "right_axis"), args.fake_axis))
     args.fake_quat_wxyz = str(first_defined(args.fake_quat_wxyz, cfg_get(pipeline_config, "fake_sender", "quat_wxyz"), "0.0,0.70710678,0.0,0.70710678"))
     args.fake_amplitude_m = float(first_defined(args.fake_amplitude_m, cfg_get(pipeline_config, "fake_sender", "amplitude_m"), 0.02))
     args.fake_cycles = float(first_defined(args.fake_cycles, cfg_get(pipeline_config, "fake_sender", "cycles"), 0.5))
-    args.fake_frames = int(first_defined(args.fake_frames, cfg_get(pipeline_config, "fake_sender", "frames"), 900))
+    args.fake_frames = int(first_defined(args.fake_frames, cfg_get(pipeline_config, "fake_sender", "frames"), 1200))
     args.fake_rate_hz = float(first_defined(args.fake_rate_hz, cfg_get(pipeline_config, "fake_sender", "rate_hz"), 30.0))
     args.min_left_q_delta = float(first_defined(args.min_left_q_delta, cfg_get(pipeline_config, "validation", "min_left_q_delta"), 0.005))
+    args.min_right_q_delta = float(first_defined(args.min_right_q_delta, cfg_get(pipeline_config, "validation", "min_right_q_delta"), 0.005))
     args.min_left_torque_norm = float(first_defined(args.min_left_torque_norm, cfg_get(pipeline_config, "validation", "min_left_torque_norm"), 1e-8))
-    args.min_target_frame_delta = float(
-        first_defined(args.min_target_frame_delta, cfg_get(pipeline_config, "validation", "min_target_frame_delta"), 0.0)
+    args.min_right_torque_norm = float(first_defined(args.min_right_torque_norm, cfg_get(pipeline_config, "validation", "min_right_torque_norm"), 1e-8))
+    args.min_left_target_frame_delta = float(
+        first_defined(
+            args.min_left_target_frame_delta,
+            cfg_get(pipeline_config, "validation", "min_left_target_frame_delta"),
+            0.0,
+        )
+    )
+    args.min_right_target_frame_delta = float(
+        first_defined(
+            args.min_right_target_frame_delta,
+            cfg_get(pipeline_config, "validation", "min_right_target_frame_delta"),
+            0.0,
+        )
     )
     args.expected_video_fps = float(
         first_defined(args.expected_video_fps, cfg_get(pipeline_config, "validation", "expected_video_fps"), args.record_fps)
@@ -513,6 +537,7 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.frame_diff_threshold = float(
         first_defined(args.frame_diff_threshold, cfg_get(pipeline_config, "validation", "frame_diff_threshold"), 0.2)
     )
+    args.min_servo_cycle_delta = int(first_defined(cfg_get(pipeline_config, "validation", "min_servo_cycle_delta"), 5))
     return args
 
 
@@ -525,8 +550,8 @@ class RealValidationRunner:
         self.log_dir = self.run_root / "logs"
         self.repo_id = f"{args.repo_id_prefix}_{self.stamp}"
         self.dataset_root = args.lerobot_output_root.expanduser().resolve() / self.repo_id
-        self.report_path = self.run_root / "stage1_single_rizon4_real_validation.json"
-        self.summary_path = self.run_root / "stage1_single_rizon4_real_summary.json"
+        self.report_path = self.run_root / "stage2_dual_rizon4_real_validation.json"
+        self.summary_path = self.run_root / "stage2_dual_rizon4_real_summary.json"
         self.sample_endpoint = args.sample_endpoint
         self.bridge_endpoint = args.bridge_endpoint
         self.sample_host, self.sample_port = parse_tcp_endpoint(self.sample_endpoint)
@@ -537,14 +562,16 @@ class RealValidationRunner:
         self.logs: dict[str, Path] = {}
 
     def prepare(self) -> None:
-        if not self.args.serial_number:
-            raise RuntimeError("serial_number is not configured; set scene.robot.serial_number or pass --serial-number")
+        if not self.args.left_serial_number or not self.args.right_serial_number:
+            raise RuntimeError("left/right serials are not configured; set scene.robots[].serial_number or pass CLI overrides")
+        if self.args.left_serial_number == self.args.right_serial_number:
+            raise RuntimeError("left and right serials must be different for Stage2 dual-arm validation")
         assert_required_path(self.args.rdk_python, "rdk_python", executable=True)
         assert_required_path(self.args.isaac_python, "isaac_python", executable=True)
         assert_required_path(self.args.isaacsim_root, "isaacsim_root", directory=True)
         assert_required_path(self.args.usd, "scene robot USD")
         assert_required_path(self.args.examples_ext, "scene examples_ext", directory=True)
-        assert_required_path(self.args.camera_config, "scene_config/camera_config")
+        assert_required_path(self.args.scene_config, "scene_config")
         if bool(self.args.kill_existing):
             kill_existing_repo_processes(
                 [
@@ -553,12 +580,14 @@ class RealValidationRunner:
                     str(REPO_ROOT / "scripts/fake_rizon4_quest_sender.py"),
                     str(REPO_ROOT / "scripts/rdk_target_streamer.py"),
                     str(REPO_ROOT / "standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/follow_ball_with_studio.py"),
+                    str(REPO_ROOT / "standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/dual_follow_with_studio.py"),
                 ]
             )
         assert_tcp_port_free(self.sample_host, self.sample_port)
         assert_tcp_port_free(self.bridge_host, self.bridge_port)
-        assert_udp_port_free(self.args.target_pose_udp_host, self.args.target_pose_udp_port)
         assert_udp_port_free(self.args.quest_target_udp_host, self.args.quest_target_udp_port)
+        assert_udp_port_free(self.args.left_target_pose_udp_host, self.args.left_target_pose_udp_port)
+        assert_udp_port_free(self.args.right_target_pose_udp_host, self.args.right_target_pose_udp_port)
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         json_print(
@@ -567,16 +596,19 @@ class RealValidationRunner:
                 "run_root": self.run_root,
                 "raw_dir": self.raw_dir,
                 "dataset_root": self.dataset_root,
-                "serial_number": self.args.serial_number,
+                "left_serial_number": self.args.left_serial_number,
+                "right_serial_number": self.args.right_serial_number,
                 "config": self.args.config,
                 "environment_config": self.args.environment_config,
                 "scene_config": self.args.scene_config,
-                "scene_robot_prim_path": self.args.robot_prim_path,
+                "left_robot_prim_path": self.args.left_robot_prim_path,
+                "right_robot_prim_path": self.args.right_robot_prim_path,
                 "scene_cameras": self.args.scene_camera_names,
                 "sample_endpoint": self.sample_endpoint,
                 "bridge_endpoint": self.bridge_endpoint,
-                "target_pose_udp": f"{self.args.target_pose_udp_host}:{self.args.target_pose_udp_port}",
                 "quest_target_udp": f"{self.args.quest_target_udp_host}:{self.args.quest_target_udp_port}",
+                "left_target_pose_udp": f"{self.args.left_target_pose_udp_host}:{self.args.left_target_pose_udp_port}",
+                "right_target_pose_udp": f"{self.args.right_target_pose_udp_host}:{self.args.right_target_pose_udp_port}",
             }
         )
 
@@ -624,11 +656,11 @@ class RealValidationRunner:
             pass
 
     def cleanup(self) -> None:
-        for name in ("fake_sender", "recorder", "isaac_follow", "rdk_target_streamer", "stage1_gateway"):
+        for name in ("fake_sender", "recorder", "isaac_dual_follow", "rdk_target_streamer_left", "rdk_target_streamer_right", "stage2_gateway"):
             self.stop(name)
 
     def check_processes(self) -> None:
-        required = {"stage1_gateway", "rdk_target_streamer", "isaac_follow"}
+        required = {"stage2_gateway", "rdk_target_streamer_left", "rdk_target_streamer_right", "isaac_dual_follow"}
         for name, process in self.processes.items():
             returncode = process.poll()
             if returncode is not None and name in required:
@@ -690,12 +722,17 @@ class RealValidationRunner:
                 self.check_processes()
                 try:
                     sample = self.request_gateway_sample(client)
-                    validate_stage1_single_arm_sample(sample, expected_serial=self.args.serial_number)
-                    bridge = extract_stage1_bridge_state(sample)
+                    validate_stage2_dual_arm_sample(
+                        sample,
+                        expected_left_serial=self.args.left_serial_number,
+                        expected_right_serial=self.args.right_serial_number,
+                        required_camera_keys=tuple(self.args.scene_camera_keys),
+                    )
+                    bridge = extract_stage2_bridge_state(sample)
                     servo_cycle = int(bridge.get("servo_cycle") or 0)
                     if first_servo_cycle is None:
                         first_servo_cycle = servo_cycle
-                    color_ready = all((sample.get("colors") or {}).get(key) for key in STAGE1_CAMERA_KEYS)
+                    color_ready = all((sample.get("colors") or {}).get(key) for key in self.args.scene_camera_keys)
                     last_status = {
                         "ready": (servo_cycle - first_servo_cycle) >= 5 and color_ready,
                         "servo_cycle": servo_cycle,
@@ -713,7 +750,7 @@ class RealValidationRunner:
                         {
                             "event": "probe_ready_gateway_sample",
                             "status": last_status,
-                            "isaac_tail": tail_log(self.logs.get("isaac_follow", Path()), 8),
+                            "isaac_tail": tail_log(self.logs.get("isaac_dual_follow", Path()), 8),
                         }
                     )
                     last_report = now
@@ -721,16 +758,20 @@ class RealValidationRunner:
         finally:
             client.close()
         raise TimeoutError(
-            "Gateway did not produce a ready Stage1 backend/camera sample\n"
-            f"last_status={last_status}\n--- Isaac tail ---\n{tail_log(self.logs.get('isaac_follow', Path()), 120)}"
+            "Gateway did not produce a ready Stage2 backend/camera sample\n"
+            f"last_status={last_status}\n--- Isaac tail ---\n{tail_log(self.logs.get('isaac_dual_follow', Path()), 120)}"
         )
 
     def wait_valid_gateway_sample(self) -> dict[str, Any]:
-        monitor = Stage1SampleMonitor(
-            min_servo_cycle_delta=5,
+        monitor = Stage2SampleMonitor(
+            min_servo_cycle_delta=int(self.args.min_servo_cycle_delta),
             min_left_q_delta=float(self.args.min_probe_left_q_delta),
+            min_right_q_delta=float(self.args.min_probe_right_q_delta),
             min_left_torque_norm=float(self.args.min_left_torque_norm),
-            expected_serial=self.args.serial_number,
+            min_right_torque_norm=float(self.args.min_right_torque_norm),
+            expected_left_serial=self.args.left_serial_number,
+            expected_right_serial=self.args.right_serial_number,
+            required_camera_keys=tuple(self.args.scene_camera_keys),
         )
         client = JsonLineReqClient(self.sample_endpoint, timeout=5.0)
         deadline = time.monotonic() + float(self.args.probe_timeout_sec)
@@ -752,7 +793,7 @@ class RealValidationRunner:
                             "event": "probe_gateway_sample",
                             "status": status,
                             "monitor": monitor.last_status,
-                            "isaac_tail": tail_log(self.logs.get("isaac_follow", Path()), 8),
+                            "isaac_tail": tail_log(self.logs.get("isaac_dual_follow", Path()), 8),
                         }
                     )
                     last_report = now
@@ -760,14 +801,14 @@ class RealValidationRunner:
         finally:
             client.close()
         raise TimeoutError(
-            "Gateway did not produce a valid fresh Stage1 single-arm sample\n"
-            f"last_status={monitor.last_status}\n--- Isaac tail ---\n{tail_log(self.logs.get('isaac_follow', Path()), 120)}"
+            "Gateway did not produce a valid fresh Stage2 dual-arm sample\n"
+            f"last_status={monitor.last_status}\n--- Isaac tail ---\n{tail_log(self.logs.get('isaac_dual_follow', Path()), 120)}"
         )
 
     def run(self) -> dict[str, Any]:
         self.prepare()
         self.start(
-            "stage1_gateway",
+            "stage2_gateway",
             [
                 self.args.flexiv_python,
                 REPO_ROOT / "scripts/start_data_gateway.py",
@@ -782,25 +823,26 @@ class RealValidationRunner:
                 "--image-size",
                 self.args.image_size,
                 "--camera-keys",
-                ",".join(STAGE1_CAMERA_KEYS),
+                ",".join(self.args.scene_camera_keys),
             ],
         )
         wait_tcp(self.sample_connect_host, self.sample_port, timeout=20.0, check_processes=self.check_processes)
         wait_tcp(self.bridge_connect_host, self.bridge_port, timeout=20.0, check_processes=self.check_processes)
 
-        self.start(
-            "rdk_target_streamer",
-            [
-                self.args.rdk_python,
-                REPO_ROOT / "scripts/rdk_target_streamer.py",
-                "--host",
-                self.args.target_pose_udp_host,
-                "--port",
-                str(int(self.args.target_pose_udp_port)),
-                "--serial-number",
-                self.args.serial_number,
-                "--joint-group",
-                self.args.joint_group,
+        for side in ("left", "right"):
+            self.start(
+                f"rdk_target_streamer_{side}",
+                [
+                    self.args.rdk_python,
+                    REPO_ROOT / "scripts/rdk_target_streamer.py",
+                    "--host",
+                    getattr(self.args, f"{side}_target_pose_udp_host"),
+                    "--port",
+                    str(int(getattr(self.args, f"{side}_target_pose_udp_port"))),
+                    "--serial-number",
+                    getattr(self.args, f"{side}_serial_number"),
+                    "--joint-group",
+                    self.args.joint_group,
                     "--max-age-sec",
                     "1.0",
                     "--clear-fault" if self.args.rdk_clear_fault else "--no-clear-fault",
@@ -812,20 +854,21 @@ class RealValidationRunner:
                     "--log-hz",
                     "5",
                 ],
-        )
+            )
+
         self.start(
-            "isaac_follow",
+            "isaac_dual_follow",
             [
                 self.args.isaac_python,
-                REPO_ROOT / "standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/follow_ball_with_studio.py",
-                "--serial-number",
-                self.args.serial_number,
-                "--rdk-serial-number",
-                self.args.serial_number,
+                REPO_ROOT / "standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/dual_follow_with_studio.py",
+                "--scene-config",
+                self.args.scene_config,
+                "--left-serial-number",
+                self.args.left_serial_number,
+                "--right-serial-number",
+                self.args.right_serial_number,
                 "--joint-group",
                 self.args.joint_group,
-                "--robot-prim-path",
-                self.args.robot_prim_path,
                 "--usd",
                 self.args.usd,
                 "--examples-ext",
@@ -838,8 +881,6 @@ class RealValidationRunner:
                 str(float(self.args.physics_hz)),
                 "--render-hz",
                 str(float(self.args.render_hz)),
-                "--control-source",
-                "studio-bridge",
                 "--enable-quest-target-udp",
                 "--quest-target-udp-host",
                 self.args.quest_target_udp_host,
@@ -853,14 +894,16 @@ class RealValidationRunner:
                 str(float(self.args.quest_position_scale)),
                 "--quest-position-deadband-m",
                 str(float(self.args.quest_position_deadband_m)),
-                "--target-pose-udp-host",
-                self.args.target_pose_udp_host,
-                "--target-pose-udp-port",
-                str(int(self.args.target_pose_udp_port)),
+                "--left-target-pose-udp-host",
+                self.args.left_target_pose_udp_host,
+                "--left-target-pose-udp-port",
+                str(int(self.args.left_target_pose_udp_port)),
+                "--right-target-pose-udp-host",
+                self.args.right_target_pose_udp_host,
+                "--right-target-pose-udp-port",
+                str(int(self.args.right_target_pose_udp_port)),
                 "--target-pose-publish-hz",
                 str(float(self.args.target_pose_publish_hz)),
-                "--rdk-target-hz",
-                str(float(self.args.rdk_target_hz)),
                 "--target-axis-length",
                 str(float(self.args.target_axis_length)),
                 "--target-axis-radius",
@@ -883,26 +926,22 @@ class RealValidationRunner:
                 str(float(self.args.max_target_drive_norm)),
                 "--max-target-drive-abs",
                 str(float(self.args.max_target_drive_abs)),
-                "--state-torque-log-hz",
-                "2",
                 "--gateway-endpoint",
                 self.bridge_endpoint,
                 "--gateway-fps",
                 str(float(self.args.gateway_fps)),
                 "--gateway-jpeg-quality",
                 str(int(self.args.gateway_jpeg_quality)),
-                "--scene-config",
-                self.args.camera_config,
             ],
             env={"ISAACSIM_ROOT": str(self.args.isaacsim_root)},
         )
         self.wait_log(
-            "isaac_follow",
-            ["Quest target UDP listening", "Ready. control_source=studio-bridge"],
+            "isaac_dual_follow",
+            ["Dual Quest target UDP listening", "Ready. control_source=studio-bridge"],
             timeout=float(self.args.startup_timeout_sec),
             any_one=False,
         )
-        self.wait_log("isaac_follow", ["Stage1 gateway connected"], timeout=120.0)
+        self.wait_log("isaac_dual_follow", ["Stage2 gateway connected"], timeout=120.0)
         self.wait_ready_gateway_sample()
         self.start(
             "fake_sender",
@@ -913,14 +952,17 @@ class RealValidationRunner:
                 self.args.fake_host,
                 "--port",
                 str(int(self.args.quest_target_udp_port)),
-                "--serial-number",
-                self.args.serial_number,
+                "--dual",
+                "--left-serial-number",
+                self.args.left_serial_number,
+                "--right-serial-number",
+                self.args.right_serial_number,
                 "--joint-group",
                 self.args.joint_group,
-                "--side",
-                self.args.fake_side,
                 "--axis",
                 self.args.fake_axis,
+                "--right-axis",
+                self.args.fake_right_axis,
                 "--amplitude-m",
                 str(float(self.args.fake_amplitude_m)),
                 "--cycles",
@@ -953,11 +995,11 @@ class RealValidationRunner:
                 str(int(self.args.record_frames)),
                 "--auto-start",
                 "--task-goal",
-                "quest-isaac-flexiv Stage1 strict single-Rizon4 real validation",
+                "quest-isaac-flexiv Stage2 strict dual-Rizon4 real validation",
                 "--task-desc",
-                "Old Isaac TargetFrame/RDK/Studio single-arm loop with Stage1 Unitree JSON recording",
+                "Old Isaac TargetFrame/RDK/Studio dual-arm loop with Stage2 Unitree JSON recording",
                 "--task-steps",
-                "fake quest target; single Isaac Rizon4; Stage1 gateway; Unitree JSON; LeRobot conversion; H264 validation",
+                "fake dual quest target; dual Isaac Rizon4; Stage2 gateway; Unitree JSON; LeRobot conversion; H264 validation",
             ],
         )
         recorder_rc = self.processes["recorder"].wait(timeout=max(120.0, self.args.record_frames / self.args.record_fps + 90.0))
@@ -965,9 +1007,10 @@ class RealValidationRunner:
             raise RuntimeError(f"recorder failed rc={recorder_rc}\n--- tail ---\n{tail_log(self.logs['recorder'], 180)}")
 
         self.stop("fake_sender")
-        self.stop("isaac_follow")
-        self.stop("rdk_target_streamer")
-        self.stop("stage1_gateway")
+        self.stop("isaac_dual_follow")
+        self.stop("rdk_target_streamer_left")
+        self.stop("rdk_target_streamer_right")
+        self.stop("stage2_gateway")
 
         data_jsons = sorted(self.raw_dir.glob("episode_*/data.json"))
         if not data_jsons:
@@ -1001,17 +1044,29 @@ class RealValidationRunner:
                 self.dataset_root,
                 "--out",
                 self.report_path,
-                "--strict-single-arm",
-                "--expected-serial",
-                self.args.serial_number,
+                "--strict-dual-arm",
+                "--expected-left-serial",
+                self.args.left_serial_number,
+                "--expected-right-serial",
+                self.args.right_serial_number,
+                "--required-camera-names",
+                ",".join(self.args.scene_camera_names),
+                "--required-camera-keys",
+                ",".join(self.args.scene_camera_keys),
                 "--min-left-q-delta",
                 str(float(self.args.min_left_q_delta)),
+                "--min-right-q-delta",
+                str(float(self.args.min_right_q_delta)),
                 "--min-left-torque-norm",
                 str(float(self.args.min_left_torque_norm)),
-                "--min-target-frame-delta",
-                str(float(self.args.min_target_frame_delta)),
+                "--min-right-torque-norm",
+                str(float(self.args.min_right_torque_norm)),
+                "--min-left-target-frame-delta",
+                str(float(self.args.min_left_target_frame_delta)),
+                "--min-right-target-frame-delta",
+                str(float(self.args.min_right_target_frame_delta)),
                 "--min-servo-cycle-delta",
-                "5",
+                str(int(self.args.min_servo_cycle_delta)),
                 "--expected-video-fps",
                 str(float(self.args.expected_video_fps)),
                 "--max-duplicate-frame-ratio",
@@ -1026,11 +1081,14 @@ class RealValidationRunner:
             "pipeline": str(self.args.config),
             "environment": str(self.args.environment_config) if self.args.environment_config else None,
             "scene": str(self.args.scene_config) if self.args.scene_config else None,
-            "serial_number": self.args.serial_number,
+            "left_serial_number": self.args.left_serial_number,
+            "right_serial_number": self.args.right_serial_number,
             "usd": str(self.args.usd),
             "examples_ext": str(self.args.examples_ext),
-            "robot_prim_path": self.args.robot_prim_path,
+            "left_robot_prim_path": self.args.left_robot_prim_path,
+            "right_robot_prim_path": self.args.right_robot_prim_path,
             "cameras": self.args.scene_camera_names,
+            "camera_keys": self.args.scene_camera_keys,
             "control": {
                 "physics_hz": float(self.args.physics_hz),
                 "render_hz": float(self.args.render_hz),
@@ -1058,25 +1116,29 @@ class RealValidationRunner:
         report_payload["config"] = config_report
         self.report_path.write_text(json.dumps(report_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         frames = json.loads(data_json.read_text(encoding="utf-8")).get("data") or []
-        strict_summary = summarize_stage1_single_arm_frames(
+        strict_summary = summarize_stage2_dual_arm_frames(
             frames,
-            expected_serial=self.args.serial_number,
+            expected_left_serial=self.args.left_serial_number,
+            expected_right_serial=self.args.right_serial_number,
+            required_camera_keys=tuple(self.args.scene_camera_keys),
             min_left_q_delta=float(self.args.min_left_q_delta),
+            min_right_q_delta=float(self.args.min_right_q_delta),
             min_left_torque_norm=float(self.args.min_left_torque_norm),
-            min_target_frame_delta=float(self.args.min_target_frame_delta),
-            min_servo_cycle_delta=5,
+            min_right_torque_norm=float(self.args.min_right_torque_norm),
+            min_left_target_frame_delta=float(self.args.min_left_target_frame_delta),
+            min_right_target_frame_delta=float(self.args.min_right_target_frame_delta),
+            min_servo_cycle_delta=int(self.args.min_servo_cycle_delta),
         )
         mp4s = sorted(self.dataset_root.glob("videos/**/*.mp4"))
         report_payload = json.loads(self.report_path.read_text(encoding="utf-8"))
         acceptance = {
-            "strict_stage1_single_arm_real_validation": True,
-            "single_robot": True,
-            "single_camera": True,
+            "strict_stage2_dual_arm_real_validation": True,
+            "dual_robot": True,
             "external_gateway_reused": False,
-            "backend_required": EXPECTED_STAGE1_BACKEND,
+            "backend_required": EXPECTED_STAGE2_BACKEND,
             "unitree_json": str(data_json),
             "dataset_root": str(self.dataset_root),
-            "mp4": str(mp4s[0]) if mp4s else None,
+            "mp4s": [str(path) for path in mp4s],
             "validation_report": str(self.report_path),
             "config": config_report,
             "video_quality": report_payload.get("raw_frame_diffs"),

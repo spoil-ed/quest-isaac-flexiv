@@ -36,6 +36,17 @@ def _assert_zero(values: Iterable[float], *, name: str, tolerance: float) -> Non
         raise ValueError(f"{name} must be zero for Stage1 single-arm data, got norm={norm:.6g}")
 
 
+def _target_frame_xyz(bridge: dict[str, Any]) -> list[float] | None:
+    target_frame = bridge.get("target_frame") or {}
+    pose = target_frame.get("base_tcp_pose")
+    if isinstance(pose, list) and len(pose) >= 3:
+        return [float(value) for value in pose[:3]]
+    world_position = target_frame.get("world_position")
+    if isinstance(world_position, list) and len(world_position) >= 3:
+        return [float(value) for value in world_position[:3]]
+    return None
+
+
 def extract_stage1_bridge_state(sample: dict[str, Any]) -> dict[str, Any]:
     sim_state = sample.get("sim_state") or {}
     if sim_state.get("backend") == EXPECTED_STAGE1_BACKEND:
@@ -97,6 +108,7 @@ def summarize_stage1_single_arm_frames(
     exact_camera_keys: bool = True,
     min_left_q_delta: float = 0.0,
     min_left_torque_norm: float = 0.0,
+    min_target_frame_delta: float = 0.0,
     min_servo_cycle_delta: int = 0,
     zero_tolerance: float = 1e-10,
 ) -> dict[str, Any]:
@@ -108,6 +120,8 @@ def summarize_stage1_single_arm_frames(
     left_q0 = list(frames[0]["states"][LEFT_ARM]["qpos"])
     left_q_delta_norm = 0.0
     max_left_torque_norm = 0.0
+    target_frame_xyz0: list[float] | None = None
+    target_frame_delta_norm = 0.0
 
     for idx, frame in enumerate(frames):
         try:
@@ -130,6 +144,14 @@ def summarize_stage1_single_arm_frames(
         bridge = extract_stage1_bridge_state(frame)
         if bridge.get("servo_cycle") is not None:
             servo_cycles.append(int(bridge["servo_cycle"]))
+        target_frame_xyz = _target_frame_xyz(bridge)
+        if target_frame_xyz is not None:
+            if target_frame_xyz0 is None:
+                target_frame_xyz0 = list(target_frame_xyz)
+            target_frame_delta_norm = max(
+                target_frame_delta_norm,
+                vector_norm(float(b) - float(a) for a, b in zip(target_frame_xyz0, target_frame_xyz)),
+            )
         q = frame["states"][LEFT_ARM]["qpos"]
         left_q_delta_norm = max(left_q_delta_norm, vector_norm(float(b) - float(a) for a, b in zip(left_q0, q)))
         max_left_torque_norm = max(max_left_torque_norm, vector_norm(frame["actions"][LEFT_ARM].get("torque") or []))
@@ -141,6 +163,10 @@ def summarize_stage1_single_arm_frames(
         raise ValueError(f"left_q_delta_norm {left_q_delta_norm:.6g} < required {float(min_left_q_delta):.6g}")
     if max_left_torque_norm <= float(min_left_torque_norm):
         raise ValueError(f"max_left_torque_norm {max_left_torque_norm:.6g} <= required {float(min_left_torque_norm):.6g}")
+    if target_frame_delta_norm < float(min_target_frame_delta):
+        raise ValueError(
+            f"target_frame_delta_norm {target_frame_delta_norm:.6g} < required {float(min_target_frame_delta):.6g}"
+        )
     servo_cycle_delta = (max(servo_cycles) - min(servo_cycles)) if servo_cycles else 0
     if servo_cycle_delta < int(min_servo_cycle_delta):
         raise ValueError(f"servo_cycle_delta {servo_cycle_delta} < required {int(min_servo_cycle_delta)}")
@@ -153,6 +179,7 @@ def summarize_stage1_single_arm_frames(
         "color_counts": color_counts,
         "left_q_delta_norm": left_q_delta_norm,
         "max_left_torque_norm": max_left_torque_norm,
+        "target_frame_delta_norm": target_frame_delta_norm,
         "servo_cycle_delta": servo_cycle_delta,
         "right_arm_zero": True,
     }

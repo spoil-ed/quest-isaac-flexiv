@@ -250,22 +250,32 @@ class QuestRelativeTargetMapper:
         workspace_min,
         workspace_max,
         position_deadband_m: float = 0.0,
+        orientation_mode: str = "packet",
     ) -> None:
         self.axis_map = axis_map
         self.scale = float(scale)
         self.workspace_min = parse_float_list(workspace_min, expected=3, name="workspace_min")
         self.workspace_max = parse_float_list(workspace_max, expected=3, name="workspace_max")
         self.position_deadband_m = max(0.0, float(position_deadband_m))
+        if orientation_mode not in {"packet", "reference", "current"}:
+            raise ValueError("orientation_mode must be one of: packet, reference, current")
+        self.orientation_mode = orientation_mode
         self.reference: QuestRelativeReference | None = None
 
     def reset(self) -> None:
         self.reference = None
 
+    def _orientation_for_update(self, quest_target: QuestTargetPacket, current_pose: list[float]) -> list[float]:
+        if self.orientation_mode == "current":
+            return list(current_pose[3:7])
+        if self.orientation_mode == "reference" and self.reference is not None:
+            return list(self.reference.tcp_pose_base[3:7])
+        return list(quest_target.pose_base_tcp_des[3:7])
+
     def update(self, quest_target: QuestTargetPacket, current_pose_base_tcp: list[float]) -> list[float]:
         current_pose = [float(value) for value in current_pose_base_tcp]
         if len(current_pose) != 7:
             raise ValueError("current_pose_base_tcp must contain 7 values")
-        orientation = list(quest_target.pose_base_tcp_des[3:7])
         if quest_target.controller_delta_base is not None:
             delta_base = [float(value) * self.scale for value in quest_target.controller_delta_base]
             if len(delta_base) != 3 or not all(math.isfinite(value) for value in delta_base):
@@ -277,6 +287,7 @@ class QuestRelativeTargetMapper:
                     tcp_pose_base=list(current_pose),
                 )
                 return list(current_pose)
+            orientation = self._orientation_for_update(quest_target, current_pose)
             xyz = clamp_xyz(
                 [self.reference.tcp_pose_base[index] + delta_base[index] for index in range(3)],
                 self.workspace_min,
@@ -298,6 +309,7 @@ class QuestRelativeTargetMapper:
         ]
         delta_base = map_openxr_delta_to_base(delta_openxr, axis_map=self.axis_map, scale=self.scale)
         delta_base = [0.0 if abs(value) < self.position_deadband_m else value for value in delta_base]
+        orientation = self._orientation_for_update(quest_target, current_pose)
         xyz = clamp_xyz(
             [self.reference.tcp_pose_base[index] + delta_base[index] for index in range(3)],
             self.workspace_min,

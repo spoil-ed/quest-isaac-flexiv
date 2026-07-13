@@ -193,6 +193,35 @@ def unitree_parts_from_single_arm(
     return unitree_parts_from_vector(vector, qvel=qvel_vector, torque=torque_vector)
 
 
+def unitree_parts_from_dual_arms(
+    left_qpos: Iterable[float],
+    right_qpos: Iterable[float],
+    *,
+    left_qvel: Iterable[float] | None = None,
+    right_qvel: Iterable[float] | None = None,
+    left_torque: Iterable[float] | None = None,
+    right_torque: Iterable[float] | None = None,
+    left_gripper: float = 0.0,
+    right_gripper: float = 0.0,
+) -> dict[str, dict[str, list[float]]]:
+    """Build the canonical 16D Unitree part mapping from two Rizon arms."""
+
+    left_q = _float_list(left_qpos, expected_len=ARM_DOF, name="left_qpos")
+    right_q = _float_list(right_qpos, expected_len=ARM_DOF, name="right_qpos")
+    left_dq = _optional_float_list(left_qvel, expected_len=ARM_DOF, name="left_qvel")
+    right_dq = _optional_float_list(right_qvel, expected_len=ARM_DOF, name="right_qvel")
+    left_tau = _optional_float_list(left_torque, expected_len=ARM_DOF, name="left_torque")
+    right_tau = _optional_float_list(right_torque, expected_len=ARM_DOF, name="right_torque")
+    vector = [*left_q, normalize_gripper(left_gripper), *right_q, normalize_gripper(right_gripper)]
+    qvel_vector = None
+    if left_dq is not None or right_dq is not None:
+        qvel_vector = [*(left_dq or [0.0] * ARM_DOF), 0.0, *(right_dq or [0.0] * ARM_DOF), 0.0]
+    torque_vector = None
+    if left_tau is not None or right_tau is not None:
+        torque_vector = [*(left_tau or [0.0] * ARM_DOF), 0.0, *(right_tau or [0.0] * ARM_DOF), 0.0]
+    return unitree_parts_from_vector(vector, qvel=qvel_vector, torque=torque_vector)
+
+
 def _get_qpos(container: dict[str, Any], part: str) -> list[float]:
     if part not in container:
         raise KeyError(f"Missing Unitree JSON part: {part}")

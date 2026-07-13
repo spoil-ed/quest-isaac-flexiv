@@ -275,6 +275,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Require this many consecutive valid target_drives before entering effort control.",
     )
     parser.add_argument(
+        "--target-drive-scale",
+        type=float,
+        default=1.0,
+        help="Scale valid Studio target_drives before applying them in Isaac. Default 1 preserves legacy behavior.",
+    )
+    parser.add_argument(
         "--state-torque-log-hz",
         type=float,
         default=2.0,
@@ -327,6 +333,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("absolute", "relative"),
         default="relative",
         help="absolute uses incoming pose_base_tcp_des; relative anchors Quest motion to current TCP on press.",
+    )
+    parser.add_argument(
+        "--quest-relative-orientation-mode",
+        choices=("packet", "reference", "current"),
+        default="packet",
+        help=(
+            "Relative mode orientation source. packet preserves legacy Quest packet behavior; "
+            "reference keeps the press-time TCP orientation; current keeps the live TCP orientation."
+        ),
     )
     parser.add_argument(
         "--quest-axis-map",
@@ -451,6 +466,7 @@ PARAM_OVERRIDE_KEYS = {
     "max_target_drive_abs",
     "max_joint_speed_rad_s",
     "target_drive_required_valid_cycles",
+    "target_drive_scale",
     "state_torque_log_hz",
     "initial_q",
     "target_position",
@@ -470,6 +486,7 @@ PARAM_OVERRIDE_KEYS = {
     "quest_coordinate_observe_udp_host",
     "quest_coordinate_observe_udp_port",
     "quest_target_mode",
+    "quest_relative_orientation_mode",
     "quest_axis_map",
     "quest_position_scale",
     "quest_position_deadband_m",
@@ -899,6 +916,7 @@ def run(args: argparse.Namespace) -> int:
         workspace_min=parse_float_list(args.quest_workspace_min, expected=3, name="quest_workspace_min"),
         workspace_max=parse_float_list(args.quest_workspace_max, expected=3, name="quest_workspace_max"),
         position_deadband_m=float(args.quest_position_deadband_m),
+        orientation_mode=str(args.quest_relative_orientation_mode),
     )
     cartesian_target_limiter = CartesianTargetLimiter(
         workspace_min=parse_float_list(args.quest_workspace_min, expected=3, name="quest_workspace_min"),
@@ -936,6 +954,7 @@ def run(args: argparse.Namespace) -> int:
     reset_hold_pose_base_tcp = None
     reset_hold_cycles_remaining = 0
     last_reset_seq = 0
+    latest_control_pose_base_tcp = None
 
     def on_physics_step(_dt):
         nonlocal servo_cycle, last_connected, effort_control_enabled, target_drive_warmup_remaining
@@ -944,7 +963,7 @@ def run(args: argparse.Namespace) -> int:
         nonlocal last_invalid_target_drive_cycle, last_target_drive_log_cycle
         nonlocal last_quest_target_log_cycle, last_rdk_error_cycle, last_rdk_command_log_cycle
         nonlocal latest_quest_target, rdk_runtime, rdk_runtime_target_active, latest_target_drives
-        nonlocal reset_hold_pose_base_tcp, reset_hold_cycles_remaining
+        nonlocal reset_hold_pose_base_tcp, reset_hold_cycles_remaining, latest_control_pose_base_tcp
         servo_cycle += 1
         sim_node.SendRobotStates(flexivsimplugin.SimRobotStates(servo_cycle, robot.q, robot.dq))
 
@@ -1027,6 +1046,8 @@ def run(args: argparse.Namespace) -> int:
                 keyboard.update_pose_reference(synced_target_pose)
         elif not reset_hold_active:
             cartesian_target_limiter.reset()
+
+        latest_control_pose_base_tcp = [float(value) for value in control_pose_base_tcp]
 
         quest_target_active = target_pose_control_is_active(
             quest_target_receiver_enabled=quest_target_receiver is not None,
@@ -1199,6 +1220,10 @@ def run(args: argparse.Namespace) -> int:
                             last_invalid_target_drive_cycle = servo_cycle
                         last_connected = True
                         return
+                    target_drive_scale = float(args.target_drive_scale)
+                    if target_drive_scale != 1.0:
+                        target_drives = [float(value) * target_drive_scale for value in target_drives]
+                        torque_norm = math.sqrt(sum(float(value) * float(value) for value in target_drives))
                     if reset_hold_active:
                         latest_target_drives = list(target_drives[:7])
                         valid_target_drive_streak = 0
@@ -1303,6 +1328,10 @@ def run(args: argparse.Namespace) -> int:
                         last_invalid_target_drive_cycle = servo_cycle
                     last_connected = True
                     return
+                target_drive_scale = float(args.target_drive_scale)
+                if target_drive_scale != 1.0:
+                    target_drives = [float(value) * target_drive_scale for value in target_drives]
+                    torque_norm = math.sqrt(sum(float(value) * float(value) for value in target_drives))
                 if reset_hold_active:
                     latest_target_drives = list(target_drives[:7])
                     valid_target_drive_streak = 0
@@ -1452,6 +1481,26 @@ def run(args: argparse.Namespace) -> int:
         torque = list(latest_target_drives[:7])
         if len(torque) < 7:
             torque = [*torque, *([0.0] * (7 - len(torque)))]
+        base_position, base_orientation = robot.get_world_pose()
+        target_position, target_orientation = target_frame.get_world_pose()
+        target_frame_base_tcp = world_target_to_flexiv_pose(
+            world_position=target_position,
+            world_orientation_wxyz=target_orientation,
+            base_position=base_position,
+            base_orientation_wxyz=base_orientation,
+        )
+        latest_quest = None
+        if latest_quest_target is not None:
+            latest_quest = {
+                "seq": int(latest_quest_target.seq),
+                "side": str(latest_quest_target.side),
+                "controller_delta_base": (
+                    None
+                    if latest_quest_target.controller_delta_base is None
+                    else [float(value) for value in latest_quest_target.controller_delta_base]
+                ),
+                "pose_base_tcp_des": [float(value) for value in latest_quest_target.pose_base_tcp_des],
+            }
         states = unitree_parts_from_single_arm(robot.q, qvel=robot.dq, torque=torque, arm="left")
         actions = unitree_parts_from_single_arm(robot.q, qvel=robot.dq, torque=torque, arm="left")
         sample = {
@@ -1469,6 +1518,17 @@ def run(args: argparse.Namespace) -> int:
                 "target_drives": torque,
                 "robot_q": [float(value) for value in robot.q],
                 "robot_dq": [float(value) for value in robot.dq],
+                "target_frame": {
+                    "world_position": [float(value) for value in target_position],
+                    "world_orientation_wxyz": [float(value) for value in target_orientation],
+                    "base_tcp_pose": [float(value) for value in target_frame_base_tcp],
+                    "control_pose_base_tcp_des": (
+                        None
+                        if latest_control_pose_base_tcp is None
+                        else [float(value) for value in latest_control_pose_base_tcp]
+                    ),
+                    "latest_quest": latest_quest,
+                },
                 "reset": {
                     "last_seq": int(last_reset_seq),
                     "holding_start_pose": bool(reset_hold_cycles_remaining > 0),

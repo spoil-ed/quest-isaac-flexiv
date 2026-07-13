@@ -40,6 +40,33 @@ class Stage1FakeSenderTests(unittest.TestCase):
         end = sender.delta_for_frame(4, 5, "x", 0.01)
         self.assertAlmostEqual(end[0], 0.0, places=8)
 
+    def test_delta_sine_supports_multi_cycle_motion(self):
+        sender = load_module()
+
+        values = [sender.delta_for_frame(frame, 61, "x", 0.01, cycles=3.0)[0] for frame in range(61)]
+        self.assertGreater(max(values), 0.009)
+        self.assertLess(min(values), -0.009)
+        self.assertAlmostEqual(values[0], 0.0, places=8)
+        self.assertAlmostEqual(values[-1], 0.0, places=8)
+
+    def test_builds_dual_quest_target_packets(self):
+        sender = load_module()
+        packets = sender.build_fake_dual_quest_packets(
+            seq=3,
+            left_serial_number="Rizon4-L",
+            right_serial_number="Rizon4-R",
+            joint_group="ARM_1",
+            left_delta_base=[0.01, 0.0, 0.0],
+            right_delta_base=[-0.01, 0.0, 0.0],
+            quat_wxyz=[1.0, 0.0, 0.0, 0.0],
+            now=12.0,
+        )
+
+        self.assertEqual([packet["side"] for packet in packets], ["left", "right"])
+        self.assertEqual([packet["serial"] for packet in packets], ["Rizon4-L", "Rizon4-R"])
+        self.assertEqual(packets[0]["controller_delta_base"], [0.01, 0.0, 0.0])
+        self.assertEqual(packets[1]["controller_delta_base"], [-0.01, 0.0, 0.0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -38,6 +38,10 @@ FLEXIV_QUEST_FOLLOW = (
     REPO_ROOT
     / "standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/follow_ball_with_studio.py"
 )
+FLEXIV_DUAL_QUEST_FOLLOW = (
+    REPO_ROOT
+    / "standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/dual_follow_with_studio.py"
+)
 FLEXIV_QUEST_BRIDGE = (
     REPO_ROOT
     / "standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/flexiv_isaac_bridge_app.py"
