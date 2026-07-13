@@ -1,0 +1,66 @@
+defaults:
+  - safety: conservative
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+  - _self_
+
+# Required Hydra override:
+#   robot.serial_number=Rizon4-YOUR-SERIAL
+robot:
+  serial_number: ???
+  joint_group: ARM_1
+
+runtime:
+  isaac_python: ${oc.env:ISAAC_PYTHON,python3}
+  rdk_python: ${oc.env:FLEXIV_RDK_PYTHON,${runtime.isaac_python}}
+
+scene:
+  config: configs/scenes/single_rizon4_cam_front.yaml
+
+control:
+  physics_hz: 2000
+  render_hz: 60
+  rdk_target_hz: 60
+  target_pose_publish_hz: 60
+  command_timeout_ms: 10
+  rdk_packet_max_age_sec: 0.25
+  rdk_log_hz: 2.0
+
+# Startup and reset deliberately share the same initialization path and initial_q.
+reset:
+  coordinated: true
+  settle_sec: 2.0
+
+quest:
+  enabled: true
+  target_mode: relative
+  axis_map: -z,-x,y
+  position_scale: 1.0
+  position_deadband_m: 0.01
+  packet_max_age_sec: 0.25
+  workspace_min: [0.15, -0.70, 0.20]
+  workspace_max: [1.00, 0.70, 1.35]
+
+network:
+  quest_target_host: 127.0.0.1
+  quest_target_port: 55679
+  target_pose_host: 127.0.0.1
+  target_pose_port: 55678
+
+gateway:
+  endpoint: ""
+  fps: 30
+  jpeg_quality: 90
+
+launch:
+  rdk_streamer: true
+  headless: false
+  manual_play: false
+  dry_run: false
+
+hydra:
+  run:
+    dir: .
+  job:
+    chdir: false
+  output_subdir: null

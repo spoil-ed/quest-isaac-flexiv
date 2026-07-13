@@ -22,6 +22,7 @@ from elements_studio_utils import (
     RdkRuntimeController,
     RdkRuntimeSettings,
     StudioReachabilityClient,
+    joint_speed_limit_exceeded,
     joint_positions_rad_to_studio_seed,
     studio_target_pose_from_rdk_pose as pose_base_tcp_des_to_studio_target_pose,
     valid_target_drives_or_none,
@@ -36,6 +37,7 @@ from control_helpers import (
     target_pose_control_is_active,
 )
 from targeting import (
+    CartesianTargetLimiter,
     QuestRelativeTargetMapper,
     QuestTargetPacket,
     QuestTargetUdpReceiver,
@@ -43,6 +45,7 @@ from targeting import (
     TargetPoseUdpPublisher,
     build_coordinate_observation_packet,
     build_target_pose_packet,
+    camera_look_at_quat_wxyz,
     euler_xyz_deg_to_quat_wxyz,
     flexiv_pose_to_world_target,
     map_openxr_delta_to_base,
@@ -254,6 +257,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Reject Studio target_drives whose vector norm exceeds this value.",
     )
     parser.add_argument(
+        "--max-target-drive-abs",
+        type=float,
+        default=100.0,
+        help="Reject Studio target_drives when any joint magnitude exceeds this value.",
+    )
+    parser.add_argument(
+        "--max-joint-speed-rad-s",
+        type=float,
+        default=1.5,
+        help="Leave effort mode if any simulated joint exceeds this absolute speed; <=0 disables.",
+    )
+    parser.add_argument(
         "--target-drive-required-valid-cycles",
         type=int,
         default=5,
@@ -325,6 +340,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Relative mode scale from Quest meters to Rizon4 base meters.",
     )
     parser.add_argument(
+        "--quest-position-deadband-m",
+        type=float,
+        default=0.01,
+        help="Ignore mapped Quest translation components smaller than this value in meters.",
+    )
+    parser.add_argument(
+        "--max-linear-speed-m-s",
+        type=float,
+        default=0.10,
+        help="Maximum commanded TCP translation speed after all input mapping; <=0 disables.",
+    )
+    parser.add_argument(
+        "--max-angular-speed-rad-s",
+        type=float,
+        default=0.75,
+        help="Maximum commanded TCP angular speed after all input mapping; <=0 disables.",
+    )
+    parser.add_argument(
         "--quest-workspace-min",
         default=",".join(str(value) for value in DEFAULT_QUEST_WORKSPACE_MIN),
         help="Relative mode Rizon4 base xyz lower bounds.",
@@ -363,6 +396,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--gateway-fps", type=float, default=DEFAULT_STAGE1_GATEWAY_FPS)
     parser.add_argument("--gateway-jpeg-quality", type=int, default=DEFAULT_STAGE1_GATEWAY_JPEG_QUALITY)
+    parser.add_argument(
+        "--coordinated-reset",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Consume gateway reset commands and reinitialize Isaac/Studio at the configured home pose.",
+    )
+    parser.add_argument(
+        "--reset-settle-sec",
+        type=float,
+        default=2.0,
+        help="Publish and hold the home TCP target for this long after reset.",
+    )
     parser.add_argument(
         "--camera-config",
         type=Path,
@@ -403,6 +448,8 @@ PARAM_OVERRIDE_KEYS = {
     "command_timeout_ms",
     "target_drive_warmup_cycles",
     "max_target_drive_norm",
+    "max_target_drive_abs",
+    "max_joint_speed_rad_s",
     "target_drive_required_valid_cycles",
     "state_torque_log_hz",
     "initial_q",
@@ -425,11 +472,16 @@ PARAM_OVERRIDE_KEYS = {
     "quest_target_mode",
     "quest_axis_map",
     "quest_position_scale",
+    "quest_position_deadband_m",
+    "max_linear_speed_m_s",
+    "max_angular_speed_rad_s",
     "quest_workspace_min",
     "quest_workspace_max",
     "gateway_endpoint",
     "gateway_fps",
     "gateway_jpeg_quality",
+    "coordinated_reset",
+    "reset_settle_sec",
     "scene_config",
     "camera_config",
 }
@@ -450,7 +502,9 @@ def _read_structured_config(path: Path) -> dict | list:
 def apply_scene_config(args: argparse.Namespace) -> None:
     if args.scene_config is None:
         return
+    args.scene_config = args.scene_config.expanduser().resolve()
     data = _read_structured_config(args.scene_config)
+    scene_base = args.scene_config.parent
     if not isinstance(data, dict):
         raise ValueError("--scene-config must contain a YAML/JSON object")
     robot = data.get("robot") or {}
@@ -467,9 +521,13 @@ def apply_scene_config(args: argparse.Namespace) -> None:
     if args.end_effector_prim_name is None and robot.get("end_effector_prim_name") is not None:
         args.end_effector_prim_name = str(robot["end_effector_prim_name"])
     if args.usd is None and robot.get("usd") is not None:
-        args.usd = Path(str(robot["usd"]))
+        args.usd = Path(str(robot["usd"])).expanduser()
+        if not args.usd.is_absolute():
+            args.usd = (scene_base / args.usd).resolve()
     if args.examples_ext is None and robot.get("examples_ext") is not None:
-        args.examples_ext = Path(str(robot["examples_ext"]))
+        args.examples_ext = Path(str(robot["examples_ext"])).expanduser()
+        if not args.examples_ext.is_absolute():
+            args.examples_ext = (scene_base / args.examples_ext).resolve()
     if args.camera_config is None and data.get("cameras") is not None:
         args.camera_config = args.scene_config
 
@@ -661,6 +719,27 @@ def _load_camera_config(path: Path | None):
     return cameras
 
 
+def _xyz_mapping(values, *, name: str) -> list[float]:
+    if not isinstance(values, dict):
+        raise ValueError(f"{name} must be an object with x, y, z fields")
+    return [float(values[key]) for key in ("x", "y", "z")]
+
+
+def camera_pose_from_config(camera_cfg: dict) -> tuple[list[float], list[float]]:
+    """Resolve either position+look_at or the legacy position+quaternion camera form."""
+    position = _xyz_mapping(camera_cfg["position"], name="camera position")
+    if camera_cfg.get("look_at") is not None:
+        look_at = _xyz_mapping(camera_cfg["look_at"], name="camera look_at")
+        up = _xyz_mapping(camera_cfg.get("up", {"x": 0.0, "y": 0.0, "z": 1.0}), name="camera up")
+        orientation = camera_look_at_quat_wxyz(position, look_at, up)
+    else:
+        orientation_cfg = camera_cfg.get("orientation")
+        if not isinstance(orientation_cfg, dict):
+            raise ValueError("camera requires either look_at or orientation")
+        orientation = [float(orientation_cfg[key]) for key in ("w", "x", "y", "z")]
+    return position, orientation
+
+
 def _camera_rgba_to_bgr(image):
     import cv2
     import numpy as np
@@ -739,8 +818,7 @@ def run(args: argparse.Namespace) -> int:
     if args.gateway_endpoint:
         for idx, camera_cfg in enumerate(_load_camera_config(args.camera_config)):
             name = str(camera_cfg.get("name", f"cam_{idx}"))
-            pos = [float(camera_cfg["position"][key]) for key in ("x", "y", "z")]
-            ori = [float(camera_cfg["orientation"][key]) for key in ("w", "x", "y", "z")]
+            pos, ori = camera_pose_from_config(camera_cfg)
             camera = Camera(
                 prim_path="/World/" + name,
                 frequency=float(camera_cfg.get("fps", args.gateway_fps)),
@@ -820,6 +898,13 @@ def run(args: argparse.Namespace) -> int:
         scale=float(args.quest_position_scale),
         workspace_min=parse_float_list(args.quest_workspace_min, expected=3, name="quest_workspace_min"),
         workspace_max=parse_float_list(args.quest_workspace_max, expected=3, name="quest_workspace_max"),
+        position_deadband_m=float(args.quest_position_deadband_m),
+    )
+    cartesian_target_limiter = CartesianTargetLimiter(
+        workspace_min=parse_float_list(args.quest_workspace_min, expected=3, name="quest_workspace_min"),
+        workspace_max=parse_float_list(args.quest_workspace_max, expected=3, name="quest_workspace_max"),
+        max_linear_speed_m_s=float(args.max_linear_speed_m_s),
+        max_angular_speed_rad_s=float(args.max_angular_speed_rad_s),
     )
     target_pose_publish_gate = TargetPosePublishGate.from_hz(
         float(args.target_pose_publish_hz),
@@ -847,6 +932,10 @@ def run(args: argparse.Namespace) -> int:
     gateway_client = None
     gateway_last_connect_attempt = 0.0
     gateway_last_publish = 0.0
+    pending_reset_control = None
+    reset_hold_pose_base_tcp = None
+    reset_hold_cycles_remaining = 0
+    last_reset_seq = 0
 
     def on_physics_step(_dt):
         nonlocal servo_cycle, last_connected, effort_control_enabled, target_drive_warmup_remaining
@@ -855,12 +944,20 @@ def run(args: argparse.Namespace) -> int:
         nonlocal last_invalid_target_drive_cycle, last_target_drive_log_cycle
         nonlocal last_quest_target_log_cycle, last_rdk_error_cycle, last_rdk_command_log_cycle
         nonlocal latest_quest_target, rdk_runtime, rdk_runtime_target_active, latest_target_drives
+        nonlocal reset_hold_pose_base_tcp, reset_hold_cycles_remaining
         servo_cycle += 1
         sim_node.SendRobotStates(flexivsimplugin.SimRobotStates(servo_cycle, robot.q, robot.dq))
 
         base_position, base_orientation = robot.get_world_pose()
         if quest_target_receiver is not None:
-            quest_target = quest_target_receiver.poll_latest()
+            reset_hold_active = reset_hold_pose_base_tcp is not None and reset_hold_cycles_remaining > 0
+            if reset_hold_active:
+                quest_target_receiver.clear()
+                quest_target = None
+                latest_quest_target = None
+                quest_relative_mapper.reset()
+            else:
+                quest_target = quest_target_receiver.poll_latest()
             if quest_target is not None:
                 latest_quest_target = quest_target
                 if servo_cycle - last_quest_target_log_cycle >= int(physics_hz):
@@ -887,15 +984,9 @@ def run(args: argparse.Namespace) -> int:
         )
         current_pose_base_tcp = None
         control_pose_base_tcp = pose_base_tcp_des
-        if latest_quest_target is not None and args.quest_target_mode == "relative":
-            tcp_position, tcp_orientation = robot.end_effector.get_world_pose()
-            current_pose_base_tcp = world_target_to_flexiv_pose(
-                world_position=tcp_position,
-                world_orientation_wxyz=tcp_orientation,
-                base_position=base_position,
-                base_orientation_wxyz=base_orientation,
-            )
-            control_pose_base_tcp = quest_relative_mapper.update(latest_quest_target, current_pose_base_tcp)
+        reset_hold_active = reset_hold_pose_base_tcp is not None and reset_hold_cycles_remaining > 0
+        if reset_hold_active:
+            control_pose_base_tcp = list(reset_hold_pose_base_tcp)
             synced_target_pose = sync_target_to_base_tcp_pose(
                 target_frame,
                 pose_base_tcp_des=control_pose_base_tcp,
@@ -904,20 +995,43 @@ def run(args: argparse.Namespace) -> int:
             )
             if keyboard is not None:
                 keyboard.update_pose_reference(synced_target_pose)
-        if latest_quest_target is not None and args.quest_target_mode == "absolute":
+            cartesian_target_limiter.reset(control_pose_base_tcp)
+        elif latest_quest_target is not None and args.quest_target_mode == "relative":
+            tcp_position, tcp_orientation = robot.end_effector.get_world_pose()
+            current_pose_base_tcp = world_target_to_flexiv_pose(
+                world_position=tcp_position,
+                world_orientation_wxyz=tcp_orientation,
+                base_position=base_position,
+                base_orientation_wxyz=base_orientation,
+            )
+            control_pose_base_tcp = quest_relative_mapper.update(latest_quest_target, current_pose_base_tcp)
+        if latest_quest_target is not None and not reset_hold_active:
+            if current_pose_base_tcp is None:
+                tcp_position, tcp_orientation = robot.end_effector.get_world_pose()
+                current_pose_base_tcp = world_target_to_flexiv_pose(
+                    world_position=tcp_position,
+                    world_orientation_wxyz=tcp_orientation,
+                    base_position=base_position,
+                    base_orientation_wxyz=base_orientation,
+                )
+            if cartesian_target_limiter.last_pose is None:
+                cartesian_target_limiter.reset(current_pose_base_tcp)
+            control_pose_base_tcp = cartesian_target_limiter.limit(control_pose_base_tcp, dt=float(_dt))
             synced_target_pose = sync_target_to_base_tcp_pose(
                 target_frame,
-                pose_base_tcp_des=pose_base_tcp_des,
+                pose_base_tcp_des=control_pose_base_tcp,
                 base_position=base_position,
                 base_orientation_wxyz=base_orientation,
             )
             if keyboard is not None:
                 keyboard.update_pose_reference(synced_target_pose)
+        elif not reset_hold_active:
+            cartesian_target_limiter.reset()
 
         quest_target_active = target_pose_control_is_active(
             quest_target_receiver_enabled=quest_target_receiver is not None,
             latest_quest_target=latest_quest_target,
-        )
+        ) or reset_hold_active
 
         if (
             quest_target_active
@@ -933,6 +1047,12 @@ def run(args: argparse.Namespace) -> int:
                     monotonic_time=time.monotonic(),
                 )
             )
+
+        if reset_hold_active:
+            reset_hold_cycles_remaining -= 1
+            if reset_hold_cycles_remaining <= 0:
+                reset_hold_pose_base_tcp = None
+                print("[FlexivTargetFrame] startup/reset Studio hold completed", flush=True)
 
         if args.control_source == "studio-ik":
             if not _is_robot_ready(robot):
@@ -1040,6 +1160,20 @@ def run(args: argparse.Namespace) -> int:
                 connected=connected,
                 runtime_target_active=rdk_runtime_target_active,
             ):
+                if joint_speed_limit_exceeded(robot.dq, max_abs_rad_s=float(args.max_joint_speed_rad_s)):
+                    if effort_control_enabled:
+                        robot.switch_control_mode("position")
+                        robot.teleport_to(robot.q)
+                        effort_control_enabled = False
+                    valid_target_drive_streak = 0
+                    if servo_cycle - last_invalid_target_drive_cycle >= int(physics_hz):
+                        print(
+                            "[FlexivTargetFrame] joint speed limit exceeded; leaving effort control",
+                            flush=True,
+                        )
+                        last_invalid_target_drive_cycle = servo_cycle
+                    last_connected = True
+                    return
                 if sim_node.WaitForRobotCommands(max(0, int(args.command_timeout_ms))):
                     if target_drive_warmup_remaining > 0:
                         target_drive_warmup_remaining -= 1
@@ -1048,6 +1182,7 @@ def run(args: argparse.Namespace) -> int:
                     target_drives, torque_norm = valid_target_drives_or_none(
                         sim_node.robot_commands().target_drives,
                         max_norm=float(args.max_target_drive_norm),
+                        max_abs=float(args.max_target_drive_abs),
                     )
                     if target_drives is None:
                         if effort_control_enabled:
@@ -1062,6 +1197,11 @@ def run(args: argparse.Namespace) -> int:
                                 flush=True,
                             )
                             last_invalid_target_drive_cycle = servo_cycle
+                        last_connected = True
+                        return
+                    if reset_hold_active:
+                        latest_target_drives = list(target_drives[:7])
+                        valid_target_drive_streak = 0
                         last_connected = True
                         return
                     valid_target_drive_streak += 1
@@ -1124,6 +1264,20 @@ def run(args: argparse.Namespace) -> int:
                 valid_target_drive_streak = 0
                 robot.switch_control_mode("position")
                 robot.teleport_to(robot.q)
+            if joint_speed_limit_exceeded(robot.dq, max_abs_rad_s=float(args.max_joint_speed_rad_s)):
+                if effort_control_enabled:
+                    robot.switch_control_mode("position")
+                    robot.teleport_to(robot.q)
+                    effort_control_enabled = False
+                valid_target_drive_streak = 0
+                if servo_cycle - last_invalid_target_drive_cycle >= int(physics_hz):
+                    print(
+                        "[FlexivTargetFrame] joint speed limit exceeded; leaving effort control",
+                        flush=True,
+                    )
+                    last_invalid_target_drive_cycle = servo_cycle
+                last_connected = True
+                return
             if sim_node.WaitForRobotCommands(max(0, int(args.command_timeout_ms))):
                 if target_drive_warmup_remaining > 0:
                     target_drive_warmup_remaining -= 1
@@ -1132,6 +1286,7 @@ def run(args: argparse.Namespace) -> int:
                 target_drives, torque_norm = valid_target_drives_or_none(
                     sim_node.robot_commands().target_drives,
                     max_norm=float(args.max_target_drive_norm),
+                    max_abs=float(args.max_target_drive_abs),
                 )
                 if target_drives is None:
                     if effort_control_enabled:
@@ -1146,6 +1301,11 @@ def run(args: argparse.Namespace) -> int:
                             flush=True,
                         )
                         last_invalid_target_drive_cycle = servo_cycle
+                    last_connected = True
+                    return
+                if reset_hold_active:
+                    latest_target_drives = list(target_drives[:7])
+                    valid_target_drive_streak = 0
                     last_connected = True
                     return
                 valid_target_drive_streak += 1
@@ -1188,13 +1348,49 @@ def run(args: argparse.Namespace) -> int:
             )
         return initial_pose
 
+    def initialize_like_startup(reason: str, *, reset_world: bool) -> None:
+        """Use exactly the startup sequence for both first launch and later resets."""
+        nonlocal last_connected, effort_control_enabled, target_drive_warmup_remaining
+        nonlocal valid_target_drive_streak, latest_quest_target, latest_target_drives
+        nonlocal rdk_runtime_target_active, reset_hold_pose_base_tcp, reset_hold_cycles_remaining
+        if reset_world:
+            world.reset()
+        robot.teleport_to(initial_q)
+        robot.switch_control_mode("position")
+        pose = reset_target_to_start_pose()
+        base_position, base_orientation = robot.get_world_pose()
+        ee_position, ee_orientation = robot.end_effector.get_world_pose()
+        reset_hold_pose_base_tcp = world_target_to_flexiv_pose(
+            world_position=ee_position,
+            world_orientation_wxyz=ee_orientation,
+            base_position=base_position,
+            base_orientation_wxyz=base_orientation,
+        )
+        reset_hold_cycles_remaining = max(1, int(max(0.0, float(args.reset_settle_sec)) * physics_hz))
+        latest_quest_target = None
+        latest_target_drives = [0.0] * 7
+        quest_relative_mapper.reset()
+        cartesian_target_limiter.reset(reset_hold_pose_base_tcp)
+        if quest_target_receiver is not None:
+            quest_target_receiver.clear()
+        last_connected = False
+        effort_control_enabled = False
+        target_drive_warmup_remaining = max(0, int(args.target_drive_warmup_cycles))
+        valid_target_drive_streak = 0
+        rdk_runtime_target_active = False
+        if keyboard is not None:
+            keyboard.reset_pose(pose)
+        print(
+            f"[FlexivTargetFrame] startup initialization applied reason={reason}; "
+            f"Studio home hold={max(0.0, float(args.reset_settle_sec)):.3f}s",
+            flush=True,
+        )
+
     world.add_physics_callback("target_frame_step", callback_fn=on_physics_step)
     world.reset()
     for camera in stage1_cameras:
         camera.initialize()
-    robot.teleport_to(initial_q)
-    robot.switch_control_mode("position")
-    reset_target_to_start_pose()
+    initialize_like_startup("startup", reset_world=False)
     if not args.smoke_test:
         keyboard = KeyboardTargetDriver(
             target_frame,
@@ -1219,7 +1415,7 @@ def run(args: argparse.Namespace) -> int:
     render_gate = TargetPosePublishGate.from_hz(float(args.render_hz), physics_freq=physics_hz)
 
     def publish_gateway_sample() -> None:
-        nonlocal gateway_client, gateway_last_connect_attempt, gateway_last_publish
+        nonlocal gateway_client, gateway_last_connect_attempt, gateway_last_publish, pending_reset_control
         if not args.gateway_endpoint:
             return
         now = time.monotonic()
@@ -1273,10 +1469,22 @@ def run(args: argparse.Namespace) -> int:
                 "target_drives": torque,
                 "robot_q": [float(value) for value in robot.q],
                 "robot_dq": [float(value) for value in robot.dq],
+                "reset": {
+                    "last_seq": int(last_reset_seq),
+                    "holding_start_pose": bool(reset_hold_cycles_remaining > 0),
+                },
             },
         }
         try:
             gateway_client.send_json(sample)
+            control = gateway_client.recv_json_if_available()
+            if (
+                bool(args.coordinated_reset)
+                and isinstance(control, dict)
+                and control.get("type") == "flexiv_bridge_control"
+                and control.get("command") == "reset"
+            ):
+                pending_reset_control = control
         except Exception as exc:
             print(f"[FlexivTargetFrame] Stage1 gateway send failed: {exc}", flush=True)
             try:
@@ -1290,17 +1498,22 @@ def run(args: argparse.Namespace) -> int:
             frame_count += 1
             world.step(render=render_gate.should_publish(frame_count))
             publish_gateway_sample()
+            if pending_reset_control is not None:
+                control = pending_reset_control
+                pending_reset_control = None
+                reset_seq = int(control.get("seq", 0))
+                last_reset_seq = reset_seq
+                initialize_like_startup(
+                    f"gateway:{control.get('reason', 'unspecified')} seq={reset_seq}",
+                    reset_world=True,
+                )
+                reset_needed = False
             if world.is_stopped() and not reset_needed:
                 reset_needed = True
             if world.is_playing():
                 if reset_needed:
-                    world.reset()
-                    robot.teleport_to(initial_q)
-                    robot.switch_control_mode("position")
+                    initialize_like_startup("timeline-resume", reset_world=True)
                     reset_needed = False
-                    reset_target_to_start_pose()
-                    if keyboard is not None:
-                        keyboard.reset_pose(initial_pose)
 
             if args.smoke_test and args.max_frames > 0 and frame_count >= args.max_frames:
                 break

@@ -77,6 +77,170 @@ def map_openxr_delta_to_base(
     return [entry.sign * values[entry.source_index] * float(scale) for entry in axis_map]
 
 
+def clamp_xyz(values, workspace_min, workspace_max) -> list[float]:
+    xyz = parse_float_list(values, expected=3, name="xyz")
+    lower = parse_float_list(workspace_min, expected=3, name="workspace_min")
+    upper = parse_float_list(workspace_max, expected=3, name="workspace_max")
+    if any(lo > hi for lo, hi in zip(lower, upper)):
+        raise ValueError("workspace_min must be <= workspace_max on every axis")
+    return [min(max(value, lo), hi) for value, lo, hi in zip(xyz, lower, upper)]
+
+
+def normalize_quat_wxyz(values) -> list[float]:
+    quat = parse_float_list(values, expected=4, name="quaternion")
+    norm = math.sqrt(sum(value * value for value in quat))
+    if norm <= 0.0:
+        return [1.0, 0.0, 0.0, 0.0]
+    return [value / norm for value in quat]
+
+
+def camera_look_at_quat_wxyz(position, look_at, up=(0.0, 0.0, 1.0)) -> list[float]:
+    """Build a USD-camera quaternion (-Z forward, +Y up) from a look-at target."""
+    eye = parse_float_list(position, expected=3, name="camera position")
+    target = parse_float_list(look_at, expected=3, name="camera look_at")
+    up_axis = parse_float_list(up, expected=3, name="camera up")
+
+    def normalized(vector, name):
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm <= 1e-12:
+            raise ValueError(f"{name} must be non-zero")
+        return [value / norm for value in vector]
+
+    def cross(left, right):
+        return [
+            left[1] * right[2] - left[2] * right[1],
+            left[2] * right[0] - left[0] * right[2],
+            left[0] * right[1] - left[1] * right[0],
+        ]
+
+    forward = normalized([target[i] - eye[i] for i in range(3)], "camera look direction")
+    right = normalized(cross(forward, up_axis), "camera look direction cross up")
+    camera_up = cross(right, forward)
+    # Rotation matrix columns are local +X, +Y and +Z in world coordinates.
+    matrix = (
+        (right[0], camera_up[0], -forward[0]),
+        (right[1], camera_up[1], -forward[1]),
+        (right[2], camera_up[2], -forward[2]),
+    )
+    trace = matrix[0][0] + matrix[1][1] + matrix[2][2]
+    if trace > 0.0:
+        scale = math.sqrt(trace + 1.0) * 2.0
+        quat = [
+            0.25 * scale,
+            (matrix[2][1] - matrix[1][2]) / scale,
+            (matrix[0][2] - matrix[2][0]) / scale,
+            (matrix[1][0] - matrix[0][1]) / scale,
+        ]
+    else:
+        diagonal = [matrix[0][0], matrix[1][1], matrix[2][2]]
+        index = max(range(3), key=diagonal.__getitem__)
+        if index == 0:
+            scale = math.sqrt(1.0 + matrix[0][0] - matrix[1][1] - matrix[2][2]) * 2.0
+            quat = [
+                (matrix[2][1] - matrix[1][2]) / scale,
+                0.25 * scale,
+                (matrix[0][1] + matrix[1][0]) / scale,
+                (matrix[0][2] + matrix[2][0]) / scale,
+            ]
+        elif index == 1:
+            scale = math.sqrt(1.0 + matrix[1][1] - matrix[0][0] - matrix[2][2]) * 2.0
+            quat = [
+                (matrix[0][2] - matrix[2][0]) / scale,
+                (matrix[0][1] + matrix[1][0]) / scale,
+                0.25 * scale,
+                (matrix[1][2] + matrix[2][1]) / scale,
+            ]
+        else:
+            scale = math.sqrt(1.0 + matrix[2][2] - matrix[0][0] - matrix[1][1]) * 2.0
+            quat = [
+                (matrix[1][0] - matrix[0][1]) / scale,
+                (matrix[0][2] + matrix[2][0]) / scale,
+                (matrix[1][2] + matrix[2][1]) / scale,
+                0.25 * scale,
+            ]
+    return normalize_quat_wxyz(quat)
+
+
+def slerp_quat_wxyz(start, target, fraction: float) -> list[float]:
+    q0 = normalize_quat_wxyz(start)
+    q1 = normalize_quat_wxyz(target)
+    dot = sum(a * b for a, b in zip(q0, q1))
+    if dot < 0.0:
+        q1 = [-value for value in q1]
+        dot = -dot
+    dot = min(1.0, max(-1.0, dot))
+    amount = min(1.0, max(0.0, float(fraction)))
+    if dot > 0.9995:
+        return normalize_quat_wxyz([a + amount * (b - a) for a, b in zip(q0, q1)])
+    angle = math.acos(dot)
+    sin_angle = math.sin(angle)
+    if sin_angle <= 1e-12:
+        return q0
+    weight0 = math.sin((1.0 - amount) * angle) / sin_angle
+    weight1 = math.sin(amount * angle) / sin_angle
+    return [weight0 * a + weight1 * b for a, b in zip(q0, q1)]
+
+
+class CartesianTargetLimiter:
+    """Clamp workspace and rate-limit a base-frame TCP target."""
+
+    def __init__(
+        self,
+        *,
+        workspace_min,
+        workspace_max,
+        max_linear_speed_m_s: float,
+        max_angular_speed_rad_s: float,
+    ) -> None:
+        self.workspace_min = parse_float_list(workspace_min, expected=3, name="workspace_min")
+        self.workspace_max = parse_float_list(workspace_max, expected=3, name="workspace_max")
+        clamp_xyz(self.workspace_min, self.workspace_min, self.workspace_max)
+        self.max_linear_speed_m_s = float(max_linear_speed_m_s)
+        self.max_angular_speed_rad_s = float(max_angular_speed_rad_s)
+        self.last_pose: list[float] | None = None
+
+    def reset(self, pose=None) -> None:
+        if pose is None:
+            self.last_pose = None
+            return
+        values = parse_float_list(pose, expected=7, name="pose")
+        # Keep the measured starting position even if it is outside the configured
+        # workspace, then rate-limit the command back toward the nearest boundary.
+        # Clamping here would create an instantaneous target jump on engagement.
+        self.last_pose = values[:3] + normalize_quat_wxyz(values[3:])
+
+    def limit(self, desired_pose, *, dt: float) -> list[float]:
+        desired = parse_float_list(desired_pose, expected=7, name="desired_pose")
+        desired_xyz = clamp_xyz(desired[:3], self.workspace_min, self.workspace_max)
+        desired_quat = normalize_quat_wxyz(desired[3:])
+        if self.last_pose is None:
+            self.last_pose = desired_xyz + desired_quat
+            return list(self.last_pose)
+
+        period = max(0.0, float(dt))
+        previous_xyz = self.last_pose[:3]
+        delta = [target - current for target, current in zip(desired_xyz, previous_xyz)]
+        distance = math.sqrt(sum(value * value for value in delta))
+        max_distance = self.max_linear_speed_m_s * period
+        if self.max_linear_speed_m_s > 0.0 and distance > max_distance and distance > 0.0:
+            scale = max_distance / distance
+            limited_xyz = [current + value * scale for current, value in zip(previous_xyz, delta)]
+        else:
+            limited_xyz = desired_xyz
+
+        previous_quat = self.last_pose[3:]
+        dot = abs(sum(a * b for a, b in zip(normalize_quat_wxyz(previous_quat), desired_quat)))
+        angular_distance = 2.0 * math.acos(min(1.0, max(-1.0, dot)))
+        max_angle = self.max_angular_speed_rad_s * period
+        if self.max_angular_speed_rad_s > 0.0 and angular_distance > max_angle and angular_distance > 0.0:
+            limited_quat = slerp_quat_wxyz(previous_quat, desired_quat, max_angle / angular_distance)
+        else:
+            limited_quat = desired_quat
+
+        self.last_pose = limited_xyz + limited_quat
+        return list(self.last_pose)
+
+
 class QuestRelativeTargetMapper:
     def __init__(
         self,
@@ -85,11 +249,13 @@ class QuestRelativeTargetMapper:
         scale: float,
         workspace_min,
         workspace_max,
+        position_deadband_m: float = 0.0,
     ) -> None:
         self.axis_map = axis_map
         self.scale = float(scale)
         self.workspace_min = parse_float_list(workspace_min, expected=3, name="workspace_min")
         self.workspace_max = parse_float_list(workspace_max, expected=3, name="workspace_max")
+        self.position_deadband_m = max(0.0, float(position_deadband_m))
         self.reference: QuestRelativeReference | None = None
 
     def reset(self) -> None:
@@ -101,16 +267,21 @@ class QuestRelativeTargetMapper:
             raise ValueError("current_pose_base_tcp must contain 7 values")
         orientation = list(quest_target.pose_base_tcp_des[3:7])
         if quest_target.controller_delta_base is not None:
-            delta_base = [float(value) for value in quest_target.controller_delta_base]
+            delta_base = [float(value) * self.scale for value in quest_target.controller_delta_base]
             if len(delta_base) != 3 or not all(math.isfinite(value) for value in delta_base):
                 return current_pose
+            delta_base = [0.0 if abs(value) < self.position_deadband_m else value for value in delta_base]
             if self.reference is None:
                 self.reference = QuestRelativeReference(
                     controller_position_openxr=[0.0, 0.0, 0.0],
                     tcp_pose_base=list(current_pose),
                 )
                 return list(current_pose)
-            xyz = [self.reference.tcp_pose_base[index] + delta_base[index] for index in range(3)]
+            xyz = clamp_xyz(
+                [self.reference.tcp_pose_base[index] + delta_base[index] for index in range(3)],
+                self.workspace_min,
+                self.workspace_max,
+            )
             return xyz + orientation
         if quest_target.controller_position_openxr is None:
             return current_pose
@@ -126,7 +297,12 @@ class QuestRelativeTargetMapper:
             for index in range(3)
         ]
         delta_base = map_openxr_delta_to_base(delta_openxr, axis_map=self.axis_map, scale=self.scale)
-        xyz = [self.reference.tcp_pose_base[index] + delta_base[index] for index in range(3)]
+        delta_base = [0.0 if abs(value) < self.position_deadband_m else value for value in delta_base]
+        xyz = clamp_xyz(
+            [self.reference.tcp_pose_base[index] + delta_base[index] for index in range(3)],
+            self.workspace_min,
+            self.workspace_max,
+        )
         return xyz + orientation
 
 
@@ -499,6 +675,10 @@ class QuestTargetUdpReceiver:
             )
             if parsed is not None:
                 latest = parsed
+
+    def clear(self) -> None:
+        """Drain queued controller packets, for example during a coordinated reset."""
+        self.poll_latest()
 
     def close(self) -> None:
         self._socket.close()

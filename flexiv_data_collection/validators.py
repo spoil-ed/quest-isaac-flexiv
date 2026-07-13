@@ -18,6 +18,15 @@ from flexiv_data_collection.schema import FLEXIV_VECTOR_DIM, validate_unitree_sa
 from flexiv_data_collection.video import probe_video_codec
 
 
+def nonempty_serial(value: str) -> str:
+    serial = str(value).strip()
+    if not serial:
+        raise argparse.ArgumentTypeError(
+            "must not be empty; set ROBOT_SERIAL, e.g. export ROBOT_SERIAL=Rizon4-YOUR-SERIAL"
+        )
+    return serial
+
+
 def discover_data_json(path: Path) -> list[Path]:
     if path.is_file():
         if path.name != "data.json":
@@ -53,20 +62,19 @@ def validate_unitree_json(
             except Exception as exc:
                 raise ValueError(f"{data_json} frame {idx}: {exc}") from exc
         if strict_single_arm:
-            strict_reports.append(
-                {
-                    "path": str(data_json),
-                    **summarize_stage1_single_arm_frames(
-                        frames,
-                        expected_serial=expected_serial,
-                        required_camera_keys=STAGE1_CAMERA_KEYS,
-                        exact_camera_keys=True,
-                        min_left_q_delta=min_left_q_delta,
-                        min_left_torque_norm=min_left_torque_norm,
-                        min_servo_cycle_delta=min_servo_cycle_delta,
-                    ),
-                }
-            )
+            try:
+                strict_summary = summarize_stage1_single_arm_frames(
+                    frames,
+                    expected_serial=expected_serial,
+                    required_camera_keys=STAGE1_CAMERA_KEYS,
+                    exact_camera_keys=True,
+                    min_left_q_delta=min_left_q_delta,
+                    min_left_torque_norm=min_left_torque_norm,
+                    min_servo_cycle_delta=min_servo_cycle_delta,
+                )
+            except Exception as exc:
+                raise ValueError(f"{data_json}: {exc}") from exc
+            strict_reports.append({"path": str(data_json), **strict_summary})
         total_files += 1
         total_frames += len(frames)
         files.append({"path": str(data_json), "frames": len(frames)})
@@ -128,11 +136,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--strict-single-arm", action="store_true")
-    parser.add_argument("--expected-serial", default=EXPECTED_STAGE1_SERIAL)
+    parser.add_argument(
+        "--expected-serial",
+        default=None,
+        type=nonempty_serial,
+    )
     parser.add_argument("--min-left-q-delta", type=float, default=0.0)
     parser.add_argument("--min-left-torque-norm", type=float, default=0.0)
     parser.add_argument("--min-servo-cycle-delta", type=int, default=0)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.strict_single_arm and args.expected_serial is None:
+        parser.error("--expected-serial is required with --strict-single-arm; set ROBOT_SERIAL first")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:

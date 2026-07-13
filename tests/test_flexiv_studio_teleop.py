@@ -53,6 +53,44 @@ class FakeSink:
 
 
 class FlexivStudioTeleopTests(unittest.TestCase):
+    def test_camera_look_at_points_usd_negative_z_at_target(self):
+        mod = load_follow_ball()
+        position = [2.2, 0.0, 1.45]
+        target = [0.0, 0.0, 0.55]
+
+        quat = mod.camera_look_at_quat_wxyz(position, target)
+        w, x, y, z = quat
+        camera_forward = [
+            -2.0 * (x * z + w * y),
+            -2.0 * (y * z - w * x),
+            -(1.0 - 2.0 * (x * x + y * y)),
+        ]
+        delta = [target[i] - position[i] for i in range(3)]
+        norm = sum(value * value for value in delta) ** 0.5
+        expected = [value / norm for value in delta]
+
+        for actual, wanted in zip(camera_forward, expected):
+            self.assertAlmostEqual(actual, wanted)
+
+    def test_camera_config_accepts_look_at_and_legacy_orientation(self):
+        mod = load_follow_ball()
+        position, orientation = mod.camera_pose_from_config(
+            {
+                "position": {"x": 2.2, "y": 0.0, "z": 1.45},
+                "look_at": {"x": 0.0, "y": 0.0, "z": 0.55},
+            }
+        )
+        self.assertEqual(position, [2.2, 0.0, 1.45])
+        self.assertAlmostEqual(sum(value * value for value in orientation), 1.0)
+
+        _position, legacy = mod.camera_pose_from_config(
+            {
+                "position": {"x": 1, "y": 2, "z": 3},
+                "orientation": {"w": 1, "x": 0, "y": 0, "z": 0},
+            }
+        )
+        self.assertEqual(legacy, [1.0, 0.0, 0.0, 0.0])
+
     def test_flexiv_pose_vector_uses_wxyz_quaternion_order(self):
         from simate.flexiv_studio_teleop.pose import flexiv_pose_vector
 
@@ -363,9 +401,9 @@ class FlexivStudioTeleopTests(unittest.TestCase):
         current_tcp = [0.40, -0.10, 0.70, 1.0, 0.0, 0.0, 0.0]
 
         self.assertEqual(mapper.update(first, current_tcp), current_tcp)
-        self.assertEqual(mapper.update(second, current_tcp), [0.7, -0.30000000000000004, 0.7999999999999999, 0.5, 0.5, 0.5, 0.5])
+        self.assertEqual(mapper.update(second, current_tcp), [0.55, -0.2, 0.75, 0.5, 0.5, 0.5, 0.5])
 
-    def test_follow_ball_relative_mapper_does_not_clip_position_to_workspace_bounds(self):
+    def test_follow_ball_relative_mapper_clips_position_to_workspace_bounds(self):
         mod = load_follow_ball()
         mapper = mod.QuestRelativeTargetMapper(
             axis_map=mod.parse_quest_axis_map("x,y,z"),
@@ -394,8 +432,41 @@ class FlexivStudioTeleopTests(unittest.TestCase):
 
         self.assertEqual(mapper.update(first, current_tcp), current_tcp)
         mapped = mapper.update(second, current_tcp)
-        for actual, expected in zip(mapped, [0.042, -0.3195, 2.0635, 0.0, 1.0, 0.0, 0.0]):
+        for actual, expected in zip(mapped, [0.15, -0.10, 1.00, 0.0, 1.0, 0.0, 0.0]):
             self.assertAlmostEqual(actual, expected)
+
+    def test_cartesian_target_limiter_enforces_translation_and_rotation_speed(self):
+        mod = load_follow_ball()
+        limiter = mod.CartesianTargetLimiter(
+            workspace_min=(0.0, -1.0, 0.2),
+            workspace_max=(1.0, 1.0, 1.4),
+            max_linear_speed_m_s=0.10,
+            max_angular_speed_rad_s=0.50,
+        )
+        start = [0.40, 0.0, 0.70, 1.0, 0.0, 0.0, 0.0]
+        limiter.reset(start)
+
+        limited = limiter.limit([0.80, 0.0, 0.70, 0.0, 1.0, 0.0, 0.0], dt=0.1)
+
+        self.assertAlmostEqual(limited[0], 0.41)
+        self.assertAlmostEqual(limited[1], 0.0)
+        self.assertAlmostEqual(limited[2], 0.70)
+        angular_step = 2.0 * __import__("math").acos(abs(limited[3]))
+        self.assertAlmostEqual(angular_step, 0.05)
+
+    def test_cartesian_target_limiter_does_not_jump_when_start_is_outside_workspace(self):
+        mod = load_follow_ball()
+        limiter = mod.CartesianTargetLimiter(
+            workspace_min=(0.15, -1.0, 0.2),
+            workspace_max=(1.0, 1.0, 1.4),
+            max_linear_speed_m_s=0.10,
+            max_angular_speed_rad_s=0.50,
+        )
+        limiter.reset([0.10, 0.0, 0.70, 1.0, 0.0, 0.0, 0.0])
+
+        limited = limiter.limit([0.10, 0.0, 0.70, 1.0, 0.0, 0.0, 0.0], dt=0.1)
+
+        self.assertAlmostEqual(limited[0], 0.11)
 
 
 if __name__ == "__main__":

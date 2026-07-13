@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import select
 import socket
 import time
 from typing import Any
@@ -85,6 +86,17 @@ class JsonLinePushClient:
         assert self.connection is not None
         self.connection.send_json(data)
 
+    def recv_json_if_available(self, timeout: float = 0.0) -> dict[str, Any] | None:
+        """Return one server message without blocking the publisher loop."""
+        if self.connection is None:
+            return None
+        readable, _writable, _exceptional = select.select(
+            [self.connection.conn], [], [], max(0.0, float(timeout))
+        )
+        if not readable:
+            return None
+        return self.connection.recv_json(timeout=max(0.01, float(timeout)))
+
     def close(self) -> None:
         if self.connection is not None:
             self.connection.close()
@@ -125,8 +137,16 @@ class JsonLineRepServer:
         connection = self._ensure_connection(timeout=timeout)
         if connection is None:
             return None
+        if timeout is not None:
+            readable, _writable, _exceptional = select.select(
+                [connection.conn], [], [], max(0.0, float(timeout))
+            )
+            if not readable:
+                return None
         try:
-            return connection.recv_json(timeout=timeout)
+            # select() keeps an idle connection from poisoning the buffered
+            # makefile with a socket timeout while an interactive recorder waits.
+            return connection.recv_json(timeout=None)
         except EOFError:
             connection.close()
             self.connection = None

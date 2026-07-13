@@ -1,0 +1,6 @@
+# Less restrictive simulation preset. Validate before using on any real robot.
+max_linear_speed_m_s: 0.15
+max_angular_speed_rad_s: 1.00
+max_joint_speed_rad_s: 1.50
+max_target_drive_abs: 100.0
+max_target_drive_norm: 200.0

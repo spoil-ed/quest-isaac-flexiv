@@ -27,6 +27,7 @@ class RepoLayoutTests(unittest.TestCase):
             ".gitignore",
             "AGENTS.md",
             "README.md",
+            "SETUP.md",
             "configs",
             "datasets",
             "docs",
@@ -66,6 +67,7 @@ class RepoLayoutTests(unittest.TestCase):
             "start_robot_control_app.py",
             "start_flexiv_simulation.py",
             "start_isaac_follow.py",
+            "start_isaac_follow_hydra.py",
             "start_rdk_target_streamer.py",
             "stop_flexiv_stack.py",
             "teleop_sdg.py",
@@ -86,6 +88,8 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertNotIn("rdk-cartesian", command)
         self.assertNotIn("--disable-target-pose-udp", command)
         self.assertNotIn("flexiv_test", " ".join(command))
+        self.assertIn("--coordinated-reset", command)
+        self.assertEqual(command[command.index("--reset-settle-sec") + 1], "2.0")
 
     def test_external_rdk_target_streamer_uses_compatible_rdk_client(self):
         streamer = load_script("start_rdk_target_streamer.py")
@@ -112,6 +116,16 @@ class RepoLayoutTests(unittest.TestCase):
 
         self.assertIn("--rdk-target-hz", command)
         self.assertIn("60.0", command)
+
+    def test_empty_python_argument_uses_active_interpreter(self):
+        follow = load_script("start_isaac_follow.py")
+        streamer = load_script("start_rdk_target_streamer.py")
+
+        follow_command = follow.build_command(follow.parse_args(["--isaac-python", ""]))
+        streamer_command = streamer.build_command(streamer.parse_args(["--python", ""]))
+
+        self.assertEqual(follow_command[0], sys.executable)
+        self.assertEqual(streamer_command[0], sys.executable)
 
     def test_isaac_follow_startup_can_override_stage1_runtime_paths_and_ports(self):
         follow = load_script("start_isaac_follow.py")

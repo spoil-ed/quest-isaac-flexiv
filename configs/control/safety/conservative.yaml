@@ -1,0 +1,6 @@
+# Application-level simulation limits, not manufacturer-rated hardware limits.
+max_linear_speed_m_s: 0.08
+max_angular_speed_rad_s: 0.60
+max_joint_speed_rad_s: 1.20
+max_target_drive_abs: 80.0
+max_target_drive_norm: 150.0

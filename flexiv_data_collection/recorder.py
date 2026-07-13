@@ -8,7 +8,9 @@ import json
 import select
 import shutil
 import sys
+import termios
 import time
+import tty
 from pathlib import Path
 from typing import Any
 
@@ -37,12 +39,12 @@ class FlexivEpisodeWriter:
         task_steps: str,
     ) -> None:
         self.task_dir = task_dir
+        self.task_name = task_dir.name
         self.fps = fps
         self.image_size = image_size
         self.task_goal = task_goal
         self.task_desc = task_desc
         self.task_steps = task_steps
-        self.episode_id = self._next_episode_id()
         self.episode_dir: Path | None = None
         self.json_path: Path | None = None
         self.first_item = True
@@ -57,12 +59,12 @@ class FlexivEpisodeWriter:
                     ids.append(int(path.name.split("_")[-1]))
                 except ValueError:
                     pass
-        return (max(ids) + 1) if ids else 0
+        return (max(ids) + 1) if ids else 1
 
     def create_episode(self) -> Path:
         self.item_id = -1
-        self.episode_dir = self.task_dir / f"episode_{self.episode_id:04d}"
-        self.episode_id += 1
+        episode_id = self._next_episode_id()
+        self.episode_dir = self.task_dir / f"episode_{episode_id:03d}"
         self.json_path = self.episode_dir / "data.json"
         (self.episode_dir / "colors").mkdir(parents=True, exist_ok=True)
         (self.episode_dir / "depths").mkdir(parents=True, exist_ok=True)
@@ -140,6 +142,7 @@ class FlexivEpisodeWriter:
             "version": "1.0.0",
             "date": time.strftime("%Y-%m-%d"),
             "author": "quest-isaac-flexiv",
+            "task_name": self.task_name,
             "image": {"width": width, "height": height, "fps": self.fps},
             "depth": {"width": width, "height": height, "fps": self.fps},
             "audio": {"sample_rate": 16000, "channels": 1, "format": "PCM", "bits": 16},
@@ -168,13 +171,43 @@ def parse_image_size(value: str) -> tuple[int, int]:
     return int(width_s), int(height_s)
 
 
-def stdin_key() -> str | None:
-    if not sys.stdin.isatty():
-        return None
-    readable, _, _ = select.select([sys.stdin], [], [], 0)
-    if not readable:
-        return None
-    return sys.stdin.readline().strip()
+def task_name_arg(value: str) -> str:
+    task_name = str(value).strip()
+    if not task_name or task_name in (".", "..") or Path(task_name).name != task_name or "\\" in task_name:
+        raise argparse.ArgumentTypeError("task name must be one non-empty folder name without path separators")
+    return task_name
+
+
+def resolve_task_dir(args: argparse.Namespace) -> Path:
+    if args.task_dir is not None:
+        return Path(args.task_dir)
+    return Path(args.output_root) / str(args.task_name)
+
+
+class StdinKeyReader:
+    """Non-blocking, single-keystroke terminal reader that restores TTY state."""
+
+    def __init__(self) -> None:
+        self.fd: int | None = None
+        self.original_attributes = None
+        if sys.stdin.isatty():
+            self.fd = sys.stdin.fileno()
+            self.original_attributes = termios.tcgetattr(self.fd)
+            tty.setcbreak(self.fd)
+
+    def poll(self) -> str | None:
+        if self.fd is None:
+            return None
+        readable, _, _ = select.select([sys.stdin], [], [], 0)
+        if not readable:
+            return None
+        key = sys.stdin.read(1)
+        return key if key not in ("", "\r", "\n") else None
+
+    def close(self) -> None:
+        if self.fd is not None and self.original_attributes is not None:
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.original_attributes)
+            self.fd = None
 
 
 def request_sample(client: JsonLineReqClient) -> dict[str, Any] | None:
@@ -201,13 +234,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gateway-endpoint", default="tcp://127.0.0.1:5590")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--episodes", type=int, default=1)
-    parser.add_argument("--task-dir", type=Path, required=True)
+    task_group = parser.add_mutually_exclusive_group(required=True)
+    task_group.add_argument(
+        "--task-name",
+        type=task_name_arg,
+        help="Task folder name under --output-root; recommended for new recordings.",
+    )
+    task_group.add_argument(
+        "--task-dir",
+        type=Path,
+        help="Legacy direct task folder path; use --task-name for new recordings.",
+    )
+    parser.add_argument("--output-root", type=Path, default=Path("datasets/stage1_records"))
     parser.add_argument("--image-size", default="640x480")
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--reset-on-save", action="store_true")
     parser.add_argument("--start-key", default="s")
     parser.add_argument("--stop-key", default="e")
     parser.add_argument("--discard-key", default="d")
+    parser.add_argument("--reset-key", default="r")
     parser.add_argument("--quit-key", default="q")
     parser.add_argument("--auto-start", action="store_true")
     parser.add_argument("--task-goal", default="Flexiv Stage1 data collection")
@@ -218,8 +263,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    task_dir = resolve_task_dir(args)
     writer = FlexivEpisodeWriter(
-        args.task_dir,
+        task_dir,
         fps=args.fps,
         image_size=parse_image_size(args.image_size),
         task_goal=args.task_goal,
@@ -234,18 +280,23 @@ def main(argv: list[str] | None = None) -> int:
     paused = False
     frames_this_episode = 0
     last_tick = 0.0
+    key_reader = StdinKeyReader()
 
-    print(
-        "[recorder] connected. Commands: "
-        f"{args.start_key}=start/resume, {args.stop_key}=pause/save, "
-        f"{args.discard_key}=discard, {args.quit_key}=quit",
-        flush=True,
-    )
     try:
+        print(
+            "[recorder] connected. Commands: "
+            f"{args.start_key}=start/resume, {args.stop_key}=pause/save, "
+            f"{args.discard_key}=discard, {args.reset_key}=reset, {args.quit_key}=quit",
+            flush=True,
+        )
         while episodes_done < args.episodes:
-            key = stdin_key()
+            key = key_reader.poll()
             if key == args.quit_key:
                 break
+            if key == args.reset_key:
+                request_reset(client, "keyboard")
+                last_tick = time.monotonic()
+                continue
             if key == args.discard_key and active:
                 writer.discard_episode()
                 if args.reset_on_save:
@@ -308,6 +359,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("[recorder] interrupted", flush=True)
     finally:
+        key_reader.close()
         if active and frames_this_episode > 0:
             saved = writer.save_episode()
             if args.reset_on_save:

@@ -91,15 +91,25 @@ def endpoint_connect_host(host: str) -> str:
     return "127.0.0.1" if host in {"", "0.0.0.0", "::"} else host
 
 
-def path_value(value: Any) -> Path | None:
+def path_value(value: Any, *, base: Path | None = None) -> Path | None:
     if value is None:
         return None
-    return Path(str(value)).expanduser()
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute() and base is not None:
+        path = base / path
+    return path.resolve()
+
+
+def first_path(*candidates: tuple[Any, Path | None]) -> Path | None:
+    for value, base in candidates:
+        if value is not None:
+            return path_value(value, base=base)
+    return None
 
 
 def env_path(name: str) -> Path | None:
     value = os.environ.get(name)
-    return path_value(value) if value else None
+    return path_value(value, base=Path.cwd()) if value else None
 
 
 def tail_log(path: Path, lines: int = 120) -> str:
@@ -207,12 +217,18 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
     )
     environment_config = load_config(environment_config_path) if environment_config_path is not None else {}
     scene_config = load_config(scene_config_path) if scene_config_path is not None else {}
+    environment_base = environment_config_path.parent if environment_config_path is not None else config_base
+    scene_base = scene_config_path.parent if scene_config_path is not None else config_base
+    cli_base = Path.cwd()
 
     # Backward compatibility for the previous single-file Stage1 config shape.
     legacy_runtime_config = cfg_get(pipeline_config, "runtime") or {}
     environment = {**legacy_runtime_config, **environment_config}
     scene_robot = cfg_get(scene_config, "robot") or {}
-    runtime_ws = path_value(first_defined(cfg_get(environment, "isaac_sim_ws"), env_path("ISAAC_SIM_WS")))
+    runtime_ws = first_path(
+        (cfg_get(environment, "isaac_sim_ws"), environment_base),
+        (env_path("ISAAC_SIM_WS"), cli_base),
+    )
     configured_usd = (
         runtime_ws / "exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
         if runtime_ws is not None
@@ -224,7 +240,7 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
         else None
     )
 
-    record_task_dir = path_value(cfg_get(pipeline_config, "record", "task_dir"))
+    record_task_dir = path_value(cfg_get(pipeline_config, "record", "task_dir"), base=config_base)
     configured_output_root = record_task_dir.parent if record_task_dir is not None else None
 
     args.environment_config = environment_config_path
@@ -233,38 +249,55 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.environment_config_data = environment_config
     args.scene_config_data = scene_config
 
-    args.rdk_python = path_value(first_defined(args.rdk_python, cfg_get(environment, "rdk_python"), env_path("FLEXIV_RDK_PYTHON")))
-    args.isaac_python = path_value(first_defined(args.isaac_python, cfg_get(environment, "isaac_python"), env_path("ISAAC_PYTHON")))
-    args.isaacsim_root = path_value(first_defined(args.isaacsim_root, cfg_get(environment, "isaacsim_root"), env_path("ISAACSIM_ROOT")))
-    args.usd = path_value(first_defined(args.usd, cfg_get(scene_robot, "usd"), cfg_get(environment, "usd"), env_path("FLEXIV_RIZON4_USD"), configured_usd))
-    args.examples_ext = path_value(
-        first_defined(
-            args.examples_ext,
-            cfg_get(scene_robot, "examples_ext"),
-            cfg_get(environment, "examples_ext"),
-            env_path("FLEXIV_EXAMPLES_EXT"),
-            configured_examples_ext,
-        )
+    args.flexiv_python = path_value(args.flexiv_python, base=cli_base)
+    args.rdk_python = first_path(
+        (args.rdk_python, cli_base),
+        (cfg_get(environment, "rdk_python"), environment_base),
+        (env_path("FLEXIV_RDK_PYTHON"), cli_base),
     )
-    args.camera_config = path_value(first_defined(args.camera_config, scene_config_path, args.config))
-    args.output_root = path_value(
-        first_defined(
-            args.output_root,
-            cfg_get(pipeline_config, "validation", "output_root"),
-            cfg_get(environment, "record_output_root"),
-            configured_output_root,
-            env_path("FLEXIV_STAGE1_OUTPUT_ROOT"),
-            DEFAULT_OUTPUT_ROOT,
-        )
+    args.isaac_python = first_path(
+        (args.isaac_python, cli_base),
+        (cfg_get(environment, "isaac_python"), environment_base),
+        (env_path("ISAAC_PYTHON"), cli_base),
     )
-    args.lerobot_output_root = path_value(
-        first_defined(
-            args.lerobot_output_root,
-            cfg_get(pipeline_config, "convert", "output_root"),
-            cfg_get(environment, "lerobot_output_root"),
-            env_path("LEROBOT_OUTPUT_ROOT"),
-            DEFAULT_LEROBOT_OUTPUT_ROOT,
-        )
+    args.isaacsim_root = first_path(
+        (args.isaacsim_root, cli_base),
+        (cfg_get(environment, "isaacsim_root"), environment_base),
+        (env_path("ISAACSIM_ROOT"), cli_base),
+    )
+    args.usd = first_path(
+        (args.usd, cli_base),
+        (cfg_get(scene_robot, "usd"), scene_base),
+        (cfg_get(environment, "usd"), environment_base),
+        (env_path("FLEXIV_RIZON4_USD"), cli_base),
+        (configured_usd, cli_base),
+    )
+    args.examples_ext = first_path(
+        (args.examples_ext, cli_base),
+        (cfg_get(scene_robot, "examples_ext"), scene_base),
+        (cfg_get(environment, "examples_ext"), environment_base),
+        (env_path("FLEXIV_EXAMPLES_EXT"), cli_base),
+        (configured_examples_ext, cli_base),
+    )
+    args.camera_config = first_path(
+        (args.camera_config, cli_base),
+        (scene_config_path, cli_base),
+        (args.config, cli_base),
+    )
+    args.output_root = first_path(
+        (args.output_root, cli_base),
+        (cfg_get(pipeline_config, "validation", "output_root"), config_base),
+        (cfg_get(environment, "record_output_root"), environment_base),
+        (configured_output_root, config_base),
+        (env_path("FLEXIV_STAGE1_OUTPUT_ROOT"), cli_base),
+        (DEFAULT_OUTPUT_ROOT, cli_base),
+    )
+    args.lerobot_output_root = first_path(
+        (args.lerobot_output_root, cli_base),
+        (cfg_get(pipeline_config, "convert", "output_root"), config_base),
+        (cfg_get(environment, "lerobot_output_root"), environment_base),
+        (env_path("LEROBOT_OUTPUT_ROOT"), cli_base),
+        (DEFAULT_LEROBOT_OUTPUT_ROOT, cli_base),
     )
 
     serial_value = first_defined(args.serial_number, cfg_get(scene_robot, "serial_number"), cfg_get(pipeline_config, "serial_number"))

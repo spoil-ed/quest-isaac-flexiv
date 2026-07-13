@@ -25,7 +25,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--serial-number", default="Rizon4-I0LIRN")
     parser.add_argument("--joint-group", default="ARM_1")
     parser.add_argument("--network-interface-whitelist", default="")
-    return parser.parse_args(argv)
+    parser.add_argument("--max-age-sec", type=float, default=0.5)
+    parser.add_argument("--log-hz", type=float, default=2.0)
+    args = parser.parse_args(argv)
+    args.python = flexiv_runtime.python_executable_or_current(args.python)
+    return args
 
 
 def build_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
@@ -48,6 +52,10 @@ def build_command(args: argparse.Namespace) -> list[str]:
         str(args.serial_number),
         "--joint-group",
         str(args.joint_group),
+        "--max-age-sec",
+        str(float(args.max_age_sec)),
+        "--log-hz",
+        str(float(args.log_hz)),
     ]
     if args.network_interface_whitelist:
         command.extend(["--network-interface-whitelist", str(args.network_interface_whitelist)])

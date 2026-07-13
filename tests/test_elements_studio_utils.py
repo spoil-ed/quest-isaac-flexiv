@@ -18,6 +18,25 @@ def load_utils():
 
 
 class ElementsStudioUtilsTests(unittest.TestCase):
+    def test_target_drive_limits_check_vector_norm_and_per_joint_magnitude(self):
+        utils = load_utils()
+
+        accepted, norm = utils.valid_target_drives_or_none([3.0, 4.0], max_norm=6.0, max_abs=5.0)
+        rejected_abs, _ = utils.valid_target_drives_or_none([5.1, 0.0], max_norm=6.0, max_abs=5.0)
+        rejected_norm, _ = utils.valid_target_drives_or_none([3.0, 4.0], max_norm=4.9, max_abs=5.0)
+
+        self.assertEqual(accepted, [3.0, 4.0])
+        self.assertAlmostEqual(norm, 5.0)
+        self.assertIsNone(rejected_abs)
+        self.assertIsNone(rejected_norm)
+
+    def test_joint_speed_limit_checks_each_joint(self):
+        utils = load_utils()
+
+        self.assertFalse(utils.joint_speed_limit_exceeded([0.2, -1.1], max_abs_rad_s=1.2))
+        self.assertTrue(utils.joint_speed_limit_exceeded([0.2, -1.21], max_abs_rad_s=1.2))
+        self.assertFalse(utils.joint_speed_limit_exceeded([100.0], max_abs_rad_s=0.0))
+
     def test_rdk_pose_from_xyzw_reorders_quaternion_to_wxyz(self):
         utils = load_utils()
 

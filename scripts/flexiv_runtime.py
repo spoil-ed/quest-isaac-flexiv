@@ -7,6 +7,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -46,6 +47,13 @@ FLEXIV_QUEST_BRIDGE_CONFIG = (
     / "standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/app_config.yaml"
 )
 DEFAULT_INITIAL_Q = ["0", "-0.698132", "0", "1.5708", "0", "0.698132", "0"]
+
+
+def python_executable_or_current(value: str | Path | None) -> Path:
+    """Use the active interpreter when an empty CLI value became Path('.')."""
+    if value is None or str(value).strip() in ("", "."):
+        return Path(sys.executable)
+    return Path(value).expanduser()
 
 
 def studio_env(studio_root: Path = STUDIO_ROOT) -> dict[str, str]:

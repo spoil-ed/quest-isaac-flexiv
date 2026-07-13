@@ -2,18 +2,23 @@
 # The camera is part of the Isaac scene configuration, not the data pipeline.
 
 robot:
-  serial_number: "Rizon4-VIHhZM"
+  # Required: fill in the Elements Studio simulated robot serial, or pass
+  # --serial-number as documented in README.md.
+  serial_number:
   joint_group: "ARM_1"
   prim_path: "/World/Flexiv/Rizon4"
   name: "Rizon4"
   end_effector_prim_name: "flange"
-  usd: "/data/qiming/isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
-  examples_ext: "/data/qiming/isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+  usd: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+  examples_ext: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
 
 cameras:
   - name: "cam_front"
     resolution: [640, 480]
     fps: 30
-    focal_length: 2.5
-    position: {x: 1.65, y: 0.0, z: 1.15}
-    orientation: {w: 0.53201591, x: 0.46578865, y: 0.46578865, z: 0.53201591}
+    # Human-editable framing: move position farther away, and point at look_at.
+    # `orientation: {w, x, y, z}` remains supported as an alternative.
+    focal_length: 2.0
+    position: {x: 2.20, y: 0.0, z: 1.45}
+    look_at: {x: 0.0, y: 0.0, z: 0.55}
+    up: {x: 0.0, y: 0.0, z: 1.0}

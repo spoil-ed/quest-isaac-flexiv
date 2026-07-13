@@ -30,19 +30,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--examples-ext", type=Path, default=None)
     parser.add_argument("--manual-play", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--physics-hz", type=float, default=None)
+    parser.add_argument("--render-hz", type=float, default=None)
     parser.add_argument("--enable-quest-target-udp", action="store_true")
     parser.add_argument("--quest-target-udp-host", default=None)
     parser.add_argument("--quest-target-udp-port", type=int, default=None)
+    parser.add_argument("--quest-target-max-age-sec", type=float, default=None)
+    parser.add_argument("--quest-target-mode", choices=("absolute", "relative"), default="relative")
+    parser.add_argument("--quest-axis-map", default=None)
+    parser.add_argument("--quest-position-scale", type=float, default=1.0)
+    parser.add_argument("--quest-position-deadband-m", type=float, default=None)
+    parser.add_argument("--quest-workspace-min", default=None)
+    parser.add_argument("--quest-workspace-max", default=None)
     parser.add_argument("--target-pose-udp-host", default=None)
     parser.add_argument("--target-pose-udp-port", type=int, default=None)
     parser.add_argument("--target-pose-publish-hz", type=float, default=None)
     parser.add_argument("--rdk-target-hz", type=float, default=None)
     parser.add_argument("--command-timeout-ms", type=int, default=None)
+    parser.add_argument("--max-linear-speed-m-s", type=float, default=None)
+    parser.add_argument("--max-angular-speed-rad-s", type=float, default=None)
+    parser.add_argument("--max-joint-speed-rad-s", type=float, default=None)
+    parser.add_argument("--max-target-drive-abs", type=float, default=None)
+    parser.add_argument("--max-target-drive-norm", type=float, default=None)
     parser.add_argument("--gateway-endpoint", default="")
     parser.add_argument("--gateway-fps", type=float, default=None)
     parser.add_argument("--gateway-jpeg-quality", type=int, default=None)
     parser.add_argument("--camera-config", type=Path, default=None)
-    return parser.parse_args(argv)
+    parser.add_argument("--coordinated-reset", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--reset-settle-sec", type=float, default=2.0)
+    args = parser.parse_args(argv)
+    args.isaac_python = flexiv_runtime.python_executable_or_current(args.isaac_python)
+    return args
 
 
 def build_command(args: argparse.Namespace) -> list[str]:
@@ -54,9 +72,9 @@ def build_command(args: argparse.Namespace) -> list[str]:
         "--serial-number",
         str(args.serial_number),
         "--quest-target-mode",
-        "relative",
+        str(args.quest_target_mode),
         "--quest-position-scale",
-        "1.0",
+        str(float(args.quest_position_scale)),
         "--initial-q",
         *flexiv_runtime.DEFAULT_INITIAL_Q,
     ]
@@ -80,12 +98,26 @@ def build_command(args: argparse.Namespace) -> list[str]:
         command.append("--manual-play")
     if args.headless:
         command.append("--headless")
+    if args.physics_hz is not None:
+        command.extend(["--physics-hz", str(float(args.physics_hz))])
+    if args.render_hz is not None:
+        command.extend(["--render-hz", str(float(args.render_hz))])
     if args.enable_quest_target_udp:
         command.append("--enable-quest-target-udp")
     if args.quest_target_udp_host is not None:
         command.extend(["--quest-target-udp-host", str(args.quest_target_udp_host)])
     if args.quest_target_udp_port is not None:
         command.extend(["--quest-target-udp-port", str(int(args.quest_target_udp_port))])
+    if args.quest_target_max_age_sec is not None:
+        command.extend(["--quest-target-max-age-sec", str(float(args.quest_target_max_age_sec))])
+    if args.quest_axis_map is not None:
+        command.extend(["--quest-axis-map", str(args.quest_axis_map)])
+    if args.quest_position_deadband_m is not None:
+        command.extend(["--quest-position-deadband-m", str(float(args.quest_position_deadband_m))])
+    if args.quest_workspace_min is not None:
+        command.extend(["--quest-workspace-min", str(args.quest_workspace_min)])
+    if args.quest_workspace_max is not None:
+        command.extend(["--quest-workspace-max", str(args.quest_workspace_max)])
     if args.target_pose_udp_host is not None:
         command.extend(["--target-pose-udp-host", str(args.target_pose_udp_host)])
     if args.target_pose_udp_port is not None:
@@ -96,6 +128,15 @@ def build_command(args: argparse.Namespace) -> list[str]:
         command.extend(["--rdk-target-hz", str(float(args.rdk_target_hz))])
     if args.command_timeout_ms is not None:
         command.extend(["--command-timeout-ms", str(int(args.command_timeout_ms))])
+    for option, value in (
+        ("--max-linear-speed-m-s", args.max_linear_speed_m_s),
+        ("--max-angular-speed-rad-s", args.max_angular_speed_rad_s),
+        ("--max-joint-speed-rad-s", args.max_joint_speed_rad_s),
+        ("--max-target-drive-abs", args.max_target_drive_abs),
+        ("--max-target-drive-norm", args.max_target_drive_norm),
+    ):
+        if value is not None:
+            command.extend([option, str(float(value))])
     if args.gateway_endpoint:
         command.extend(["--gateway-endpoint", str(args.gateway_endpoint)])
     if args.gateway_fps is not None:
@@ -104,6 +145,8 @@ def build_command(args: argparse.Namespace) -> list[str]:
         command.extend(["--gateway-jpeg-quality", str(int(args.gateway_jpeg_quality))])
     if args.camera_config is not None:
         command.extend(["--camera-config", str(args.camera_config)])
+    command.append("--coordinated-reset" if args.coordinated_reset else "--no-coordinated-reset")
+    command.extend(["--reset-settle-sec", str(float(args.reset_settle_sec))])
     return command
 
 

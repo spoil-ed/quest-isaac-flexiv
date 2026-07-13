@@ -33,12 +33,19 @@ class Stage1ConverterTests(unittest.TestCase):
                 task_desc="stage1 converter test",
                 task_steps="fake; record; convert",
             )
-            writer.create_episode()
+            first_episode = writer.create_episode()
+            self.assertEqual(first_episode.name, "episode_001")
             backend = FakeBackend(10, (160, 120), ["color_0"])
             latest = LatestBridgeData()
             for _ in range(3):
                 writer.add_sample(backend.sample(latest))
             writer.save_episode()
+
+            second_episode = writer.create_episode()
+            self.assertEqual(second_episode.name, "episode_002")
+            writer.discard_episode()
+            self.assertEqual(writer.create_episode().name, "episode_002")
+            writer.discard_episode()
 
             raw_result = validate_unitree_json(raw_dir)
             self.assertEqual(raw_result["unitree_json"]["total_frames"], 3)

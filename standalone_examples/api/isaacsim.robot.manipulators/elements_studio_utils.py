@@ -458,11 +458,19 @@ class RdkRuntimeController:
         self._streamer = None
 
 
-def valid_target_drives_or_none(target_drives, *, max_norm: float):
+def valid_target_drives_or_none(target_drives, *, max_norm: float, max_abs: float = float("inf")):
     values = [float(value) for value in target_drives]
     if not values or not all(math.isfinite(value) for value in values):
         return None, float("nan")
     norm = math.sqrt(sum(value * value for value in values))
-    if norm > float(max_norm):
+    if norm > float(max_norm) or any(abs(value) > float(max_abs) for value in values):
         return None, norm
     return values, norm
+
+
+def joint_speed_limit_exceeded(joint_velocities, *, max_abs_rad_s: float) -> bool:
+    limit = float(max_abs_rad_s)
+    if limit <= 0.0:
+        return False
+    values = [float(value) for value in joint_velocities]
+    return (not all(math.isfinite(value) for value in values)) or any(abs(value) > limit for value in values)

@@ -39,8 +39,8 @@ robot:
   serial_number: Rizon4-SCENE
   joint_group: ARM_SCENE
   prim_path: /World/Flexiv/SceneRizon4
-  usd: "{tmp_path}/scene.usd"
-  examples_ext: "{tmp_path}/examples"
+  usd: scene.usd
+  examples_ext: examples
 cameras:
   - name: cam_front
     position: {{x: 1, y: 0, z: 1}}
@@ -57,6 +57,59 @@ cameras:
             self.assertEqual(args.usd, tmp_path / "scene.usd")
             self.assertEqual(args.examples_ext, tmp_path / "examples")
             self.assertEqual(args.camera_config, scene_config)
+
+    def test_stage1_relative_paths_are_resolved_from_owning_config(self):
+        module = load_validation_script()
+        with tempfile.TemporaryDirectory(prefix="stage1_relative_config_") as tmp:
+            tmp_path = Path(tmp)
+            pipeline_dir = tmp_path / "configs/pipelines"
+            environment_dir = tmp_path / "configs/environments"
+            scene_dir = tmp_path / "configs/scenes"
+            pipeline_dir.mkdir(parents=True)
+            environment_dir.mkdir(parents=True)
+            scene_dir.mkdir(parents=True)
+
+            environment_config = environment_dir / "local.yaml"
+            scene_config = scene_dir / "scene.yaml"
+            pipeline_config = pipeline_dir / "pipeline.yaml"
+            environment_config.write_text(
+                """
+rdk_python: ../../runtime/rdk/bin/python
+isaac_python: ../../runtime/isaac/python
+isaacsim_root: ../../runtime/isaac
+record_output_root: ../../datasets/records
+lerobot_output_root: ../../datasets/lerobot
+""",
+                encoding="utf-8",
+            )
+            scene_config.write_text(
+                """
+robot:
+  serial_number: Rizon4-RELATIVE
+  usd: ../../isaac_sim_ws/Rizon4.usd
+  examples_ext: ../../isaac_sim_ws/examples
+cameras:
+  - name: cam_front
+""",
+                encoding="utf-8",
+            )
+            pipeline_config.write_text(
+                """
+environment_config: ../environments/local.yaml
+scene_config: ../scenes/scene.yaml
+""",
+                encoding="utf-8",
+            )
+
+            args = module.parse_args(["--config", str(pipeline_config)])
+
+            self.assertEqual(args.rdk_python, tmp_path / "runtime/rdk/bin/python")
+            self.assertEqual(args.isaac_python, tmp_path / "runtime/isaac/python")
+            self.assertEqual(args.isaacsim_root, tmp_path / "runtime/isaac")
+            self.assertEqual(args.usd, tmp_path / "isaac_sim_ws/Rizon4.usd")
+            self.assertEqual(args.examples_ext, tmp_path / "isaac_sim_ws/examples")
+            self.assertEqual(args.output_root, tmp_path / "datasets/records")
+            self.assertEqual(args.lerobot_output_root, tmp_path / "datasets/lerobot")
 
     def test_yaml_config_supplies_serial_paths_ports_and_outputs(self):
         module = load_validation_script()
