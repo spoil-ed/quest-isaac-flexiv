@@ -26,10 +26,14 @@ control:
   rdk_packet_max_age_sec: 0.25
   rdk_log_hz: 2.0
 
-# Startup and reset deliberately share the same initialization path and initial_q.
+# Startup captures the initial TCP pose. Later resets drive to it through RDK.
 reset:
   coordinated: true
   settle_sec: 2.0
+  timeout_sec: 20.0
+  position_tolerance_m: 0.01
+  angular_tolerance_rad: 0.10
+  joint_speed_tolerance_rad_s: 0.05
 
 quest:
   enabled: true

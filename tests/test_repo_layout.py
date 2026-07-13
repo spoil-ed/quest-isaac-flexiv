@@ -25,6 +25,7 @@ class RepoLayoutTests(unittest.TestCase):
             ".deps",
             ".git",
             ".gitignore",
+            ".pytest_cache",
             "AGENTS.md",
             "README.md",
             "SETUP.md",

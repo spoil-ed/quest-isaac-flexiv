@@ -283,7 +283,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--enable-button", choices=["squeeze", "trigger", "thumbstick"], default="squeeze")
     parser.add_argument("--axis-map", default=DEFAULT_AXIS_MAP)
     parser.add_argument("--position-delta-scale", type=float, default=1.0)
-    parser.add_argument("--position-deadband", type=float, default=0.05)
+    parser.add_argument("--position-deadband", type=float, default=0.0)
     parser.add_argument("--engage-settle-sec", type=float, default=0.25)
     parser.add_argument("--right-tcp-rot-offset", default="0.0,0.70710678,0.0,0.70710678")
     parser.add_argument("--enable-threshold", type=float, default=0.5)

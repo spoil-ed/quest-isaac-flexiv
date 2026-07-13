@@ -38,6 +38,14 @@ def validate_control_config(cfg: DictConfig) -> None:
         raise ValueError("quest.position_scale must be > 0")
     if float(cfg.reset.settle_sec) < 0.0:
         raise ValueError("reset.settle_sec must be >= 0")
+    if float(cfg.reset.timeout_sec) <= 0.0:
+        raise ValueError("reset.timeout_sec must be > 0")
+    if min(
+        float(cfg.reset.position_tolerance_m),
+        float(cfg.reset.angular_tolerance_rad),
+        float(cfg.reset.joint_speed_tolerance_rad_s),
+    ) < 0.0:
+        raise ValueError("reset tolerances must be >= 0")
     if any(float(lo) > float(hi) for lo, hi in zip(cfg.quest.workspace_min, cfg.quest.workspace_max)):
         raise ValueError("quest.workspace_min must be <= quest.workspace_max on every axis")
 
@@ -99,6 +107,14 @@ def build_command(cfg: DictConfig) -> list[str]:
         str(float(cfg.safety.max_target_drive_norm)),
         "--reset-settle-sec",
         str(float(cfg.reset.settle_sec)),
+        "--reset-timeout-sec",
+        str(float(cfg.reset.timeout_sec)),
+        "--reset-position-tolerance-m",
+        str(float(cfg.reset.position_tolerance_m)),
+        "--reset-angular-tolerance-rad",
+        str(float(cfg.reset.angular_tolerance_rad)),
+        "--reset-joint-speed-tolerance-rad-s",
+        str(float(cfg.reset.joint_speed_tolerance_rad_s)),
     ]
     command.append("--coordinated-reset" if bool(cfg.reset.coordinated) else "--no-coordinated-reset")
     if bool(cfg.quest.enabled):

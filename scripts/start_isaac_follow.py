@@ -58,6 +58,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--camera-config", type=Path, default=None)
     parser.add_argument("--coordinated-reset", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--reset-settle-sec", type=float, default=2.0)
+    parser.add_argument("--reset-timeout-sec", type=float, default=20.0)
+    parser.add_argument("--reset-position-tolerance-m", type=float, default=0.01)
+    parser.add_argument("--reset-angular-tolerance-rad", type=float, default=0.10)
+    parser.add_argument("--reset-joint-speed-tolerance-rad-s", type=float, default=0.05)
     args = parser.parse_args(argv)
     args.isaac_python = flexiv_runtime.python_executable_or_current(args.isaac_python)
     return args
@@ -147,6 +151,12 @@ def build_command(args: argparse.Namespace) -> list[str]:
         command.extend(["--camera-config", str(args.camera_config)])
     command.append("--coordinated-reset" if args.coordinated_reset else "--no-coordinated-reset")
     command.extend(["--reset-settle-sec", str(float(args.reset_settle_sec))])
+    command.extend(["--reset-timeout-sec", str(float(args.reset_timeout_sec))])
+    command.extend(["--reset-position-tolerance-m", str(float(args.reset_position_tolerance_m))])
+    command.extend(["--reset-angular-tolerance-rad", str(float(args.reset_angular_tolerance_rad))])
+    command.extend(
+        ["--reset-joint-speed-tolerance-rad-s", str(float(args.reset_joint_speed_tolerance_rad_s))]
+    )
     return command
 
 

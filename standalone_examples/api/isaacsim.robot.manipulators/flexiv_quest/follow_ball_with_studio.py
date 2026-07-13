@@ -26,6 +26,7 @@ from elements_studio_utils import (
     joint_positions_rad_to_studio_seed,
     studio_target_pose_from_rdk_pose as pose_base_tcp_des_to_studio_target_pose,
     valid_target_drives_or_none,
+    zero_articulation_joint_velocities,
 )
 from control_helpers import (
     StepRateLimiter,
@@ -46,6 +47,7 @@ from targeting import (
     build_coordinate_observation_packet,
     build_target_pose_packet,
     camera_look_at_quat_wxyz,
+    cartesian_pose_error,
     euler_xyz_deg_to_quat_wxyz,
     flexiv_pose_to_world_target,
     map_openxr_delta_to_base,
@@ -406,7 +408,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--reset-settle-sec",
         type=float,
         default=2.0,
-        help="Publish and hold the home TCP target for this long after reset.",
+        help="Required continuous in-tolerance time before reset succeeds.",
+    )
+    parser.add_argument(
+        "--reset-timeout-sec",
+        type=float,
+        default=20.0,
+        help="Fail an RDK reset if the initial TCP target is not reached in time.",
+    )
+    parser.add_argument(
+        "--reset-position-tolerance-m",
+        type=float,
+        default=0.01,
+        help="TCP translation tolerance for reset completion.",
+    )
+    parser.add_argument(
+        "--reset-angular-tolerance-rad",
+        type=float,
+        default=0.10,
+        help="TCP orientation tolerance for reset completion.",
+    )
+    parser.add_argument(
+        "--reset-joint-speed-tolerance-rad-s",
+        type=float,
+        default=0.05,
+        help="Maximum arm joint speed for reset completion.",
     )
     parser.add_argument(
         "--camera-config",
@@ -482,6 +508,10 @@ PARAM_OVERRIDE_KEYS = {
     "gateway_jpeg_quality",
     "coordinated_reset",
     "reset_settle_sec",
+    "reset_timeout_sec",
+    "reset_position_tolerance_m",
+    "reset_angular_tolerance_rad",
+    "reset_joint_speed_tolerance_rad_s",
     "scene_config",
     "camera_config",
 }
@@ -579,6 +609,17 @@ def physics_hz_for_args(args: argparse.Namespace) -> float:
     if args.physics_hz is not None:
         return float(args.physics_hz)
     return DEFAULT_PHYSICS_HZ
+
+
+def reset_timeout_expired(
+    *, elapsed_sec: float, timeout_sec: float, settling_within_hysteresis: bool
+) -> bool:
+    """Keep a bounded settling grace when reset reached tolerance before timeout."""
+
+    return (
+        float(elapsed_sec) >= max(0.1, float(timeout_sec))
+        and not settling_within_hysteresis
+    )
 
 
 def apply_key_nudge(
@@ -936,6 +977,21 @@ def run(args: argparse.Namespace) -> int:
     reset_hold_pose_base_tcp = None
     reset_hold_cycles_remaining = 0
     last_reset_seq = 0
+    startup_pose_base_tcp = None
+    reset_state = "idle"
+    reset_error = None
+    reset_started_monotonic = 0.0
+    reset_in_tolerance_since = None
+    reset_linear_error_m = None
+    reset_angular_error_rad = None
+
+    def hold_robot_position(joint_positions=None, *, switch_mode: bool = True) -> int:
+        """Stop the complete articulation and hold the requested arm pose."""
+
+        if switch_mode:
+            robot.switch_control_mode("position")
+        robot.teleport_to(robot.q if joint_positions is None else joint_positions)
+        return zero_articulation_joint_velocities(robot, zeros_factory=lambda count: np.zeros(count))
 
     def on_physics_step(_dt):
         nonlocal servo_cycle, last_connected, effort_control_enabled, target_drive_warmup_remaining
@@ -944,13 +1000,14 @@ def run(args: argparse.Namespace) -> int:
         nonlocal last_invalid_target_drive_cycle, last_target_drive_log_cycle
         nonlocal last_quest_target_log_cycle, last_rdk_error_cycle, last_rdk_command_log_cycle
         nonlocal latest_quest_target, rdk_runtime, rdk_runtime_target_active, latest_target_drives
-        nonlocal reset_hold_pose_base_tcp, reset_hold_cycles_remaining
+        nonlocal reset_hold_pose_base_tcp, reset_hold_cycles_remaining, reset_state
+        nonlocal reset_error, reset_in_tolerance_since, reset_linear_error_m, reset_angular_error_rad
         servo_cycle += 1
         sim_node.SendRobotStates(flexivsimplugin.SimRobotStates(servo_cycle, robot.q, robot.dq))
 
         base_position, base_orientation = robot.get_world_pose()
         if quest_target_receiver is not None:
-            reset_hold_active = reset_hold_pose_base_tcp is not None and reset_hold_cycles_remaining > 0
+            reset_hold_active = reset_hold_pose_base_tcp is not None and reset_state in ("startup", "moving")
             if reset_hold_active:
                 quest_target_receiver.clear()
                 quest_target = None
@@ -984,9 +1041,25 @@ def run(args: argparse.Namespace) -> int:
         )
         current_pose_base_tcp = None
         control_pose_base_tcp = pose_base_tcp_des
-        reset_hold_active = reset_hold_pose_base_tcp is not None and reset_hold_cycles_remaining > 0
+        reset_hold_active = reset_hold_pose_base_tcp is not None and reset_state in ("startup", "moving")
         if reset_hold_active:
-            control_pose_base_tcp = list(reset_hold_pose_base_tcp)
+            tcp_position, tcp_orientation = robot.end_effector.get_world_pose()
+            current_pose_base_tcp = world_target_to_flexiv_pose(
+                world_position=tcp_position,
+                world_orientation_wxyz=tcp_orientation,
+                base_position=base_position,
+                base_orientation_wxyz=base_orientation,
+            )
+            if reset_state == "moving":
+                if cartesian_target_limiter.last_pose is None:
+                    cartesian_target_limiter.reset(current_pose_base_tcp)
+                control_pose_base_tcp = cartesian_target_limiter.limit(
+                    reset_hold_pose_base_tcp,
+                    dt=float(_dt),
+                )
+            else:
+                control_pose_base_tcp = list(reset_hold_pose_base_tcp)
+                cartesian_target_limiter.reset(control_pose_base_tcp)
             synced_target_pose = sync_target_to_base_tcp_pose(
                 target_frame,
                 pose_base_tcp_des=control_pose_base_tcp,
@@ -995,7 +1068,6 @@ def run(args: argparse.Namespace) -> int:
             )
             if keyboard is not None:
                 keyboard.update_pose_reference(synced_target_pose)
-            cartesian_target_limiter.reset(control_pose_base_tcp)
         elif latest_quest_target is not None and args.quest_target_mode == "relative":
             tcp_position, tcp_orientation = robot.end_effector.get_world_pose()
             current_pose_base_tcp = world_target_to_flexiv_pose(
@@ -1048,11 +1120,77 @@ def run(args: argparse.Namespace) -> int:
                 )
             )
 
-        if reset_hold_active:
+        if reset_state == "startup" and reset_hold_active:
             reset_hold_cycles_remaining -= 1
             if reset_hold_cycles_remaining <= 0:
                 reset_hold_pose_base_tcp = None
+                reset_state = "idle"
                 print("[FlexivTargetFrame] startup/reset Studio hold completed", flush=True)
+        elif reset_state == "moving" and reset_hold_active and current_pose_base_tcp is not None:
+            reset_linear_error_m, reset_angular_error_rad = cartesian_pose_error(
+                current_pose_base_tcp,
+                reset_hold_pose_base_tcp,
+            )
+            max_joint_speed = max((abs(float(value)) for value in robot.dq), default=0.0)
+            position_tolerance = max(0.0, float(args.reset_position_tolerance_m))
+            angular_tolerance = max(0.0, float(args.reset_angular_tolerance_rad))
+            speed_tolerance = max(0.0, float(args.reset_joint_speed_tolerance_rad_s))
+            in_tolerance = (
+                reset_linear_error_m <= position_tolerance
+                and reset_angular_error_rad <= angular_tolerance
+                and max_joint_speed <= speed_tolerance
+                and effort_control_enabled
+            )
+            within_hysteresis = (
+                reset_linear_error_m <= position_tolerance * 1.5
+                and reset_angular_error_rad <= angular_tolerance * 1.5
+                and max_joint_speed <= speed_tolerance * 1.5
+                and effort_control_enabled
+            )
+            now_monotonic = time.monotonic()
+            if reset_in_tolerance_since is None:
+                if in_tolerance:
+                    reset_in_tolerance_since = now_monotonic
+            elif not within_hysteresis:
+                reset_in_tolerance_since = None
+            stable_sec = (
+                0.0
+                if reset_in_tolerance_since is None
+                else now_monotonic - reset_in_tolerance_since
+            )
+            settle_sec = max(0.0, float(args.reset_settle_sec))
+            settling_within_hysteresis = (
+                reset_in_tolerance_since is not None
+                and within_hysteresis
+                and stable_sec < settle_sec
+            )
+            if reset_in_tolerance_since is not None and stable_sec >= settle_sec:
+                reset_state = "succeeded"
+                reset_error = None
+                reset_hold_pose_base_tcp = None
+                print(
+                    f"[FlexivTargetFrame] RDK reset succeeded seq={last_reset_seq} "
+                    f"linear_error_m={reset_linear_error_m:.6f} "
+                    f"angular_error_rad={reset_angular_error_rad:.6f}",
+                    flush=True,
+                )
+            elif reset_timeout_expired(
+                elapsed_sec=now_monotonic - reset_started_monotonic,
+                timeout_sec=float(args.reset_timeout_sec),
+                settling_within_hysteresis=settling_within_hysteresis,
+            ):
+                reset_state = "failed"
+                reset_error = (
+                    f"RDK reset timeout after {float(args.reset_timeout_sec):.3f}s; "
+                    f"linear_error_m={reset_linear_error_m:.6f}, "
+                    f"angular_error_rad={reset_angular_error_rad:.6f}, "
+                    f"max_joint_speed_rad_s={max_joint_speed:.6f}, "
+                    f"stable_sec={stable_sec:.6f}, effort_control_enabled={effort_control_enabled}"
+                )
+                reset_hold_pose_base_tcp = None
+                hold_robot_position(switch_mode=effort_control_enabled)
+                effort_control_enabled = False
+                print(f"[FlexivTargetFrame] {reset_error}", flush=True)
 
         if args.control_source == "studio-ik":
             if not _is_robot_ready(robot):
@@ -1153,18 +1291,15 @@ def run(args: argparse.Namespace) -> int:
                 target_drive_warmup_remaining = max(0, int(args.target_drive_warmup_cycles))
                 effort_control_enabled = False
                 valid_target_drive_streak = 0
-                robot.switch_control_mode("position")
-                robot.teleport_to(robot.q)
+                hold_robot_position()
 
             if should_poll_simplugin_target_drives(
                 connected=connected,
                 runtime_target_active=rdk_runtime_target_active,
             ):
                 if joint_speed_limit_exceeded(robot.dq, max_abs_rad_s=float(args.max_joint_speed_rad_s)):
-                    if effort_control_enabled:
-                        robot.switch_control_mode("position")
-                        robot.teleport_to(robot.q)
-                        effort_control_enabled = False
+                    hold_robot_position(switch_mode=effort_control_enabled)
+                    effort_control_enabled = False
                     valid_target_drive_streak = 0
                     if servo_cycle - last_invalid_target_drive_cycle >= int(physics_hz):
                         print(
@@ -1186,8 +1321,7 @@ def run(args: argparse.Namespace) -> int:
                     )
                     if target_drives is None:
                         if effort_control_enabled:
-                            robot.switch_control_mode("position")
-                            robot.teleport_to(robot.q)
+                            hold_robot_position()
                             effort_control_enabled = False
                         valid_target_drive_streak = 0
                         if servo_cycle - last_invalid_target_drive_cycle >= int(physics_hz):
@@ -1199,7 +1333,7 @@ def run(args: argparse.Namespace) -> int:
                             last_invalid_target_drive_cycle = servo_cycle
                         last_connected = True
                         return
-                    if reset_hold_active:
+                    if reset_state == "startup":
                         latest_target_drives = list(target_drives[:7])
                         valid_target_drive_streak = 0
                         last_connected = True
@@ -1233,16 +1367,14 @@ def run(args: argparse.Namespace) -> int:
             else:
                 if connected:
                     if effort_control_enabled:
-                        robot.switch_control_mode("position")
-                        robot.teleport_to(robot.q)
+                        hold_robot_position()
                         effort_control_enabled = False
                     valid_target_drive_streak = 0
                     last_connected = True
                     return
                 if last_connected:
                     print(f"[FlexivTargetFrame] SimPlugin disconnected {args.serial_number}", flush=True)
-                    robot.switch_control_mode("position")
-                    robot.teleport_to(robot.q)
+                    hold_robot_position()
                 effort_control_enabled = False
                 valid_target_drive_streak = 0
                 last_connected = False
@@ -1262,13 +1394,10 @@ def run(args: argparse.Namespace) -> int:
                 target_drive_warmup_remaining = max(0, int(args.target_drive_warmup_cycles))
                 effort_control_enabled = False
                 valid_target_drive_streak = 0
-                robot.switch_control_mode("position")
-                robot.teleport_to(robot.q)
+                hold_robot_position()
             if joint_speed_limit_exceeded(robot.dq, max_abs_rad_s=float(args.max_joint_speed_rad_s)):
-                if effort_control_enabled:
-                    robot.switch_control_mode("position")
-                    robot.teleport_to(robot.q)
-                    effort_control_enabled = False
+                hold_robot_position(switch_mode=effort_control_enabled)
+                effort_control_enabled = False
                 valid_target_drive_streak = 0
                 if servo_cycle - last_invalid_target_drive_cycle >= int(physics_hz):
                     print(
@@ -1290,8 +1419,7 @@ def run(args: argparse.Namespace) -> int:
                 )
                 if target_drives is None:
                     if effort_control_enabled:
-                        robot.switch_control_mode("position")
-                        robot.teleport_to(robot.q)
+                        hold_robot_position()
                         effort_control_enabled = False
                     valid_target_drive_streak = 0
                     if servo_cycle - last_invalid_target_drive_cycle >= int(physics_hz):
@@ -1303,7 +1431,7 @@ def run(args: argparse.Namespace) -> int:
                         last_invalid_target_drive_cycle = servo_cycle
                     last_connected = True
                     return
-                if reset_hold_active:
+                if reset_state == "startup":
                     latest_target_drives = list(target_drives[:7])
                     valid_target_drive_streak = 0
                     last_connected = True
@@ -1321,8 +1449,7 @@ def run(args: argparse.Namespace) -> int:
         else:
             if last_connected:
                 print(f"[FlexivTargetFrame] SimPlugin disconnected {args.serial_number}", flush=True)
-                robot.switch_control_mode("position")
-                robot.teleport_to(robot.q)
+                hold_robot_position()
             effort_control_enabled = False
             valid_target_drive_streak = 0
             last_connected = False
@@ -1349,14 +1476,14 @@ def run(args: argparse.Namespace) -> int:
         return initial_pose
 
     def initialize_like_startup(reason: str, *, reset_world: bool) -> None:
-        """Use exactly the startup sequence for both first launch and later resets."""
+        """Apply the one-time launch initialization and capture its TCP pose."""
         nonlocal last_connected, effort_control_enabled, target_drive_warmup_remaining
         nonlocal valid_target_drive_streak, latest_quest_target, latest_target_drives
         nonlocal rdk_runtime_target_active, reset_hold_pose_base_tcp, reset_hold_cycles_remaining
+        nonlocal startup_pose_base_tcp, reset_state, reset_error
         if reset_world:
             world.reset()
-        robot.teleport_to(initial_q)
-        robot.switch_control_mode("position")
+        hold_robot_position(initial_q)
         pose = reset_target_to_start_pose()
         base_position, base_orientation = robot.get_world_pose()
         ee_position, ee_orientation = robot.end_effector.get_world_pose()
@@ -1366,6 +1493,9 @@ def run(args: argparse.Namespace) -> int:
             base_position=base_position,
             base_orientation_wxyz=base_orientation,
         )
+        startup_pose_base_tcp = list(reset_hold_pose_base_tcp)
+        reset_state = "startup"
+        reset_error = None
         reset_hold_cycles_remaining = max(1, int(max(0.0, float(args.reset_settle_sec)) * physics_hz))
         latest_quest_target = None
         latest_target_drives = [0.0] * 7
@@ -1383,6 +1513,42 @@ def run(args: argparse.Namespace) -> int:
         print(
             f"[FlexivTargetFrame] startup initialization applied reason={reason}; "
             f"Studio home hold={max(0.0, float(args.reset_settle_sec)):.3f}s",
+            flush=True,
+        )
+
+    def start_rdk_reset(control: dict) -> None:
+        """Drive back to the launch TCP through the existing RDK target path."""
+
+        nonlocal last_reset_seq, reset_hold_pose_base_tcp, reset_state, reset_error
+        nonlocal reset_started_monotonic, reset_in_tolerance_since
+        nonlocal reset_linear_error_m, reset_angular_error_rad, latest_quest_target
+        if startup_pose_base_tcp is None:
+            raise RuntimeError("startup TCP pose is unavailable")
+        last_reset_seq = int(control.get("seq", 0))
+        reset_hold_pose_base_tcp = list(startup_pose_base_tcp)
+        reset_state = "moving"
+        reset_error = None
+        reset_started_monotonic = time.monotonic()
+        reset_in_tolerance_since = None
+        reset_linear_error_m = None
+        reset_angular_error_rad = None
+        latest_quest_target = None
+        quest_relative_mapper.reset()
+        base_position, base_orientation = robot.get_world_pose()
+        ee_position, ee_orientation = robot.end_effector.get_world_pose()
+        current_pose_base_tcp = world_target_to_flexiv_pose(
+            world_position=ee_position,
+            world_orientation_wxyz=ee_orientation,
+            base_position=base_position,
+            base_orientation_wxyz=base_orientation,
+        )
+        cartesian_target_limiter.reset(current_pose_base_tcp)
+        if quest_target_receiver is not None:
+            quest_target_receiver.clear()
+        print(
+            f"[FlexivTargetFrame] RDK reset started seq={last_reset_seq} "
+            f"reason={control.get('reason', 'unspecified')} "
+            f"target={format_pose_xyz_quat(reset_hold_pose_base_tcp)}",
             flush=True,
         )
 
@@ -1471,7 +1637,14 @@ def run(args: argparse.Namespace) -> int:
                 "robot_dq": [float(value) for value in robot.dq],
                 "reset": {
                     "last_seq": int(last_reset_seq),
-                    "holding_start_pose": bool(reset_hold_cycles_remaining > 0),
+                    "state": reset_state,
+                    "ready": reset_state in ("idle", "succeeded"),
+                    "error": reset_error,
+                    "linear_error_m": reset_linear_error_m,
+                    "angular_error_rad": reset_angular_error_rad,
+                    "target_pose_base_tcp": (
+                        None if reset_hold_pose_base_tcp is None else list(reset_hold_pose_base_tcp)
+                    ),
                 },
             },
         }
@@ -1484,7 +1657,13 @@ def run(args: argparse.Namespace) -> int:
                 and control.get("type") == "flexiv_bridge_control"
                 and control.get("command") == "reset"
             ):
-                pending_reset_control = control
+                if pending_reset_control is None and reset_state not in ("startup", "moving"):
+                    pending_reset_control = control
+                else:
+                    print(
+                        "[FlexivTargetFrame] ignored reset while startup/reset hold is active",
+                        flush=True,
+                    )
         except Exception as exc:
             print(f"[FlexivTargetFrame] Stage1 gateway send failed: {exc}", flush=True)
             try:
@@ -1501,12 +1680,7 @@ def run(args: argparse.Namespace) -> int:
             if pending_reset_control is not None:
                 control = pending_reset_control
                 pending_reset_control = None
-                reset_seq = int(control.get("seq", 0))
-                last_reset_seq = reset_seq
-                initialize_like_startup(
-                    f"gateway:{control.get('reason', 'unspecified')} seq={reset_seq}",
-                    reset_world=True,
-                )
+                start_rdk_reset(control)
                 reset_needed = False
             if world.is_stopped() and not reset_needed:
                 reset_needed = True

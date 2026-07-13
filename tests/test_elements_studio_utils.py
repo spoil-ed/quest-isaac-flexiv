@@ -37,6 +37,46 @@ class ElementsStudioUtilsTests(unittest.TestCase):
         self.assertTrue(utils.joint_speed_limit_exceeded([0.2, -1.21], max_abs_rad_s=1.2))
         self.assertFalse(utils.joint_speed_limit_exceeded([100.0], max_abs_rad_s=0.0))
 
+    def test_zero_joint_velocities_uses_full_articulation_dof_count(self):
+        utils = load_utils()
+
+        class FakeRobot:
+            num_dof = 13
+
+            def __init__(self):
+                self.zeros = None
+
+            def get_joint_velocities(self):
+                return [1.0] * 7
+
+            def set_joint_velocities(self, values):
+                self.zeros = list(values)
+
+        robot = FakeRobot()
+        count = utils.zero_articulation_joint_velocities(robot)
+
+        self.assertEqual(count, 13)
+        self.assertEqual(robot.zeros, [0.0] * 13)
+
+    def test_zero_joint_velocities_falls_back_to_runtime_velocity_shape(self):
+        utils = load_utils()
+
+        class FakeRobot:
+            def __init__(self):
+                self.zeros = None
+
+            def get_joint_velocities(self):
+                return [1.0, -2.0, 3.0]
+
+            def set_joint_velocities(self, values):
+                self.zeros = list(values)
+
+        robot = FakeRobot()
+        count = utils.zero_articulation_joint_velocities(robot)
+
+        self.assertEqual(count, 3)
+        self.assertEqual(robot.zeros, [0.0, 0.0, 0.0])
+
     def test_rdk_pose_from_xyzw_reorders_quaternion_to_wxyz(self):
         utils = load_utils()
 

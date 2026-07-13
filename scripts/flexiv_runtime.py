@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import signal
+import shlex
 import socket
 import subprocess
 import sys
@@ -104,6 +105,25 @@ def pgrep_commands() -> list[tuple[int, str]]:
         if len(parts) == 2 and parts[0].isdigit():
             rows.append((int(parts[0]), parts[1]))
     return rows
+
+
+def find_process_by_executable(executable_name: str) -> int | None:
+    """Return an existing process whose argv[0] has the requested basename."""
+
+    expected = str(executable_name)
+    for pid, command in pgrep_commands():
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            continue
+        if argv and Path(argv[0]).name == expected:
+            return pid
+    return None
+
+
+def print_already_running(label: str, pid: int) -> None:
+    print(f"{label}_PID={int(pid)}", flush=True)
+    print(f"{label}_ALREADY_RUNNING=1", flush=True)
 
 
 def process_exists(pid: int) -> bool:

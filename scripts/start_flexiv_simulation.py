@@ -86,6 +86,10 @@ def build_command(args: argparse.Namespace) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    existing_pid = flexiv_runtime.find_process_by_executable("FlexivSimulation")
+    if existing_pid is not None:
+        flexiv_runtime.print_already_running("FLEXIV_SIMULATION", existing_pid)
+        return 0
     args = parse_args(argv)
     pid, stdout_path, stderr_path = flexiv_runtime.start_background(
         build_command(args),
