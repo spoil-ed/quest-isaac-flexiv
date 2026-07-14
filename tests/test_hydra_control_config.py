@@ -43,6 +43,8 @@ class HydraControlConfigTests(unittest.TestCase):
         self.assertIn("--enable-quest-target-udp", command)
         self.assertIn("--coordinated-reset", command)
         self.assertEqual(command[command.index("--reset-settle-sec") + 1], "2.0")
+        self.assertEqual(command[command.index("--reset-timeout-sec") + 1], "20.0")
+        self.assertEqual(command[command.index("--reset-position-tolerance-m") + 1], "0.01")
         self.assertEqual(rdk_command[rdk_command.index("--max-age-sec") + 1], "0.25")
 
     def test_normal_preset_can_be_selected_and_values_overridden(self):

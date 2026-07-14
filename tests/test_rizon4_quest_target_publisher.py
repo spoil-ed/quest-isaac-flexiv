@@ -40,6 +40,11 @@ def _rotate_vector_wxyz(quat, vector):
 
 
 class Rizon4QuestTargetPublisherTests(unittest.TestCase):
+    def test_cli_translation_deadband_defaults_to_zero(self):
+        args = mod.parse_args([])
+
+        self.assertEqual(args.position_deadband, 0.0)
+
     def test_default_televuer_root_is_inside_repo(self):
         repo_root = Path(__file__).resolve().parents[1]
 

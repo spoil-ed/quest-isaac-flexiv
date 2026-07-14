@@ -480,3 +480,44 @@ def joint_speed_limit_exceeded(joint_velocities, *, max_abs_rad_s: float) -> boo
         return False
     values = [float(value) for value in joint_velocities]
     return (not all(math.isfinite(value) for value in values)) or any(abs(value) > limit for value in values)
+
+
+def zero_articulation_joint_velocities(robot, *, zeros_factory=None) -> int:
+    """Clear every articulation DOF, including non-arm/gripper joints.
+
+    FlexivSerial.q/dq expose the seven arm joints, while Isaac's underlying
+    articulation currently contains thirteen DOFs.  Deriving the zero vector
+    from q/dq therefore produces a shape mismatch.  Prefer the articulation's
+    reported DOF count and use the largest reliable count as a defensive
+    fallback across Isaac versions.
+    """
+
+    counts: list[int] = []
+    for owner in (robot, getattr(robot, "_articulation_view", None)):
+        if owner is None:
+            continue
+        for attribute in ("num_dof", "num_dofs"):
+            value = getattr(owner, attribute, None)
+            try:
+                count = int(value() if callable(value) else value)
+            except (TypeError, ValueError):
+                continue
+            if count > 0:
+                counts.append(count)
+    getter = getattr(robot, "get_joint_velocities", None)
+    if callable(getter):
+        velocities = getter()
+        if velocities is not None:
+            try:
+                count = len(velocities)
+            except TypeError:
+                count = 0
+            if count > 0:
+                counts.append(count)
+    if not counts:
+        raise RuntimeError("unable to determine articulation DOF count")
+
+    count = max(counts)
+    zeros = zeros_factory(count) if zeros_factory is not None else [0.0] * count
+    robot.set_joint_velocities(zeros)
+    return count

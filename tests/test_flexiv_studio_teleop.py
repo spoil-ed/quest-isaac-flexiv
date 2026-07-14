@@ -366,6 +366,35 @@ class FlexivStudioTeleopTests(unittest.TestCase):
 
         self.assertEqual(mapped, [0.15, -0.05, 0.1])
 
+    def test_cartesian_pose_error_handles_quaternion_sign(self):
+        mod = load_follow_ball()
+
+        linear, angular = mod.cartesian_pose_error(
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            [0.003, 0.004, 0.0, -1.0, 0.0, 0.0, 0.0],
+        )
+
+        self.assertAlmostEqual(linear, 0.005)
+        self.assertAlmostEqual(angular, 0.0)
+
+    def test_reset_timeout_allows_active_settling_grace(self):
+        mod = load_follow_ball()
+
+        self.assertFalse(
+            mod.reset_timeout_expired(
+                elapsed_sec=20.0,
+                timeout_sec=20.0,
+                settling_within_hysteresis=True,
+            )
+        )
+        self.assertTrue(
+            mod.reset_timeout_expired(
+                elapsed_sec=20.0,
+                timeout_sec=20.0,
+                settling_within_hysteresis=False,
+            )
+        )
+
     def test_follow_ball_relative_mapper_anchors_position_and_uses_absolute_orientation(self):
         mod = load_follow_ball()
         mapper = mod.QuestRelativeTargetMapper(

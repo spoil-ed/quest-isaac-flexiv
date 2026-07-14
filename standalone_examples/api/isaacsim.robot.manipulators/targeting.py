@@ -181,6 +181,19 @@ def slerp_quat_wxyz(start, target, fraction: float) -> list[float]:
     return [weight0 * a + weight1 * b for a, b in zip(q0, q1)]
 
 
+def cartesian_pose_error(current_pose, target_pose) -> tuple[float, float]:
+    """Return translation and shortest quaternion-angle errors."""
+
+    current = parse_float_list(current_pose, expected=7, name="current_pose")
+    target = parse_float_list(target_pose, expected=7, name="target_pose")
+    linear = math.sqrt(sum((current[index] - target[index]) ** 2 for index in range(3)))
+    current_quat = normalize_quat_wxyz(current[3:])
+    target_quat = normalize_quat_wxyz(target[3:])
+    dot = abs(sum(a * b for a, b in zip(current_quat, target_quat)))
+    angular = 2.0 * math.acos(min(1.0, max(-1.0, dot)))
+    return linear, angular
+
+
 class CartesianTargetLimiter:
     """Clamp workspace and rate-limit a base-frame TCP target."""
 

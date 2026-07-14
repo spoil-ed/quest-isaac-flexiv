@@ -116,7 +116,11 @@ Quest 输入参数：
 | `--gateway-jpeg-quality` | app 默认 | JPEG 质量，范围通常为 0–100。 |
 | `--camera-config` | scene config | 旧相机配置兼容入口；新流程使用 `--scene-config`。 |
 | `--coordinated-reset/--no-coordinated-reset` | 开启 | 是否接收 recorder/gateway reset 并复用启动初始化。 |
-| `--reset-settle-sec` | `2.0` | reset 后保持启动 TCP 目标、等待 Studio 稳定的时间。 |
+| `--reset-settle-sec` | `2.0` | TCP 落入容差后必须连续稳定的时间。 |
+| `--reset-timeout-sec` | `20.0` | RDK 未能在该时间内落位则 reset 失败。 |
+| `--reset-position-tolerance-m` | `0.01` | reset 完成的 TCP 位置误差阈值。 |
+| `--reset-angular-tolerance-rad` | `0.10` | reset 完成的 TCP 姿态误差阈值。 |
+| `--reset-joint-speed-tolerance-rad-s` | `0.05` | reset 完成的最大关节速度阈值。 |
 
 ### `start_isaac_follow_hydra.py`
 
@@ -164,7 +168,7 @@ Stage2 双臂 Isaac 启动入口，参数语义与单臂入口一致，差异如
 | `--enable-button` | `squeeze` | 控制使能按键。 |
 | `--axis-map` | `-z,-x,y` | OpenXR 平移轴到机器人基座轴映射。 |
 | `--position-delta-scale` | `1.0` | publisher 侧位移缩放；推荐保持 1，由 Isaac/Hydra 统一缩放。 |
-| `--position-deadband` | `0.05` | publisher 侧死区；推荐传 0，由 Isaac/Hydra 统一处理。 |
+| `--position-deadband` | `0.0` | publisher 侧平移死区；默认不重复过滤，由 Isaac/Hydra 的 `quest.position_deadband_m` 统一处理。 |
 | `--engage-settle-sec` | `0.25` | 按下使能后建立参考点的等待时间。 |
 | `--right-tcp-rot-offset` | 固定 wxyz | 右手控制器到 TCP 的姿态偏移。 |
 | `--enable-threshold` | `0.5` | squeeze/trigger 等模拟量使能阈值。 |
@@ -197,12 +201,14 @@ Stage2 双臂 Isaac 启动入口，参数语义与单臂入口一致，差异如
 | `--image-size` | `640x480` | data.json 中声明的图像尺寸。 |
 | `--max-frames` | `0` | 单个 episode 最大帧数；0 表示不限制。达到上限自动保存。 |
 | `--reset-on-save` | 关闭 | 保存、丢弃或自动结束后请求协调 reset。 |
+| `--reset-key-cooldown-sec` | `2.5` | reset 快捷键防连发时间，避免终端按键自动重复导致连续初始化。 |
+| `--reset-timeout-sec` | `25.0` | recorder 等待 Isaac/RDK reset 落位的最长时间；失败时停止录制并返回错误。 |
 | `--start-key` | `s` | 开始/继续快捷键。 |
 | `--stop-key` | `e` | 第一次暂停、第二次保存。 |
 | `--discard-key` | `d` | 丢弃当前 episode。 |
 | `--reset-key` | `r` | 立即请求 reset。 |
 | `--quit-key` | `q` | 退出。 |
-| `--auto-start` | 关闭 | 自动开始；非 TTY 输入时也自动启用。 |
+| `--auto-start` | 关闭 | 自动开始；非 TTY 输入时也自动启用。手动录制不使用此参数。 |
 | `--task-goal/--task-desc/--task-steps` | Stage1 默认文本 | 写入 data.json 的任务语义描述。 |
 
 ## 转换与验证

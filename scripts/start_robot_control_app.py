@@ -33,10 +33,17 @@ def discover_robot_control_args(studio_root: Path) -> dict[str, str]:
         list(simulator_root.glob("*/arm_driver_param.xml")),
         description="simulator arm driver parameter file",
     )
-    config_path = _find_one(
-        list((root / "specs" / "robots").glob("*/flexivCfg.xml")),
-        description="robot control config",
-    )
+    config_paths = list((root / "specs" / "robots").glob("*/flexivCfg.xml"))
+    if config_paths:
+        config_path = _find_one(config_paths, description="robot control config")
+    else:
+        # RobotControlApp unlocks the encrypted specs directory during startup.
+        # On a true cold start the config therefore does not exist yet; infer the
+        # official relative path from serials such as A02L-00-M6-I0LIRN.
+        model = param_path.parent.name.split("-", 1)[0]
+        if not model:
+            raise FileNotFoundError("Could not infer robot model from simulator parameters")
+        config_path = root / "specs" / "robots" / f"Flexiv{model}" / "flexivCfg.xml"
     return {
         "serial": param_path.parent.name,
         "config": _relative_to_studio_root(config_path, root),
@@ -77,6 +84,10 @@ def build_command(args: argparse.Namespace) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    existing_pid = flexiv_runtime.find_process_by_executable("RobotControlApp")
+    if existing_pid is not None:
+        flexiv_runtime.print_already_running("ROBOT_CONTROL_APP", existing_pid)
+        return 0
     args = parse_args(argv)
     pid, stdout_path, stderr_path = flexiv_runtime.start_background(
         build_command(args),

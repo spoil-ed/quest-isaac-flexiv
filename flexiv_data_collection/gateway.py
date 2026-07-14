@@ -43,6 +43,7 @@ class LatestBridgeData:
     stamp_ns: int = 0
     reset_request: dict[str, Any] | None = None
     reset_seq: int = 0
+    reset_inflight_seq: int | None = None
 
     def update(self, message: dict[str, Any]) -> None:
         with self.lock:
@@ -51,6 +52,14 @@ class LatestBridgeData:
                 self.colors = dict(message["colors"])
             if message.get("sim_state"):
                 self.sim_state = dict(message["sim_state"])
+                reset_status = self.sim_state.get("reset") or {}
+                status_seq = int(reset_status.get("last_seq", 0))
+                if (
+                    self.reset_inflight_seq is not None
+                    and status_seq >= self.reset_inflight_seq
+                    and reset_status.get("state") in ("succeeded", "failed")
+                ):
+                    self.reset_inflight_seq = None
             if message.get("states"):
                 self.states = dict(message["states"])
             if message.get("actions"):
@@ -68,6 +77,13 @@ class LatestBridgeData:
 
     def request_reset(self, reason: str) -> dict[str, Any]:
         with self.lock:
+            reset_status = self.sim_state.get("reset") or {}
+            if (
+                self.reset_request is not None
+                or self.reset_inflight_seq is not None
+                or reset_status.get("state") in ("startup", "moving")
+            ):
+                raise RuntimeError("reset is already in progress")
             self.reset_seq += 1
             self.reset_request = {
                 "type": "flexiv_bridge_control",
@@ -77,6 +93,7 @@ class LatestBridgeData:
                 "seq": self.reset_seq,
                 "stamp_ns": now_ns(),
             }
+            self.reset_inflight_seq = self.reset_seq
             return dict(self.reset_request)
 
     def consume_reset_request(self) -> dict[str, Any] | None:
@@ -305,8 +322,12 @@ def main(argv: list[str] | None = None) -> int:
                 server.send_json({"type": "ok"})
                 break
             if request.get("type") == "reset_request":
-                control = latest.request_reset(str(request.get("reason", "recorder")))
-                server.send_json({"type": "ok", "control": control})
+                try:
+                    control = latest.request_reset(str(request.get("reason", "recorder")))
+                except Exception as exc:
+                    server.send_json({"type": "error", "error": str(exc)})
+                else:
+                    server.send_json({"type": "ok", "control": control})
                 continue
             if request.get("type") != "sample_request":
                 server.send_json({"type": "error", "error": "unsupported request"})

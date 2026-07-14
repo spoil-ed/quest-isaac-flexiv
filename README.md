@@ -62,10 +62,12 @@ export TASK_NAME="pick_cube"
 ### 1. 启动 Elements Studio runtime
 
 ```bash
+python scripts/start_elements_studio_ui.py --studio-root "$STUDIO_ROOT"
 python scripts/start_robot_control_app.py --studio-root "$STUDIO_ROOT"
 python scripts/start_flexiv_simulation.py --studio-root "$STUDIO_ROOT"
-python scripts/start_elements_studio_ui.py --studio-root "$STUDIO_ROOT"
 ```
+
+冷启动时先等待 Studio UI 显示机器人，再执行后两条命令。Studio UI 可能会自动启动 RobotControlApp 和 FlexivSimulation；启动脚本会检测已有进程，不会重复启动。
 
 ### 2. 启动数据 gateway
 
@@ -152,6 +154,10 @@ recorder 快捷键：
 - `d`：丢弃当前 episode。
 - `r`：一键 reset Isaac + Studio 到启动状态。
 - `q`：退出。
+
+手动录制命令不要添加自动开始参数。通过 `--episodes N` 指定轨迹数量；保存一条后 recorder 会继续等待 `s`，直到累计保存 N 条轨迹才退出。
+
+recorder 启动、录制中、暂停、保存和丢弃时都会输出录制统计，包括本次完成条数、当前 episode 帧数/时长、任务目录已保存总条数/总帧数/总时长。
 
 ### 7. 转换为 LeRobot 数据集
 
@@ -282,8 +288,9 @@ datasets/lerobot/qiming/<task_name>/
 - 相机配置位于 `configs/scenes/single_rizon4_cam_front.yaml`。修改 `position`、`look_at` 和 `focal_length` 后重启 Isaac。
 - Isaac 中可打开第二个 Viewport，并选择 `/World/cam_front` 实时查看录制画面。
 - 控制与安全参数统一位于 `configs/control/quest_teleop.yaml`；Hydra 入口是 `scripts/start_isaac_follow_hydra.py`。
+- Quest publisher 的平移死区默认是 `0.0`，统一由 Isaac/Hydra 的 `quest.position_deadband_m` 控制，避免两层死区叠加。
 - 所有主流程 CLI 参数见 [docs/SCRIPT_PARAMETERS.md](docs/SCRIPT_PARAMETERS.md)，单个脚本也可执行 `--help`。
-- `reset.coordinated=true` 时，首次启动和 recorder 的 `r` 使用同一初始化流程。
+- `reset.coordinated=true` 时，首次启动会记录初始 TCP；recorder 的 `r` 通过 RDK 回到该 `target_pose`，只有位置、姿态和速度连续稳定后才允许继续录制，超时会报错。
 - `ROBOT_SERIAL` 不能为空，并且 Studio、Isaac、Quest、RDK 和 validator 必须一致。
 - 安装或缺包问题见 [SETUP.md 的环境故障排查](SETUP.md#环境故障排查)。
 - 快速测试：`python -m pytest -q`。
