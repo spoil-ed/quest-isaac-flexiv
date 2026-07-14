@@ -65,6 +65,7 @@ from targeting import (  # noqa: E402
 from flexiv_data_collection.dual_validation import EXPECTED_STAGE2_BACKEND  # noqa: E402
 from flexiv_data_collection.protocol import BRIDGE_SAMPLE_TYPE, JsonLinePushClient, encode_image_bgr, now_ns  # noqa: E402
 from flexiv_data_collection.schema import unitree_parts_from_dual_arms  # noqa: E402
+from flexiv_sim_scenes.config import scene_task_metadata  # noqa: E402
 
 
 DEFAULT_LEFT_SERIAL_NUMBER = "Rizon4-VIHhZM"
@@ -318,6 +319,16 @@ def _target_pose_config(robot_cfg: dict[str, Any], *, default_position: tuple[fl
     return prim_path, name, TargetPose(position=position, euler_deg=euler_deg)
 
 
+def _initial_q_config(robot_cfg: dict[str, Any]) -> list[float]:
+    raw = robot_cfg.get("initial_q")
+    if raw is None:
+        return list(DEFAULT_INITIAL_Q)
+    values = [float(value) for value in raw]
+    if len(values) != 7:
+        raise ValueError("robot initial_q must contain 7 values")
+    return values
+
+
 def _set_robot_base_pose(robot, position, orientation) -> None:
     try:
         import numpy as np
@@ -382,6 +393,24 @@ def run(args: argparse.Namespace) -> int:
     )
     world.scene.add_default_ground_plane()
     _add_default_lighting()
+    scene_object_summary: list[dict[str, Any]] = []
+    stage3_task = scene_task_metadata(args.scene_data) if isinstance(args.scene_data, dict) else {}
+    if isinstance(args.scene_data, dict) and args.scene_data.get("scene_objects"):
+        try:
+            from flexiv_sim_scenes.isaac import build_scene_objects
+
+            scene_object_summary = build_scene_objects(
+                world,
+                args.scene_data,
+                config_path=args.scene_config,
+            )
+            print(
+                "[FlexivDualTargetFrame] Stage3 scene objects loaded: "
+                f"{[item.get('name') for item in scene_object_summary]}",
+                flush=True,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load Stage3 scene objects from {args.scene_config}: {exc}") from exc
 
     stage2_cameras = []
     if args.gateway_endpoint:
@@ -463,7 +492,7 @@ def run(args: argparse.Namespace) -> int:
             ),
             target_pose_gate=TargetPosePublishGate.from_hz(float(args.target_pose_publish_hz), physics_freq=physics_hz),
             configured_initial_pose=initial_pose,
-            initial_q=list(DEFAULT_INITIAL_Q),
+            initial_q=_initial_q_config(robot_cfg),
             base_position=base_position,
             base_orientation=base_orientation,
             latest_target_drives=[0.0] * 7,
@@ -801,6 +830,9 @@ def run(args: argparse.Namespace) -> int:
                     "left": _target_frame_state(left),
                     "right": _target_frame_state(right),
                 },
+                "stage3_task": stage3_task,
+                "scene_config": str(args.scene_config) if args.scene_config else None,
+                "scene_objects": scene_object_summary,
                 "reset": {
                     "last_seq": int(last_reset_seq),
                     "holding_start_pose": bool(left.reset_hold_cycles_remaining > 0 or right.reset_hold_cycles_remaining > 0),

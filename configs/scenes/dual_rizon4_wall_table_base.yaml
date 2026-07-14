@@ -1,0 +1,86 @@
+# Stage3 wall-mounted dual-Rizon4 tabletop base scene.
+# This file is a tuned baseline for task-specific scene configs; the original
+# flat-ground Stage2 scene remains configs/scenes/dual_rizon4_cam_front.yaml.
+
+task:
+  name: "wall_table_base"
+  description: "Wall-mounted dual Flexiv Rizon4 tabletop manipulation baseline"
+  fake_trajectory_profile: "pick_place_redblock_dual"
+
+robots:
+  - side: "left"
+    serial_number: "Rizon4-VIHhZM"
+    joint_group: "ARM_1"
+    prim_path: "/World/Flexiv/LeftRizon4"
+    name: "LeftRizon4"
+    end_effector_prim_name: "flange"
+    usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+    examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+    position: {x: -0.06, y: 0.42, z: 1.08}
+    orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
+    initial_q: [0.35, -1.05, 0.55, 1.80, -0.20, 0.75, 0.0]
+    target:
+      prim_path: "/World/TargetFrameLeft"
+      name: "target_frame_left"
+      position: {x: 0.48, y: 0.18, z: 0.56}
+      euler_deg: {x: 0.0, y: 0.0, z: 0.0}
+    target_pose:
+      host: "127.0.0.1"
+      port: 58680
+
+  - side: "right"
+    serial_number: "Rizon4-WE7ssd"
+    joint_group: "ARM_1"
+    prim_path: "/World/Flexiv/RightRizon4"
+    name: "RightRizon4"
+    end_effector_prim_name: "flange"
+    usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+    examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+    position: {x: -0.06, y: -0.42, z: 1.08}
+    orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
+    initial_q: [-0.35, -1.05, -0.55, 1.80, 0.20, 0.75, 0.0]
+    target:
+      prim_path: "/World/TargetFrameRight"
+      name: "target_frame_right"
+      position: {x: 0.48, y: -0.18, z: 0.56}
+      euler_deg: {x: 0.0, y: 0.0, z: 0.0}
+    target_pose:
+      host: "127.0.0.1"
+      port: 58681
+
+cameras:
+  - name: "cam_front"
+    resolution: [640, 480]
+    fps: 30
+    focal_length: 2.0
+    position: {x: 2.05, y: 0.0, z: 1.35}
+    look_at: {x: 0.42, y: 0.0, z: 0.60}
+    up: {x: 0.0, y: 0.0, z: 1.0}
+
+scene_objects:
+  - name: "back_wall"
+    type: "cuboid"
+    prim_path: "/World/Stage3/BackWall"
+    position: {x: -0.12, y: 0.0, z: 1.00}
+    size: [0.05, 1.35, 0.56]
+    color: [0.72, 0.72, 0.70]
+    collision: false
+    rigid_body: false
+
+  - name: "work_table_top"
+    type: "cuboid"
+    prim_path: "/World/Stage3/WorkTableTop"
+    position: {x: 0.48, y: 0.0, z: 0.38}
+    size: [0.95, 0.82, 0.06]
+    color: [0.18, 0.18, 0.17]
+    collision: true
+    rigid_body: false
+
+  - name: "work_table_front_leg"
+    type: "cuboid"
+    prim_path: "/World/Stage3/WorkTableFrontLeg"
+    position: {x: 0.82, y: 0.0, z: 0.18}
+    size: [0.04, 0.78, 0.36]
+    color: [0.28, 0.28, 0.26]
+    collision: true
+    rigid_body: false

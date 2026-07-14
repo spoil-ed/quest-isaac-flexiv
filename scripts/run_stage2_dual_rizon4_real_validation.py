@@ -43,6 +43,7 @@ from flexiv_data_collection.dual_validation import (  # noqa: E402
     validate_stage2_dual_arm_sample,
 )
 from flexiv_data_collection.protocol import JsonLineReqClient, parse_tcp_endpoint  # noqa: E402
+from flexiv_sim_scenes.config import scene_task_metadata, summarize_scene_objects  # noqa: E402
 
 
 def json_print(payload: dict[str, Any]) -> None:
@@ -269,6 +270,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fake-axis")
     parser.add_argument("--fake-right-axis")
     parser.add_argument("--fake-quat-wxyz")
+    parser.add_argument("--fake-trajectory-profile")
+    parser.add_argument("--fake-trajectory-config", type=Path)
+    parser.add_argument("--fake-restart-before-record", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--fake-amplitude-m", type=float)
     parser.add_argument("--fake-cycles", type=float)
     parser.add_argument("--fake-frames", type=int)
@@ -359,6 +363,8 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.scene_config_data = scene_config
     args.scene_camera_names = camera_names(scene_config, pipeline_config)
     args.scene_camera_keys = camera_keys_for_names(args.scene_camera_names, pipeline_config)
+    args.scene_task_metadata = scene_task_metadata(scene_config)
+    args.scene_object_summary = summarize_scene_objects(scene_config, config_path=scene_config_path, validate_assets=False)
 
     args.flexiv_python = path_value(args.flexiv_python, base=cli_base)
     args.rdk_python = first_path(
@@ -503,6 +509,17 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.fake_axis = str(first_defined(args.fake_axis, cfg_get(pipeline_config, "fake_sender", "axis"), "x"))
     args.fake_right_axis = str(first_defined(args.fake_right_axis, cfg_get(pipeline_config, "fake_sender", "right_axis"), args.fake_axis))
     args.fake_quat_wxyz = str(first_defined(args.fake_quat_wxyz, cfg_get(pipeline_config, "fake_sender", "quat_wxyz"), "0.0,0.70710678,0.0,0.70710678"))
+    args.fake_trajectory_profile = str(
+        first_defined(args.fake_trajectory_profile, cfg_get(pipeline_config, "fake_sender", "trajectory_profile"), "sine")
+    )
+    args.fake_trajectory_config = first_path(
+        (args.fake_trajectory_config, cli_base),
+        (cfg_get(pipeline_config, "fake_sender", "trajectory_config"), config_base),
+    )
+    args.fake_restart_before_record = bool(
+        first_defined(args.fake_restart_before_record, cfg_get(pipeline_config, "fake_sender", "restart_before_record"), False)
+    )
+    args.fake_restart_warmup_sec = float(first_defined(cfg_get(pipeline_config, "fake_sender", "restart_warmup_sec"), 0.5))
     args.fake_amplitude_m = float(first_defined(args.fake_amplitude_m, cfg_get(pipeline_config, "fake_sender", "amplitude_m"), 0.02))
     args.fake_cycles = float(first_defined(args.fake_cycles, cfg_get(pipeline_config, "fake_sender", "cycles"), 0.5))
     args.fake_frames = int(first_defined(args.fake_frames, cfg_get(pipeline_config, "fake_sender", "frames"), 1200))
@@ -604,6 +621,8 @@ class RealValidationRunner:
                 "left_robot_prim_path": self.args.left_robot_prim_path,
                 "right_robot_prim_path": self.args.right_robot_prim_path,
                 "scene_cameras": self.args.scene_camera_names,
+                "scene_task": self.args.scene_task_metadata,
+                "scene_objects": self.args.scene_object_summary,
                 "sample_endpoint": self.sample_endpoint,
                 "bridge_endpoint": self.bridge_endpoint,
                 "quest_target_udp": f"{self.args.quest_target_udp_host}:{self.args.quest_target_udp_port}",
@@ -710,6 +729,42 @@ class RealValidationRunner:
         if reply.get("type") == "error":
             raise RuntimeError(str(reply.get("error")))
         return reply
+
+    def fake_sender_command(self) -> list[str | Path]:
+        command: list[str | Path] = [
+            self.args.flexiv_python,
+            REPO_ROOT / "scripts/fake_rizon4_quest_sender.py",
+            "--host",
+            self.args.fake_host,
+            "--port",
+            str(int(self.args.quest_target_udp_port)),
+            "--dual",
+            "--left-serial-number",
+            self.args.left_serial_number,
+            "--right-serial-number",
+            self.args.right_serial_number,
+            "--joint-group",
+            self.args.joint_group,
+            "--axis",
+            self.args.fake_axis,
+            "--right-axis",
+            self.args.fake_right_axis,
+            "--amplitude-m",
+            str(float(self.args.fake_amplitude_m)),
+            "--cycles",
+            str(float(self.args.fake_cycles)),
+            "--frames",
+            str(int(self.args.fake_frames)),
+            "--rate-hz",
+            str(float(self.args.fake_rate_hz)),
+            "--quat-wxyz",
+            self.args.fake_quat_wxyz,
+            "--trajectory-profile",
+            self.args.fake_trajectory_profile,
+        ]
+        if self.args.fake_trajectory_config is not None:
+            command.extend(["--trajectory-config", self.args.fake_trajectory_config])
+        return command
 
     def wait_ready_gateway_sample(self) -> dict[str, Any]:
         client = JsonLineReqClient(self.sample_endpoint, timeout=5.0)
@@ -945,37 +1000,14 @@ class RealValidationRunner:
         self.wait_ready_gateway_sample()
         self.start(
             "fake_sender",
-            [
-                self.args.flexiv_python,
-                REPO_ROOT / "scripts/fake_rizon4_quest_sender.py",
-                "--host",
-                self.args.fake_host,
-                "--port",
-                str(int(self.args.quest_target_udp_port)),
-                "--dual",
-                "--left-serial-number",
-                self.args.left_serial_number,
-                "--right-serial-number",
-                self.args.right_serial_number,
-                "--joint-group",
-                self.args.joint_group,
-                "--axis",
-                self.args.fake_axis,
-                "--right-axis",
-                self.args.fake_right_axis,
-                "--amplitude-m",
-                str(float(self.args.fake_amplitude_m)),
-                "--cycles",
-                str(float(self.args.fake_cycles)),
-                "--frames",
-                str(int(self.args.fake_frames)),
-                "--rate-hz",
-                str(float(self.args.fake_rate_hz)),
-                "--quat-wxyz",
-                self.args.fake_quat_wxyz,
-            ],
+            self.fake_sender_command(),
         )
         self.wait_valid_gateway_sample()
+        if self.args.fake_restart_before_record:
+            self.stop("fake_sender", timeout=3.0)
+            time.sleep(0.5)
+            self.start("fake_sender", self.fake_sender_command())
+            time.sleep(max(0.0, float(self.args.fake_restart_warmup_sec)))
         self.start(
             "recorder",
             [
@@ -995,11 +1027,17 @@ class RealValidationRunner:
                 str(int(self.args.record_frames)),
                 "--auto-start",
                 "--task-goal",
-                "quest-isaac-flexiv Stage2 strict dual-Rizon4 real validation",
+                str(cfg_get(self.args.pipeline_config_data, "record", "task_goal") or "quest-isaac-flexiv Stage2 strict dual-Rizon4 real validation"),
                 "--task-desc",
-                "Old Isaac TargetFrame/RDK/Studio dual-arm loop with Stage2 Unitree JSON recording",
+                str(
+                    cfg_get(self.args.pipeline_config_data, "record", "task_desc")
+                    or "Old Isaac TargetFrame/RDK/Studio dual-arm loop with Stage2 Unitree JSON recording"
+                ),
                 "--task-steps",
-                "fake dual quest target; dual Isaac Rizon4; Stage2 gateway; Unitree JSON; LeRobot conversion; H264 validation",
+                str(
+                    cfg_get(self.args.pipeline_config_data, "record", "task_steps")
+                    or "fake dual quest target; dual Isaac Rizon4; Stage2 gateway; Unitree JSON; LeRobot conversion; H264 validation"
+                ),
             ],
         )
         recorder_rc = self.processes["recorder"].wait(timeout=max(120.0, self.args.record_frames / self.args.record_fps + 90.0))
@@ -1089,6 +1127,18 @@ class RealValidationRunner:
             "right_robot_prim_path": self.args.right_robot_prim_path,
             "cameras": self.args.scene_camera_names,
             "camera_keys": self.args.scene_camera_keys,
+            "task": self.args.scene_task_metadata,
+            "scene_objects": self.args.scene_object_summary,
+            "fake_sender": {
+                "trajectory_profile": self.args.fake_trajectory_profile,
+                "trajectory_config": str(self.args.fake_trajectory_config) if self.args.fake_trajectory_config else None,
+                "restart_before_record": bool(self.args.fake_restart_before_record),
+                "restart_warmup_sec": float(self.args.fake_restart_warmup_sec),
+                "amplitude_m": float(self.args.fake_amplitude_m),
+                "cycles": float(self.args.fake_cycles),
+                "frames": int(self.args.fake_frames),
+                "rate_hz": float(self.args.fake_rate_hz),
+            },
             "control": {
                 "physics_hz": float(self.args.physics_hz),
                 "render_hz": float(self.args.render_hz),
