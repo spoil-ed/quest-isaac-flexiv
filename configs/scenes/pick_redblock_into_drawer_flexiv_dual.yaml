@@ -1,0 +1,92 @@
+# Stage3 task scene: move a red block toward an open drawer.
+
+task:
+  name: "pick_redblock_into_drawer_flexiv_dual"
+  source_task: "/data/qiming/unitree_sim_isaaclab/tasks/g1_tasks/pick_redblock_into_drawer_g1_29dof_dex1"
+  description: "Wall-mounted dual Flexiv arms with red block and drawer cabinet"
+  fake_trajectory_profile: "pick_redblock_into_drawer_dual"
+
+robots:
+  - side: "left"
+    serial_number: "Rizon4-VIHhZM"
+    joint_group: "ARM_1"
+    prim_path: "/World/Flexiv/LeftRizon4"
+    name: "LeftRizon4"
+    end_effector_prim_name: "flange"
+    usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+    examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+    position: {x: -0.06, y: 0.42, z: 1.08}
+    orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
+    initial_q: [0.35, -1.05, 0.55, 1.80, -0.20, 0.75, 0.0]
+    target:
+      prim_path: "/World/TargetFrameLeft"
+      name: "target_frame_left"
+      position: {x: 0.48, y: 0.18, z: 0.56}
+      euler_deg: {x: 0.0, y: 0.0, z: 0.0}
+    target_pose: {host: "127.0.0.1", port: 58680}
+
+  - side: "right"
+    serial_number: "Rizon4-WE7ssd"
+    joint_group: "ARM_1"
+    prim_path: "/World/Flexiv/RightRizon4"
+    name: "RightRizon4"
+    end_effector_prim_name: "flange"
+    usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+    examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+    position: {x: -0.06, y: -0.42, z: 1.08}
+    orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
+    initial_q: [-0.35, -1.05, -0.55, 1.80, 0.20, 0.75, 0.0]
+    target:
+      prim_path: "/World/TargetFrameRight"
+      name: "target_frame_right"
+      position: {x: 0.48, y: -0.18, z: 0.56}
+      euler_deg: {x: 0.0, y: 0.0, z: 0.0}
+    target_pose: {host: "127.0.0.1", port: 58681}
+
+cameras:
+  - name: "cam_front"
+    resolution: [640, 480]
+    fps: 30
+    focal_length: 2.0
+    position: {x: 2.05, y: -0.04, z: 1.35}
+    look_at: {x: 0.48, y: -0.02, z: 0.60}
+    up: {x: 0.0, y: 0.0, z: 1.0}
+
+scene_objects:
+  - name: "back_wall"
+    type: "cuboid"
+    prim_path: "/World/Stage3/BackWall"
+    position: {x: -0.12, y: 0.0, z: 1.00}
+    size: [0.05, 1.35, 0.56]
+    color: [0.72, 0.72, 0.70]
+    collision: false
+    rigid_body: false
+  - name: "work_table_top"
+    type: "cuboid"
+    prim_path: "/World/Stage3/WorkTableTop"
+    position: {x: 0.48, y: 0.0, z: 0.38}
+    size: [0.95, 0.82, 0.06]
+    color: [0.18, 0.18, 0.17]
+    collision: true
+    rigid_body: false
+  - name: "red_block"
+    type: "cuboid"
+    prim_path: "/World/Stage3/RedBlock"
+    position: {x: 0.42, y: 0.18, z: 0.45}
+    size: [0.05, 0.05, 0.05]
+    color: [1.0, 0.0, 0.0]
+    mass: 3.0
+    collision: true
+    rigid_body: true
+  - name: "drawer_cabinet"
+    type: "articulation"
+    prim_path: "/World/Stage3/Cabinet"
+    usd: "${UNITREE_ASSET_ROOT}/objects/drawers/cabinet_collider.usd"
+    position: {x: 0.70, y: -0.20, z: 0.43}
+    orientation: {w: 0.70710678, x: 0.0, y: 0.0, z: 0.70710678}
+    scale: [0.52, 0.52, 0.52]
+    joint_positions:
+      door_left_joint: 0.0
+      door_right_joint: 0.0
+      drawer_bottom_joint: 0.0
+      drawer_top_joint: 0.15

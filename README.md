@@ -1,6 +1,6 @@
 # Quest Isaac Flexiv
 
-使用 Meta Quest/fake sender 控制 Isaac Sim 中的 Flexiv Rizon4，并将相机、机器人状态和控制量录制为 Unitree JSON，再转换为 LeRobot 数据集。Stage1 保留单臂主线，Stage2 新增双臂主线。
+使用 Meta Quest/fake sender 控制 Isaac Sim 中的 Flexiv Rizon4，并将相机、机器人状态和控制量录制为 Unitree JSON，再转换为 LeRobot 数据集。Stage1 保留单臂主线，Stage2 新增双臂主线，Stage3 新增配置驱动的仿真任务场景。
 
 ```text
 Quest -> Isaac TargetFrame -> Flexiv RDK -> Elements Studio/FlexivSimulation
@@ -8,6 +8,9 @@ Quest -> Isaac TargetFrame -> Flexiv RDK -> Elements Studio/FlexivSimulation
 
 Dual Quest/fake -> Isaac Dual TargetFrame -> 2x Flexiv RDK/Studio
       -> 2x SimPlugin target_drives -> Isaac -> Stage2 recorder
+
+Stage3 scene config -> Isaac task objects/cameras + Stage2 dual control
+      -> Unitree JSON -> LeRobot-style dataset -> H264 task video
 ```
 
 ## 仓库分布
@@ -19,6 +22,7 @@ Dual Quest/fake -> Isaac Dual TargetFrame -> 2x Flexiv RDK/Studio
 | `configs/` | 场景、相机、Hydra 控制、安全限制和数据采集配置 |
 | `scripts/` | Studio、Isaac、Quest、gateway、recorder、转换和验证入口 |
 | `flexiv_data_collection/` | gateway、Unitree JSON、LeRobot 转换和严格验证实现 |
+| `flexiv_sim_scenes/` | Stage3 任务场景 YAML 解析和 Isaac 场景物体加载 |
 | `standalone_examples/.../flexiv_quest/` | Isaac Rizon4 场景、Quest 输入和 Studio bridge |
 | `datasets/stage1_records/` | 按 task name 保存的原始 episode |
 | `datasets/lerobot/` | 转换后的 LeRobot 数据集 |
@@ -252,6 +256,54 @@ python scripts/validate_data_artifacts.py \
   --min-right-torque-norm 1e-8 \
   --min-servo-cycle-delta 5
 ```
+
+## Stage3 仿真任务场景
+
+Stage3 在 Stage2 双臂闭环上增加 config-driven scene kit，不改变原始平地双臂场景。原始平地配置仍是 `configs/scenes/dual_rizon4_cam_front.yaml`；墙挂桌面任务通过以下 scene/pipeline 显式启用：
+
+| 任务 | Scene config | Pipeline config |
+| --- | --- | --- |
+| pick/place red block | `configs/scenes/pick_place_redblock_flexiv_dual.yaml` | `configs/pipelines/stage3_pick_place_redblock_dual.yaml` |
+| red block into drawer | `configs/scenes/pick_redblock_into_drawer_flexiv_dual.yaml` | `configs/pipelines/stage3_pick_redblock_into_drawer_dual.yaml` |
+| stack R/G/Y blocks | `configs/scenes/stack_rgyblock_flexiv_dual.yaml` | `configs/pipelines/stage3_stack_rgyblock_dual.yaml` |
+| move cylinder | `configs/scenes/move_cylinder_flexiv_dual.yaml` | `configs/pipelines/stage3_move_cylinder_dual.yaml` |
+
+运行任一 Stage3 真实闭环：
+
+```bash
+python scripts/run_stage3_sim_scene_validation.py \
+  --config configs/pipelines/stage3_pick_place_redblock_dual.yaml \
+  --left-serial-number "$LEFT_ROBOT_SERIAL" \
+  --right-serial-number "$RIGHT_ROBOT_SERIAL"
+```
+
+不传 `--config` 时默认运行 pick/place red block。成功产物包括：
+
+```text
+datasets/stage1_records/quest_isaac_flexiv_stage3_<task>_real_<stamp>/
+├── raw/episode_001/data.json
+├── logs/
+├── stage3_sim_scene_validation.json
+└── stage3_sim_scene_summary.json
+
+datasets/lerobot/qiming/quest_isaac_flexiv_stage3_<task>_<stamp>/
+└── videos/observation.images.cam_front/chunk-000/file-000.mp4
+```
+
+Stage3 scene config 中的 `scene_objects` 支持 `usd`、`articulation`、`cuboid` 和 `cylinder`。Unitree/IsaacLab 资产通过 `${UNITREE_ASSET_ROOT}` 引用，默认是 `/data/qiming/unitree_sim_isaaclab/assets`；也可设置环境变量 `UNITREE_SIM_ISAACLAB_ASSETS` 覆盖。
+
+Stage3 fake sender 使用任务 waypoint profile，例如：
+
+```bash
+python scripts/fake_rizon4_quest_sender.py \
+  --dual \
+  --trajectory-profile pick_place_redblock_dual \
+  --amplitude-m 0.075 \
+  --cycles 18 \
+  --quat-wxyz 1.0,0.0,0.0,0.0
+```
+
+Stage3 验收重点是“任务场景 + fake 遥操完整闭环视频”：要求双臂、夹爪区域、桌面和任务物体清晰可见；本阶段不把真实抓取/堆叠/抽屉放置成功作为硬门槛。
 
 ## 产物说明
 

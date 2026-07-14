@@ -1,4 +1,5 @@
-# Stage1 full Python requirements for data collection, conversion and validation.
+# Full Python requirements for Stage1/Stage2/Stage3 data collection,
+# scene configs, conversion and validation.
 #
 # External runtimes are still installed separately because they are not ordinary
 # PyPI project dependencies: Isaac Sim 6.0.1, Flexiv Elements Studio,
