@@ -2,7 +2,7 @@
 
 task:
   name: "pick_redblock_into_drawer_flexiv_dual"
-  source_task: "/data/qiming/unitree_sim_isaaclab/tasks/g1_tasks/pick_redblock_into_drawer_g1_29dof_dex1"
+  source_task: "../../../unitree/unitree_sim_isaaclab/tasks/g1_tasks/pick_redblock_into_drawer_g1_29dof_dex1"
   description: "Wall-mounted dual Flexiv arms with red block and drawer cabinet"
   fake_trajectory_profile: "pick_redblock_into_drawer_dual"
 
@@ -13,8 +13,8 @@ robots:
     prim_path: "/World/Flexiv/LeftRizon4"
     name: "LeftRizon4"
     end_effector_prim_name: "flange"
-    usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
-    examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+    usd: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+    examples_ext: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
     position: {x: -0.06, y: 0.42, z: 1.08}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
     initial_q: [0.35, -1.05, 0.55, 1.80, -0.20, 0.75, 0.0]
@@ -31,8 +31,8 @@ robots:
     prim_path: "/World/Flexiv/RightRizon4"
     name: "RightRizon4"
     end_effector_prim_name: "flange"
-    usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
-    examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+    usd: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+    examples_ext: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
     position: {x: -0.06, y: -0.42, z: 1.08}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
     initial_q: [-0.35, -1.05, -0.55, 1.80, 0.20, 0.75, 0.0]

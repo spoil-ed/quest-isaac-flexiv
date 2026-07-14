@@ -12,9 +12,10 @@ from .pose import QuatXYZW, Vector3, wxyz_to_xyzw
 
 
 DEFAULT_INITIAL_Q = [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
-DEFAULT_USD = (
-    "/home/simate/workspace/isaacsim-flexiv/isaac_sim_ws/exts/"
-    "isaacsim.robot.manipulators.examples/data/flexiv/Rizon4.usd"
+REPO_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_USD = str(
+    REPO_ROOT
+    / "isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4.usd"
 )
 
 

@@ -9,8 +9,8 @@ robots:
     prim_path: "/World/Flexiv/LeftRizon4"
     name: "LeftRizon4"
     end_effector_prim_name: "flange"
-    usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
-    examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+    usd: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+    examples_ext: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
     position: {x: 0.0, y: 0.35, z: 0.0}
     orientation: {w: 1.0, x: 0.0, y: 0.0, z: 0.0}
     target:
@@ -28,8 +28,8 @@ robots:
     prim_path: "/World/Flexiv/RightRizon4"
     name: "RightRizon4"
     end_effector_prim_name: "flange"
-    usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
-    examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+    usd: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+    examples_ext: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
     position: {x: 0.0, y: -0.35, z: 0.0}
     orientation: {w: 1.0, x: 0.0, y: 0.0, z: 0.0}
     target:

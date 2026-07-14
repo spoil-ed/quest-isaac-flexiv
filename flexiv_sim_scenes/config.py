@@ -10,9 +10,17 @@ from typing import Any, Iterable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_UNITREE_ASSET_ROOT = Path(
-    os.environ.get("UNITREE_SIM_ISAACLAB_ASSETS", "/data/qiming/unitree_sim_isaaclab/assets")
-)
+
+
+def _default_unitree_asset_root() -> Path:
+    configured = os.environ.get("UNITREE_SIM_ISAACLAB_ASSETS")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    workspace_assets = REPO_ROOT.parent / "unitree" / "unitree_sim_isaaclab" / "assets"
+    return workspace_assets.resolve()
+
+
+DEFAULT_UNITREE_ASSET_ROOT = _default_unitree_asset_root()
 SUPPORTED_OBJECT_TYPES = {"usd", "articulation", "cuboid", "cylinder"}
 
 
