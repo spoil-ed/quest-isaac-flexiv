@@ -4,6 +4,6 @@
 # environment variables or CLI flags instead of committing absolute paths:
 # FLEXIV_RDK_PYTHON, ISAAC_PYTHON, ISAACSIM_ROOT, and STUDIO_ROOT.
 
-isaac_sim_ws: "../../../../isaac_sim_ws"
+isaac_sim_ws: "../../isaac_sim_ws"
 record_output_root: "../../datasets/stage1_records"
 lerobot_output_root: "../../datasets/lerobot"

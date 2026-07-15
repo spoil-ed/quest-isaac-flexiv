@@ -56,3 +56,41 @@ def test_discovery_prefers_existing_specs_config(tmp_path: Path) -> None:
     discovered = module.discover_robot_control_args(tmp_path)
 
     assert discovered["config"] == "specs/robots/CustomA02L/flexivCfg.xml"
+
+
+def test_capsh_launcher_passes_sys_nice_as_an_ambient_capability(tmp_path: Path) -> None:
+    module = load_module()
+    args = module.parse_args(
+        [
+            "--studio-root",
+            str(tmp_path),
+            "--serial",
+            "A02L-00-M6-I0LIRN",
+            "--config",
+            "specs/robots/FlexivA02L/flexivCfg.xml",
+            "--capsh",
+            str(tmp_path / "runtime-tools" / "capsh"),
+        ]
+    )
+
+    command = module.build_command(args)
+
+    assert command[0] == str((tmp_path / "runtime-tools" / "capsh").resolve())
+    assert "--caps=cap_sys_nice+eip" in command
+    assert "--addamb=cap_sys_nice" in command
+    assert 'export LD_LIBRARY_PATH="$PWD/lib' in command[5]
+    assert command[-13:] == [
+        "./RobotControlApp",
+        "-u",
+        "./user_data_ui//./simDir/simulator0/user_data/",
+        "-c",
+        "specs/robots/FlexivA02L/flexivCfg.xml",
+        "-m",
+        "MotionBarSimulation",
+        "-s",
+        "A02L-00-M6-I0LIRN",
+        "-x",
+        "CX01-02-P1-00034",
+        "-n",
+        "-g",
+    ]

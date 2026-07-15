@@ -71,19 +71,49 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-age-sec", type=float, default=0.5)
     parser.add_argument("--network-interface-whitelist", default="")
     parser.add_argument("--switch-mode", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--clear-fault", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--clear-fault", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--strict-clear-fault", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--servo-on", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--enable-timeout-sec",
+        type=float,
+        default=15.0,
+        help="Wait this long for Enable() to make the robot operational before reconnecting.",
+    )
     parser.add_argument("--retry-last-pose-sec", type=float, default=1.0)
+    parser.add_argument("--reconnect-delay-sec", type=float, default=1.0)
+    parser.add_argument("--reconnect-on-error", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--log-hz", type=float, default=2.0)
+    parser.add_argument("--status-host", default="")
+    parser.add_argument("--status-port", type=int, default=0)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    import flexivrdk
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((str(args.host), int(args.port)))
     sock.settimeout(0.5)
+    status_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if int(args.status_port) > 0 else None
+    status_address = (str(args.status_host or "127.0.0.1"), int(args.status_port))
+    reference_pose: list[float] | None = None
+
+    def publish_ready(ready: bool, current_pose: list[float] | None = None) -> None:
+        if status_sock is None:
+            return
+        packet = {
+            "schema": "flexiv_rdk_streamer_status.v1",
+            "serial": str(args.serial_number),
+            "ready": bool(ready),
+            "monotonic_time": time.monotonic(),
+        }
+        if reference_pose is not None:
+            packet["reference_pose_base_tcp"] = list(reference_pose)
+        if current_pose is not None:
+            packet["current_pose_base_tcp"] = list(current_pose)
+        status_sock.sendto(json.dumps(packet, separators=(",", ":")).encode("utf-8"), status_address)
     controller = RdkRuntimeController(
         RdkRuntimeSettings(
             serial_number=args.serial_number,
@@ -94,7 +124,9 @@ def main(argv: list[str] | None = None) -> int:
             strict_clear_fault=bool(args.strict_clear_fault),
             servo_on=bool(args.servo_on),
             verbose=True,
+            enable_timeout_sec=float(args.enable_timeout_sec),
         ),
+        flexivrdk=flexivrdk,
         log=lambda message: print(f"[RdkTargetStreamer] {message}", flush=True),
     )
     print(
@@ -103,7 +135,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     last_log_time = 0.0
     last_retry_time = 0.0
+    next_connect_attempt_time = 0.0
     last_pose: list[float] | None = None
+    last_control_active = True
     while True:
         try:
             data, _addr = sock.recvfrom(65536)
@@ -127,19 +161,42 @@ def main(argv: list[str] | None = None) -> int:
             if pose is None:
                 continue
             last_pose = list(pose)
+            last_control_active = bool(packet.get("control_active", True))
             last_retry_time = time.monotonic()
         try:
-            controller.send_pose(pose)
+            if not controller.connected and time.monotonic() < next_connect_attempt_time:
+                continue
+            if not controller.connected:
+                controller.connect()
+                reference_pose = controller.current_tcp_pose()
+                print(
+                    f"[RdkTargetStreamer] latched current TCP reference {format_pose_xyz_quat(reference_pose)}",
+                    flush=True,
+                )
+            command_pose = pose if last_control_active else reference_pose
+            assert command_pose is not None
+            controller.send_pose(command_pose)
+            current_pose = controller.current_tcp_pose()
         except Exception as exc:
             print(f"[RdkTargetStreamer] send failed: {exc}", flush=True)
+            publish_ready(False)
+            if not args.reconnect_on_error:
+                print(
+                    "[RdkTargetStreamer] fault latched; exiting without clearing or reconnecting",
+                    flush=True,
+                )
+                return 1
+            next_connect_attempt_time = time.monotonic() + max(0.0, float(args.reconnect_delay_sec))
             controller = RdkRuntimeController(
                 controller.settings,
+                flexivrdk=flexivrdk,
                 log=lambda message: print(f"[RdkTargetStreamer] {message}", flush=True),
             )
             continue
+        publish_ready(True, current_pose)
         now = time.monotonic()
         if float(args.log_hz) > 0.0 and now - last_log_time >= 1.0 / float(args.log_hz):
-            print(f"[RdkTargetStreamer] sent {format_pose_xyz_quat(pose)}", flush=True)
+            print(f"[RdkTargetStreamer] sent {format_pose_xyz_quat(command_pose)}", flush=True)
             last_log_time = now
 
 

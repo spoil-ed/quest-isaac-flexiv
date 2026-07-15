@@ -7,8 +7,9 @@ Maintained files:
 
 - `follow_ball_with_studio.py`: Isaac visual XYZ target frame plus the documented
   Flexiv SimPlugin torque bridge.
-- `app_config.yaml`: single-arm Rizon4 bridge configuration used by local
-  experiments.
+- `app_config.yaml`: dual-arm scene configuration consumed by
+  `dual_follow_with_studio.py`; it currently mirrors the selected red-block
+  pick/place scene using paths relative to this directory.
 
 Runtime entry points live in the repository `scripts/` directory:
 

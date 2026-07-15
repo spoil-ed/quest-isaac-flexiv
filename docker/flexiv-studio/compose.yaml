@@ -1,0 +1,47 @@
+name: flexiv-dual-studio
+
+services:
+  studio-left:
+    build:
+      context: .
+      args:
+        APT_MIRROR: ${APT_MIRROR:-http://mirrors.tuna.tsinghua.edu.cn/ubuntu}
+    image: flexiv-elements-studio-runtime:ubuntu24.04
+    container_name: flexiv-studio-left
+    restart: unless-stopped
+    runtime: nvidia
+    gpus: all
+    user: "${FLEXIV_CONTAINER_UID:-1000}:${FLEXIV_CONTAINER_GID:-1000}"
+    environment:
+      DISPLAY_NUMBER: "1"
+      FLEXIV_ARM_SERIAL: ${FLEXIV_ARM_SERIAL:-}
+      FLEXIV_AUTO_START_RUNTIME: ${FLEXIV_AUTO_START_RUNTIME:-1}
+      HOME: /tmp/flexiv-home
+      NVIDIA_DRIVER_CAPABILITIES: all
+      NVIDIA_VISIBLE_DEVICES: all
+      SCREEN_GEOMETRY: ${SCREEN_GEOMETRY:-1920x1080x24}
+      VNC_PORT: "5900"
+    volumes:
+      - type: bind
+        source: ${STUDIO_RUNTIME_DIR:-../../.deps/docker_studio/FlexivElementsStudio}
+        target: /opt/flexiv-studio
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+      - SYS_NICE
+    security_opt:
+      - apparmor=unconfined
+    ports:
+      - "127.0.0.1:${FLEXIV_STUDIO_VNC_PORT:-5902}:5900"
+    networks:
+      studio_bridge:
+        ipv4_address: 172.28.0.2
+
+networks:
+  studio_bridge:
+    name: flexiv-studio-bridge
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

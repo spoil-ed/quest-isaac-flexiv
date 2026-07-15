@@ -1,5 +1,8 @@
 # Quest Isaac Flexiv 目标
 
+控制权、双臂分流、坐标系、频率以及 squeeze 相对遥操的规范见
+[`architecture/control_architecture_zh.md`](architecture/control_architecture_zh.md)。
+
 最终目标：用 Quest 手柄位姿遥操 Isaac Sim 中的 Flexiv Rizon4，但不使用 Isaac 自带 IK 作为最终控制器。Isaac 只负责仿真、状态读取和执行力矩；反解和控制由 Elements Studio / Flexiv 控制栈完成。
 
 明确约束：不使用 jog / CartesianJogging 作为跟随控制方案。

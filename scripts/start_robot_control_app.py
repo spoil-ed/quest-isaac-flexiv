@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -57,6 +58,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--control-box", default="CX01-02-P1-00034")
     parser.add_argument("--user-data", default="./user_data_ui//./simDir/simulator0/user_data/")
     parser.add_argument("--config", default=None)
+    parser.add_argument(
+        "--capsh",
+        type=Path,
+        default=Path(os.environ["FLEXIV_CAPSH"]) if os.environ.get("FLEXIV_CAPSH") else None,
+        help="Optional file-capability capsh launcher that passes cap_sys_nice to RobotControlApp.",
+    )
     args = parser.parse_args(argv)
     if args.serial is None or args.config is None:
         discovered = discover_robot_control_args(args.studio_root)
@@ -66,7 +73,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def build_command(args: argparse.Namespace) -> list[str]:
-    return [
+    robot_command = [
         "./RobotControlApp",
         "-u",
         str(args.user_data),
@@ -81,14 +88,33 @@ def build_command(args: argparse.Namespace) -> list[str]:
         "-n",
         "-g",
     ]
+    if args.capsh is None:
+        return robot_command
+    return [
+        str(args.capsh.expanduser().resolve()),
+        "--caps=cap_sys_nice+eip",
+        "--addamb=cap_sys_nice",
+        "--",
+        "-c",
+        (
+            'export LD_LIBRARY_PATH="$PWD/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; '
+            'export QT_QPA_PLATFORM_PLUGIN_PATH="$PWD/plugins"; '
+            'export PATH="$PWD/bin:$PATH"; '
+            'exec "$@"'
+        ),
+        "flexiv-robot-control",
+        *robot_command,
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.capsh is not None and not args.capsh.expanduser().is_file():
+        raise FileNotFoundError(f"capsh launcher not found: {args.capsh}")
     existing_pid = flexiv_runtime.find_process_by_executable("RobotControlApp")
     if existing_pid is not None:
         flexiv_runtime.print_already_running("ROBOT_CONTROL_APP", existing_pid)
         return 0
-    args = parse_args(argv)
     pid, stdout_path, stderr_path = flexiv_runtime.start_background(
         build_command(args),
         cwd=args.studio_root,

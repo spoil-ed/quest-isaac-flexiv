@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import struct
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, NamedTuple
@@ -61,6 +62,7 @@ class RdkRuntimeSettings:
     strict_clear_fault: bool = True
     servo_on: bool = False
     verbose: bool = False
+    enable_timeout_sec: float = 15.0
 
 
 def _float_list(values: Iterable[float], *, expected_len: int, name: str) -> list[float]:
@@ -308,6 +310,10 @@ class RdkCartesianStreamer:
         self._uses_stream_api = hasattr(robot, "StreamCartesianMotionForce") and hasattr(flexivrdk, "RtCartesianCmd")
 
     def send(self, joint_group: str, command: RdkCartesianCommand) -> None:
+        if hasattr(self._robot, "fault") and self._robot.fault():
+            raise RuntimeError("RDK robot fault is active")
+        if hasattr(self._robot, "operational") and not self._robot.operational():
+            raise RuntimeError("RDK robot is no longer operational")
         if self._uses_stream_api:
             group = getattr(self._flexivrdk, str(joint_group))
             rdk_command = make_rdk_cartesian_command(self._flexivrdk, command)
@@ -322,6 +328,12 @@ class RdkCartesianStreamer:
             RDK_CARTESIAN_MAX_LINEAR_ACC,
             RDK_CARTESIAN_MAX_ANGULAR_ACC,
         )
+
+    def current_tcp_pose(self) -> list[float]:
+        pose = [float(value) for value in self._robot.states().tcp_pose]
+        if len(pose) != 7 or not all(math.isfinite(value) for value in pose):
+            raise RuntimeError("RDK returned an invalid current TCP pose")
+        return pose
 
 
 def create_rdk_robot(
@@ -365,6 +377,7 @@ def connect_rdk_cartesian_streamer(
     strict_clear_fault: bool = True,
     servo_on: bool = False,
     verbose: bool = False,
+    enable_timeout_sec: float = 15.0,
     log=None,
 ) -> RdkCartesianStreamer:
     if flexivrdk is None:
@@ -396,8 +409,15 @@ def connect_rdk_cartesian_streamer(
         if hasattr(robot, "Enable"):
             logger(f"[FlexivRDK] enabling {serial_number}")
             robot.Enable()
+        deadline = time.monotonic() + max(0.0, float(enable_timeout_sec))
+        while not robot.operational() and time.monotonic() < deadline:
+            time.sleep(0.1)
         if not robot.operational():
-            logger(f"[FlexivRDK] {serial_number} is not operational immediately after Enable(); continuing to SwitchMode")
+            raise TimeoutError(
+                f"{serial_number} did not become operational within "
+                f"{float(enable_timeout_sec):.3f}s after Enable()"
+            )
+        logger(f"[FlexivRDK] {serial_number} is operational")
     mode = rdk_cartesian_mode(flexivrdk)
     if bool(switch_mode) and robot.mode() != mode:
         logger(f"[FlexivRDK] switching {serial_number} to Cartesian motion force")
@@ -435,6 +455,7 @@ class RdkRuntimeController:
             strict_clear_fault=self.settings.strict_clear_fault,
             servo_on=self.settings.servo_on,
             verbose=self.settings.verbose,
+            enable_timeout_sec=self.settings.enable_timeout_sec,
             log=self._log,
         )
 
@@ -459,6 +480,11 @@ class RdkRuntimeController:
                 acc_d=acc_d,
             )
         )
+
+    def current_tcp_pose(self) -> list[float]:
+        self.connect()
+        assert self._streamer is not None
+        return self._streamer.current_tcp_pose()
 
     def disconnect(self) -> None:
         self._streamer = None
@@ -521,3 +547,29 @@ def zero_articulation_joint_velocities(robot, *, zeros_factory=None) -> int:
     zeros = zeros_factory(count) if zeros_factory is not None else [0.0] * count
     robot.set_joint_velocities(zeros)
     return count
+
+
+def hold_robot_joint_positions(
+    robot,
+    joint_positions=None,
+    *,
+    switch_mode: bool = True,
+    zeros_factory=None,
+) -> int:
+    """Synchronize the Isaac position drive and articulation to one arm pose.
+
+    ``FlexivSerial.teleport_to()`` only changes the measured joint positions.
+    The position-drive targets from the referenced USD can still point at the
+    asset's default pose, which creates a large transient whenever the bridge
+    falls back from effort control.  Set both values before clearing velocity
+    so Studio, SimPlugin, and the Isaac articulation start from the same pose.
+    """
+
+    values = [float(value) for value in (robot.q if joint_positions is None else joint_positions)]
+    if switch_mode:
+        robot.switch_control_mode("position")
+    robot.teleport_to(values)
+    set_targets = getattr(robot, "set_joint_position_targets", None)
+    if callable(set_targets):
+        set_targets(values, joint_indices=list(range(len(values))))
+    return zero_articulation_joint_velocities(robot, zeros_factory=zeros_factory)

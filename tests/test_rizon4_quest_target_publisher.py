@@ -5,6 +5,14 @@ from pathlib import Path
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "rizon4_quest_target_publisher.py"
+TELEVUER_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "third_party"
+    / "televuer"
+    / "src"
+    / "televuer"
+    / "televuer.py"
+)
 spec = importlib.util.spec_from_file_location("rizon4_quest_target_publisher", MODULE_PATH)
 mod = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -45,6 +53,22 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
 
         self.assertEqual(args.position_deadband, 0.0)
 
+    def test_cli_supports_one_televuer_session_for_both_controllers(self):
+        args = mod.parse_args(["--side", "both"])
+
+        self.assertEqual(args.side, "both")
+        self.assertEqual(args.left_serial_number, "Rizon4-qSaFLh")
+        self.assertEqual(args.right_serial_number, "Rizon4-I0LIRN")
+
+    def test_televuer_streams_both_motion_controllers(self):
+        source = TELEVUER_PATH.read_text(encoding="utf-8")
+        motion_controllers = source.split("def _motion_controllers", maxsplit=1)[1].split(
+            "def _copy_controller_pose", maxsplit=1
+        )[0]
+
+        self.assertIn("left=True", motion_controllers)
+        self.assertIn("right=True", motion_controllers)
+
     def test_default_televuer_root_is_inside_repo(self):
         repo_root = Path(__file__).resolve().parents[1]
 
@@ -53,7 +77,7 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertTrue(mod.DEFAULT_KEY_FILE.is_relative_to(repo_root))
 
     def test_mapper_outputs_relative_origin_on_first_enable(self):
-        mapper = mod.QuestRelativeMapper(position_delta_scale=3.0)
+        mapper = mod.QuestRelativeMapper(position_delta_scale=3.0, engage_settle_sec=0.0)
 
         packet = mapper.update(_pose(0.2, -0.1, 0.4), enabled=True, seq=1, now=10.0)
 
@@ -104,20 +128,20 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
 
         packet = mapper.update(_pose(0.25, -0.2, 0.5), enabled=True, seq=2, now=10.1)
 
-        self.assertEqual(packet["controller_delta_base"], [0.0, 0.0, 0.0])
-        self.assertEqual(packet["pose_base_tcp_des"][:3], [0.0, 0.0, 0.0])
+        self.assertIsNone(packet)
 
-    def test_mapper_uses_absolute_orientation_during_engage_settle_window(self):
+    def test_mapper_first_packet_after_settle_is_exactly_zero(self):
         mapper = mod.QuestRelativeMapper(
             tcp_rot_offset_wxyz=[1.0, 0.0, 0.0, 0.0],
             engage_settle_sec=0.25,
         )
 
-        packet = mapper.update(_rot_z_90_pose(), enabled=True, seq=1, now=10.0)
+        self.assertIsNone(mapper.update(_pose(0.0, 0.0, 0.0), enabled=True, seq=1, now=10.0))
+        self.assertIsNone(mapper.update(_pose(0.1, 0.0, 0.0), enabled=True, seq=2, now=10.1))
+        packet = mapper.update(_rot_z_90_pose(0.2, 0.0, 0.0), enabled=True, seq=3, now=10.3)
 
-        expected = [round(math.sqrt(0.5), 4), -round(math.sqrt(0.5), 4), 0.0, 0.0]
-        actual = [round(value, 4) for value in packet["pose_base_tcp_des"][3:]]
-        self.assertEqual(actual, expected)
+        self.assertEqual(packet["controller_delta_base"], [0.0, 0.0, 0.0])
+        self.assertEqual(packet["pose_base_tcp_des"][:3], [0.0, 0.0, 0.0])
 
     def test_orientation_uses_absolute_openxr_to_base_axis_mapping(self):
         mapper = mod.QuestRelativeMapper(
@@ -186,6 +210,20 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertEqual(packet["controller_delta_base"], [0.1, 0.2, 0.3])
         self.assertTrue(all(math.isfinite(value) for value in packet["pose_base_tcp_des"]))
 
+    def test_build_gripper_packet_is_independent_of_arm_tracking(self):
+        packet = mod.build_gripper_packet(
+            seq=8,
+            side="left",
+            closed=True,
+            now=12.5,
+            serial_number="Rizon4-qSaFLh",
+        )
+
+        self.assertEqual(packet["schema"], "rizon4_quest_gripper.v1")
+        self.assertEqual(packet["serial"], "Rizon4-qSaFLh")
+        self.assertEqual(packet["side"], "left")
+        self.assertTrue(packet["closed"])
+
     def test_select_enable_accepts_analog_squeeze_threshold(self):
         class FakeTeleVuer:
             right_ctrl_squeeze = False
@@ -199,6 +237,12 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
             right_ctrl_squeezeValue = 0.2
 
         self.assertFalse(mod.select_enable(FakeTeleVuer(), "right", "squeeze", threshold=0.5))
+
+    def test_gripper_defaults_to_trigger(self):
+        args = mod.parse_args([])
+
+        self.assertEqual(args.gripper_button, "trigger")
+        self.assertEqual(args.gripper_threshold, 0.5)
 
 
 if __name__ == "__main__":

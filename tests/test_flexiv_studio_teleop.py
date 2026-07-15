@@ -16,6 +16,7 @@ FOLLOW_BALL = (
     / "flexiv_quest"
     / "follow_ball_with_studio.py"
 )
+TARGETING = ROOT / "standalone_examples" / "api" / "isaacsim.robot.manipulators" / "targeting.py"
 
 
 if str(EXT_ROOT) not in sys.path:
@@ -31,6 +32,13 @@ def load_teleop_sdg():
 
 def load_follow_ball():
     spec = importlib.util.spec_from_file_location("follow_ball_with_studio", FOLLOW_BALL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_targeting():
+    spec = importlib.util.spec_from_file_location("targeting_calibration", TARGETING)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -53,6 +61,58 @@ class FakeSink:
 
 
 class FlexivStudioTeleopTests(unittest.TestCase):
+    def test_parses_fresh_direct_quest_gripper_command(self):
+        mod = load_targeting()
+        packet = mod.parse_quest_gripper_packet(
+            {
+                "schema": "rizon4_quest_gripper.v1",
+                "serial": "Rizon4-I0LIRN",
+                "joint_group": "ARM_1",
+                "seq": 4,
+                "side": "right",
+                "closed": True,
+                "monotonic_time": 10.0,
+            },
+            serial_number="Rizon4-I0LIRN",
+            joint_group="ARM_1",
+            now=10.1,
+        )
+
+        self.assertIsNotNone(packet)
+        self.assertTrue(packet.closed)
+
+    def test_measured_tcp_pair_directly_aligns_world_target_to_rdk(self):
+        mod = load_targeting()
+
+        pose = mod.calibrated_world_target_to_flexiv_pose(
+            world_position=[1.05, 1.98, 3.03],
+            world_orientation_wxyz=[1.0, 0.0, 0.0, 0.0],
+            reference_world_pose=[1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0],
+            reference_pose_base_tcp=[0.4, 0.1, 0.2, 1.0, 0.0, 0.0, 0.0],
+        )
+
+        for actual, expected in zip(pose, [0.45, 0.08, 0.23, 1.0, 0.0, 0.0, 0.0]):
+            self.assertAlmostEqual(actual, expected)
+
+    def test_wall_mounted_rdk_world_calibration_round_trips_local_motion(self):
+        mod = load_targeting()
+        reference_world = [0.26658, -0.533, 0.392995, -0.707107, 0.0, 0.707107, 0.0]
+        reference_rdk = [0.326111, -0.108505, -0.687805, 0.707263, 0.002348, -0.706942, -0.002345]
+        calibration = mod.RdkWorldFrameCalibration.from_reference_pair(
+            reference_world_pose=reference_world,
+            reference_pose_base_tcp=reference_rdk,
+        )
+        target_rdk = [reference_rdk[0] + 0.003, *reference_rdk[1:]]
+
+        world_position, world_orientation = calibration.rdk_pose_to_world(target_rdk)
+        round_trip = calibration.world_pose_to_rdk(
+            world_position=world_position,
+            world_orientation_wxyz=world_orientation,
+        )
+
+        for actual, expected in zip(round_trip, target_rdk):
+            self.assertAlmostEqual(actual, expected, places=6)
+
     def test_camera_look_at_points_usd_negative_z_at_target(self):
         mod = load_follow_ball()
         position = [2.2, 0.0, 1.45]
@@ -247,6 +307,82 @@ class FlexivStudioTeleopTests(unittest.TestCase):
 
         self.assertEqual(moved[:3], [0.32, 0.0, 0.4])
         self.assertEqual(moved[3:], [1.0, 0.0, 0.0, 0.0])
+
+    def test_relative_mapper_zero_aligns_controller_rotation_to_current_tcp(self):
+        mod = load_follow_ball()
+        mapper = mod.QuestRelativeTargetMapper(
+            axis_map=mod.parse_quest_axis_map("x,y,z"),
+            scale=1.0,
+            workspace_min=(-1.0, -1.0, -1.0),
+            workspace_max=(1.0, 1.0, 1.0),
+            position_deadband_m=0.0,
+            orientation_mode="relative",
+        )
+        current = [0.30, 0.0, 0.40, 1.0, 0.0, 0.0, 0.0]
+        packet = mod.QuestTargetPacket(
+            seq=1,
+            side="right",
+            pose_base_tcp_des=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            controller_position_openxr=[0.0, 0.0, 0.0],
+            gripper_open_ratio=None,
+            monotonic_time=1.0,
+            controller_delta_base=[0.0, 0.0, 0.0],
+        )
+        self.assertEqual(mapper.update(packet, current), current)
+
+        half_sqrt = 2.0 ** -0.5
+        rotated = mapper.update(
+            packet._replace(
+                seq=2,
+                pose_base_tcp_des=[0.0, 0.0, 0.0, half_sqrt, 0.0, 0.0, half_sqrt],
+            ),
+            current,
+        )
+
+        for actual, expected in zip(rotated[3:], [half_sqrt, 0.0, 0.0, half_sqrt]):
+            self.assertAlmostEqual(actual, expected)
+
+    def test_relative_mapper_can_disable_workspace_clipping_for_wall_mount(self):
+        mod = load_follow_ball()
+        mapper = mod.QuestRelativeTargetMapper(
+            axis_map=mod.parse_quest_axis_map("x,y,z"),
+            scale=1.0,
+            workspace_min=(0.15, -0.70, 0.20),
+            workspace_max=(1.00, 0.70, 1.35),
+            position_deadband_m=0.0,
+            orientation_mode="packet",
+            clamp_workspace=False,
+        )
+        current = [0.326, -0.110, -0.6875, 1.0, 0.0, 0.0, 0.0]
+        packet = mod.QuestTargetPacket(
+            seq=1,
+            side="right",
+            pose_base_tcp_des=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            controller_position_openxr=None,
+            gripper_open_ratio=None,
+            monotonic_time=1.0,
+            controller_delta_base=[0.0, 0.0, 0.0],
+        )
+
+        self.assertEqual(mapper.update(packet, current), current)
+        moved = mapper.update(packet._replace(seq=2, controller_delta_base=[0.0, 0.0, -0.1]), current)
+
+        self.assertEqual(moved[:3], [0.326, -0.110, -0.7875])
+
+    def test_cartesian_limiter_can_disable_workspace_clipping(self):
+        mod = load_follow_ball()
+        limiter = mod.CartesianTargetLimiter(
+            workspace_min=(0.15, -0.70, 0.20),
+            workspace_max=(1.00, 0.70, 1.35),
+            max_linear_speed_m_s=0.0,
+            max_angular_speed_rad_s=0.0,
+            clamp_workspace=False,
+        )
+
+        self.assertEqual(
+            limiter.limit([0.326, -0.110, -0.7875, 1.0, 0.0, 0.0, 0.0], dt=1.0),
+            [0.326, -0.110, -0.7875, 1.0, 0.0, 0.0, 0.0],
+        )
 
     def test_follow_ball_accepts_matching_quest_target_packet(self):
         mod = load_follow_ball()

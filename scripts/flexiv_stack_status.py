@@ -25,7 +25,11 @@ PROCESS_LABELS = {
 def matching_processes() -> list[tuple[str, int, str]]:
     rows = []
     for pid, command in flexiv_runtime.pgrep_commands():
-        if command.startswith("/bin/bash -lc") or "pgrep -af" in command:
+        if (
+            flexiv_runtime.process_is_containerized(pid)
+            or command.startswith("/bin/bash -lc")
+            or "pgrep -af" in command
+        ):
             continue
         for needle, label in PROCESS_LABELS.items():
             if needle in command:

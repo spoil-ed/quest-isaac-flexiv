@@ -22,11 +22,11 @@ from elements_studio_utils import (
     RdkRuntimeController,
     RdkRuntimeSettings,
     StudioReachabilityClient,
+    hold_robot_joint_positions,
     joint_speed_limit_exceeded,
     joint_positions_rad_to_studio_seed,
     studio_target_pose_from_rdk_pose as pose_base_tcp_des_to_studio_target_pose,
     valid_target_drives_or_none,
-    zero_articulation_joint_velocities,
 )
 from control_helpers import (
     StepRateLimiter,
@@ -840,6 +840,13 @@ def run(args: argparse.Namespace) -> int:
     simulation_app = SimulationApp(
         {
             "headless": bool(args.headless),
+            # Isaac Sim defaults to multi-GPU rendering. On workstations that
+            # expose both an NVIDIA GPU and an integrated Intel GPU, Vulkan can
+            # fail while initializing the unsupported secondary adapter. Keep
+            # rendering and PhysX on the primary CUDA device.
+            "active_gpu": 0,
+            "physics_gpu": 0,
+            "multi_gpu": False,
             "extra_args": [
                 "--enable",
                 "isaacsim.robot.manipulators.examples",
@@ -1007,10 +1014,12 @@ def run(args: argparse.Namespace) -> int:
     def hold_robot_position(joint_positions=None, *, switch_mode: bool = True) -> int:
         """Stop the complete articulation and hold the requested arm pose."""
 
-        if switch_mode:
-            robot.switch_control_mode("position")
-        robot.teleport_to(robot.q if joint_positions is None else joint_positions)
-        return zero_articulation_joint_velocities(robot, zeros_factory=lambda count: np.zeros(count))
+        return hold_robot_joint_positions(
+            robot,
+            joint_positions,
+            switch_mode=switch_mode,
+            zeros_factory=lambda count: np.zeros(count),
+        )
 
     def on_physics_step(_dt):
         nonlocal servo_cycle, last_connected, effort_control_enabled, target_drive_warmup_remaining

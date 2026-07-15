@@ -25,7 +25,7 @@ fake/Quest dual target -> Isaac dual TargetFrame
 
 - Stage2 默认本机样例 serial 为 left `Rizon4-VIHhZM`、right `Rizon4-WE7ssd`；可通过 CLI 或 scene config 覆盖。
 - Stage2 默认只验收 `cam_front/color_0`，后续可通过 scene config 增加腕部相机。
-- Stage2 不依赖 `/data/qiming/unitree_lerobot` 或 `/data/qiming/xr_teleoperate`。
+- Stage2 不依赖任何开发者机器上的外部 Unitree/遥操工作区；需要的外部 runtime 必须通过环境变量或 CLI 传入。
 - Stage2 不修改 Stage1 单臂主流程；双臂能力通过新 app、新配置和新脚本进入。
 
 ## 验收方式

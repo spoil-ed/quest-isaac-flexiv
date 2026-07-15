@@ -22,8 +22,12 @@ for path in (APP_DIR, UTILS_DIR, REPO_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from control_helpers import StepRateLimiter, TargetPosePublishGate  # noqa: E402
-from elements_studio_utils import joint_speed_limit_exceeded, valid_target_drives_or_none  # noqa: E402
+from control_helpers import (  # noqa: E402
+    TargetPosePublishGate,
+    cartesian_pose_changed,
+    rdk_streamer_status_is_ready,
+)
+from elements_studio_utils import hold_robot_joint_positions  # noqa: E402
 from follow_ball_with_studio import (  # noqa: E402
     COMPATIBLE_SIM_PLUGIN_VER,
     DEFAULT_END_EFFECTOR_PRIM_NAME,
@@ -41,6 +45,7 @@ from follow_ball_with_studio import (  # noqa: E402
     _camera_rgba_to_bgr,
     _is_robot_ready,
     _load_camera_config,
+    _select_target,
     camera_pose_from_config,
     create_xyz_target_frame,
 )
@@ -48,12 +53,13 @@ from targeting import (  # noqa: E402
     CartesianTargetLimiter,
     QuestRelativeTargetMapper,
     QuestTargetPacket,
+    RdkWorldFrameCalibration,
     TargetPose,
     TargetPoseUdpPublisher,
     build_target_pose_packet,
-    euler_xyz_deg_to_quat_wxyz,
     parse_float_list,
     parse_quest_axis_map,
+    parse_quest_gripper_packet,
     parse_quest_target_packet,
     quest_target_is_fresh,
     select_pose_base_tcp_des,
@@ -80,6 +86,8 @@ DEFAULT_LEFT_TARGET_NAME = "target_frame_left"
 DEFAULT_RIGHT_TARGET_NAME = "target_frame_right"
 DEFAULT_LEFT_TARGET_POSE_UDP_PORT = 57680
 DEFAULT_RIGHT_TARGET_POSE_UDP_PORT = 57681
+DEFAULT_LEFT_RDK_STATUS_UDP_PORT = 57682
+DEFAULT_RIGHT_RDK_STATUS_UDP_PORT = 57683
 DEFAULT_QUEST_TARGET_UDP_PORT = 57679
 
 
@@ -171,6 +179,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--manual-play", action="store_true")
+    parser.add_argument("--gpu-dynamics", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--physics-hz", type=float, default=PHYSICS_FREQ)
     parser.add_argument("--render-hz", type=float, default=RENDER_FREQ)
     parser.add_argument("--enable-quest-target-udp", action="store_true")
@@ -180,7 +189,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--quest-target-mode", choices=("absolute", "relative"), default="relative")
     parser.add_argument(
         "--quest-relative-orientation-mode",
-        choices=("packet", "reference", "current"),
+        choices=("packet", "relative", "reference", "current"),
         default="packet",
     )
     parser.add_argument("--quest-axis-map", default=DEFAULT_QUEST_AXIS_MAP)
@@ -188,20 +197,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--quest-position-deadband-m", type=float, default=0.01)
     parser.add_argument("--quest-workspace-min", default=",".join(str(value) for value in DEFAULT_QUEST_WORKSPACE_MIN))
     parser.add_argument("--quest-workspace-max", default=",".join(str(value) for value in DEFAULT_QUEST_WORKSPACE_MAX))
+    parser.add_argument(
+        "--quest-workspace-clipping",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Clamp Quest TCP goals to --quest-workspace-min/max (disabled for wall-mounted dual arms).",
+    )
     parser.add_argument("--max-linear-speed-m-s", type=float, default=0.10)
     parser.add_argument("--max-angular-speed-rad-s", type=float, default=0.75)
     parser.add_argument("--left-target-pose-udp-host", default="127.0.0.1")
     parser.add_argument("--left-target-pose-udp-port", type=int, default=DEFAULT_LEFT_TARGET_POSE_UDP_PORT)
     parser.add_argument("--right-target-pose-udp-host", default="127.0.0.1")
     parser.add_argument("--right-target-pose-udp-port", type=int, default=DEFAULT_RIGHT_TARGET_POSE_UDP_PORT)
+    parser.add_argument("--left-rdk-status-udp-host", default="127.0.0.1")
+    parser.add_argument("--left-rdk-status-udp-port", type=int, default=DEFAULT_LEFT_RDK_STATUS_UDP_PORT)
+    parser.add_argument("--right-rdk-status-udp-host", default="127.0.0.1")
+    parser.add_argument("--right-rdk-status-udp-port", type=int, default=DEFAULT_RIGHT_RDK_STATUS_UDP_PORT)
+    parser.add_argument("--rdk-status-max-age-sec", type=float, default=1.0)
     parser.add_argument("--target-pose-publish-hz", type=float, default=30.0)
+    parser.add_argument("--target-activation-position-tolerance-m", type=float, default=1e-3)
+    parser.add_argument("--target-activation-orientation-tolerance-rad", type=float, default=8.726646e-3)
     parser.add_argument("--command-timeout-ms", type=int, default=1)
-    parser.add_argument("--target-drive-warmup-cycles", type=int, default=2)
-    parser.add_argument("--target-drive-required-valid-cycles", type=int, default=1)
-    parser.add_argument("--target-drive-scale", type=float, default=1.0)
-    parser.add_argument("--max-target-drive-norm", type=float, default=200.0)
-    parser.add_argument("--max-target-drive-abs", type=float, default=100.0)
-    parser.add_argument("--max-joint-speed-rad-s", type=float, default=1.5)
     parser.add_argument("--target-axis-length", type=float, default=0.14)
     parser.add_argument("--target-axis-radius", type=float, default=0.006)
     parser.add_argument("--gateway-endpoint", default="")
@@ -237,6 +253,7 @@ class DualQuestTargetUdpReceiver:
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.bind(self._address)
         self._socket.setblocking(False)
+        self._pending_grippers: dict[str, bool] = {}
 
     @property
     def address(self) -> tuple[str, int]:
@@ -258,6 +275,15 @@ class DualQuestTargetUdpReceiver:
             side = str(packet.get("side", "")).lower()
             if side not in self._serials:
                 continue
+            gripper = parse_quest_gripper_packet(
+                packet,
+                serial_number=self._serials[side],
+                joint_group=self._joint_group,
+                max_age_sec=self._max_age_sec,
+            )
+            if gripper is not None:
+                self._pending_grippers[side] = bool(gripper.closed)
+                continue
             parsed = parse_quest_target_packet(
                 packet,
                 serial_number=self._serials[side],
@@ -267,11 +293,87 @@ class DualQuestTargetUdpReceiver:
             if parsed is not None:
                 latest[side] = parsed
 
+    def take_latest_grippers(self) -> dict[str, bool]:
+        latest = dict(self._pending_grippers)
+        self._pending_grippers.clear()
+        return latest
+
     def clear(self) -> None:
         self.poll_latest()
+        self.take_latest_grippers()
 
     def close(self) -> None:
         self._socket.close()
+
+
+class DualRdkStatusReceiver:
+    """Receive readiness/fault state from the two external RDK streamers."""
+
+    def __init__(
+        self,
+        addresses: dict[str, tuple[str, int]],
+        *,
+        serials: dict[str, str],
+        max_age_sec: float,
+    ) -> None:
+        self._serials = dict(serials)
+        self._max_age_sec = float(max_age_sec)
+        self._sockets: dict[str, socket.socket] = {}
+        self._latest: dict[str, dict[str, Any] | None] = {side: None for side in addresses}
+        for side, address in addresses.items():
+            status_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            status_socket.bind((str(address[0]), int(address[1])))
+            status_socket.setblocking(False)
+            self._sockets[side] = status_socket
+
+    def poll(self) -> dict[str, bool]:
+        for side, status_socket in self._sockets.items():
+            while True:
+                try:
+                    data, _addr = status_socket.recvfrom(65536)
+                except BlockingIOError:
+                    break
+                except OSError:
+                    break
+                try:
+                    packet = json.loads(data.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if isinstance(packet, dict) and str(packet.get("serial", "")) == self._serials[side]:
+                    self._latest[side] = packet
+        now = time.monotonic()
+        return {
+            side: rdk_streamer_status_is_ready(
+                self._latest[side],
+                serial_number=self._serials[side],
+                max_age_sec=self._max_age_sec,
+                now=now,
+            )
+            for side in self._sockets
+        }
+
+    def clear(self) -> None:
+        for side in self._latest:
+            self._latest[side] = None
+        self.poll()
+
+    def latest_packet(self, side: str) -> dict[str, Any] | None:
+        packet = self._latest.get(str(side))
+        return packet if isinstance(packet, dict) else None
+
+    def close(self) -> None:
+        for status_socket in self._sockets.values():
+            status_socket.close()
+
+
+def _finite_status_pose(packet: dict[str, Any] | None, key: str) -> list[float] | None:
+    if packet is None:
+        return None
+    try:
+        pose = [float(value) for value in packet[key]]
+    except (KeyError, TypeError, ValueError):
+        return None
+    return pose if len(pose) == 7 and all(math.isfinite(value) for value in pose) else None
 
 
 @dataclass
@@ -281,6 +383,7 @@ class ArmRuntime:
     joint_group: str
     robot: Any
     target_frame: Any
+    target_prim_path: str
     sim_node: Any
     target_pose_publisher: TargetPoseUdpPublisher
     mapper: QuestRelativeTargetMapper
@@ -294,12 +397,21 @@ class ArmRuntime:
     latest_target_drives: list[float] | None = None
     last_connected: bool = False
     effort_control_enabled: bool = False
-    target_drive_warmup_remaining: int = 0
-    valid_target_drive_streak: int = 0
-    last_invalid_target_drive_cycle: int = -10_000
+    articulation_ready: bool = False
     reset_hold_pose_base_tcp: list[float] | None = None
     reset_hold_cycles_remaining: int = 0
     latest_control_pose_base_tcp: list[float] | None = None
+    idle_hold_pose_base_tcp: list[float] | None = None
+    idle_target_world_pose: list[float] | None = None
+    target_control_requested: bool = False
+    target_control_source: str | None = None
+    rdk_ready: bool = False
+    rdk_reference_pose_base_tcp: list[float] | None = None
+    rdk_current_pose_base_tcp: list[float] | None = None
+    rdk_world_calibration: RdkWorldFrameCalibration | None = None
+    quest_goal_pose_base_tcp: list[float] | None = None
+    pending_gripper_closed: bool | None = None
+    applied_gripper_closed: bool | None = None
 
 
 def _scene_robot_config(args: argparse.Namespace, side: str) -> dict[str, Any]:
@@ -363,6 +475,13 @@ def run(args: argparse.Namespace) -> int:
     simulation_app = SimulationApp(
         {
             "headless": bool(args.headless),
+            # Isaac Sim defaults to multi-GPU rendering. On workstations that
+            # expose both an NVIDIA GPU and an integrated Intel GPU, Vulkan can
+            # fail while initializing the unsupported secondary adapter. Keep
+            # rendering and PhysX on the primary CUDA device.
+            "active_gpu": 0,
+            "physics_gpu": 0,
+            "multi_gpu": False,
             "extra_args": [
                 "--enable",
                 "isaacsim.robot.manipulators.examples",
@@ -379,6 +498,7 @@ def run(args: argparse.Namespace) -> int:
     from isaacsim.core.utils.stage import add_reference_to_stage
     from isaacsim.sensors.camera import Camera
     from isaacsim.robot.manipulators.examples.flexiv import FlexivSerial
+    from isaacsim.robot.manipulators.grippers.parallel_gripper import ParallelGripper
 
     if flexivsimplugin.__version__ != COMPATIBLE_SIM_PLUGIN_VER:
         raise ImportError(
@@ -391,6 +511,17 @@ def run(args: argparse.Namespace) -> int:
         rendering_dt=1.0 / float(args.render_hz),
         set_defaults=False,
     )
+    if args.gpu_dynamics:
+        physics_context = world.get_physics_context()
+        physics_context.enable_gpu_dynamics(True)
+        physics_context.set_broadphase_type("GPU")
+        if not physics_context.is_gpu_dynamics_enabled():
+            raise RuntimeError("PhysX refused to enable GPU dynamics")
+        print(
+            "[FlexivDualTargetFrame] PhysX GPU dynamics enabled on CUDA device 0 "
+            "with GPU broadphase; CPU readback remains enabled for SimPlugin",
+            flush=True,
+        )
     world.scene.add_default_ground_plane()
     _add_default_lighting()
     scene_object_summary: list[dict[str, Any]] = []
@@ -448,11 +579,18 @@ def run(args: argparse.Namespace) -> int:
         target_name = target_name or default_target_name
 
         add_reference_to_stage(usd_path=usd, prim_path=prim_path)
+        gripper = ParallelGripper(
+            end_effector_prim_path=prim_path + "/Grav_gripper/right_finger_tip",
+            joint_prim_names=["finger_joint", "right_outer_knuckle_joint"],
+            joint_opened_positions=np.array([45.0, 0.0]),
+            joint_closed_positions=np.array([-8.88, 0.0]),
+        )
         robot = world.scene.add(
             FlexivSerial(
                 prim_path=prim_path,
                 name=robot_name,
                 end_effector_prim_name=end_effector,
+                gripper=gripper,
             )
         )
         _set_robot_base_pose(robot, base_position, base_orientation)
@@ -474,6 +612,7 @@ def run(args: argparse.Namespace) -> int:
             joint_group=args.joint_group,
             robot=robot,
             target_frame=target_frame,
+            target_prim_path=target_prim,
             sim_node=flexivsimplugin.UserNode(serials[side]),
             target_pose_publisher=target_pose_publisher,
             mapper=QuestRelativeTargetMapper(
@@ -483,12 +622,14 @@ def run(args: argparse.Namespace) -> int:
                 workspace_max=parse_float_list(args.quest_workspace_max, expected=3, name="quest_workspace_max"),
                 position_deadband_m=float(args.quest_position_deadband_m),
                 orientation_mode=str(args.quest_relative_orientation_mode),
+                clamp_workspace=bool(args.quest_workspace_clipping),
             ),
             limiter=CartesianTargetLimiter(
                 workspace_min=parse_float_list(args.quest_workspace_min, expected=3, name="quest_workspace_min"),
                 workspace_max=parse_float_list(args.quest_workspace_max, expected=3, name="quest_workspace_max"),
                 max_linear_speed_m_s=float(args.max_linear_speed_m_s),
                 max_angular_speed_rad_s=float(args.max_angular_speed_rad_s),
+                clamp_workspace=bool(args.quest_workspace_clipping),
             ),
             target_pose_gate=TargetPosePublishGate.from_hz(float(args.target_pose_publish_hz), physics_freq=physics_hz),
             configured_initial_pose=initial_pose,
@@ -515,6 +656,20 @@ def run(args: argparse.Namespace) -> int:
             f"{quest_target_receiver.address[0]}:{quest_target_receiver.address[1]}",
             flush=True,
         )
+    rdk_status_receiver = DualRdkStatusReceiver(
+        {
+            "left": (args.left_rdk_status_udp_host, args.left_rdk_status_udp_port),
+            "right": (args.right_rdk_status_udp_host, args.right_rdk_status_udp_port),
+        },
+        serials=serials,
+        max_age_sec=float(args.rdk_status_max_age_sec),
+    )
+    print(
+        "[FlexivDualTargetFrame] RDK status UDP listening on "
+        f"left={args.left_rdk_status_udp_host}:{args.left_rdk_status_udp_port} "
+        f"right={args.right_rdk_status_udp_host}:{args.right_rdk_status_udp_port}",
+        flush=True,
+    )
 
     servo_cycle = 0
     gateway_client = None
@@ -522,6 +677,7 @@ def run(args: argparse.Namespace) -> int:
     gateway_last_publish = 0.0
     pending_reset_control = None
     last_reset_seq = 0
+    control_loop_enabled = False
 
     def _current_pose_base_tcp(arm: ArmRuntime) -> list[float]:
         base_position, base_orientation = arm.robot.get_world_pose()
@@ -533,17 +689,47 @@ def run(args: argparse.Namespace) -> int:
             base_orientation_wxyz=base_orientation,
         )
 
+    def _hold_arm_position(arm: ArmRuntime, joint_positions=None, *, switch_mode: bool = True) -> int:
+        return hold_robot_joint_positions(
+            arm.robot,
+            joint_positions,
+            switch_mode=switch_mode,
+            zeros_factory=lambda count: np.zeros(count),
+        )
+
     def _reset_arm_to_start_pose(arm: ArmRuntime, *, reset_world: bool) -> None:
         if reset_world:
             world.reset()
         _set_robot_base_pose(arm.robot, arm.base_position, arm.base_orientation)
-        arm.robot.teleport_to(arm.initial_q)
-        arm.robot.switch_control_mode("position")
-        arm.target_frame.set_world_pose(
-            position=np.array(arm.configured_initial_pose.position),
-            orientation=np.array(euler_xyz_deg_to_quat_wxyz(arm.configured_initial_pose.euler_deg)),
+        _hold_arm_position(arm, arm.initial_q)
+        if arm.robot.gripper is not None:
+            arm.robot.gripper.open()
+            arm.pending_gripper_closed = False
+            arm.applied_gripper_closed = False
+        print(
+            f"[FlexivDualTargetFrame] {arm.side} initial joint hold applied "
+            f"q={[round(float(value), 6) for value in arm.robot.q]}",
+            flush=True,
         )
         arm.reset_hold_pose_base_tcp = _current_pose_base_tcp(arm)
+        arm.idle_hold_pose_base_tcp = list(arm.reset_hold_pose_base_tcp)
+        synced_target_pose = sync_target_to_base_tcp_pose(
+            arm.target_frame,
+            pose_base_tcp_des=arm.reset_hold_pose_base_tcp,
+            base_position=arm.base_position,
+            base_orientation_wxyz=arm.base_orientation,
+        )
+        print(
+            f"[FlexivDualTargetFrame] {arm.side} TargetFrame aligned to end effector "
+            f"world_position={[round(float(value), 6) for value in synced_target_pose.position]} "
+            f"world_euler_deg={[round(float(value), 3) for value in synced_target_pose.euler_deg]}",
+            flush=True,
+        )
+        target_position, target_orientation = arm.target_frame.get_world_pose()
+        arm.idle_target_world_pose = [
+            *[float(value) for value in target_position],
+            *[float(value) for value in target_orientation],
+        ]
         arm.reset_hold_cycles_remaining = max(1, int(max(0.0, float(args.reset_settle_sec)) * physics_hz))
         arm.latest_quest_target = None
         arm.latest_target_drives = [0.0] * 7
@@ -551,14 +737,27 @@ def run(args: argparse.Namespace) -> int:
         arm.limiter.reset(arm.reset_hold_pose_base_tcp)
         arm.last_connected = False
         arm.effort_control_enabled = False
-        arm.target_drive_warmup_remaining = max(0, int(args.target_drive_warmup_cycles))
-        arm.valid_target_drive_streak = 0
+        arm.articulation_ready = True
+        arm.target_control_requested = False
+        arm.target_control_source = None
+        arm.rdk_ready = False
+        arm.rdk_reference_pose_base_tcp = None
+        arm.rdk_current_pose_base_tcp = None
+        arm.rdk_world_calibration = None
+        arm.quest_goal_pose_base_tcp = None
 
     def initialize_like_startup(reason: str, *, reset_world: bool) -> None:
+        nonlocal control_loop_enabled
+        # world.reset() can invoke physics callbacks before articulation views
+        # and configured joint positions are ready. Never expose those
+        # transient states to an already-operational Studio controller.
+        control_loop_enabled = False
         for idx, side in enumerate(("left", "right")):
             _reset_arm_to_start_pose(arms[side], reset_world=reset_world and idx == 0)
         if quest_target_receiver is not None:
             quest_target_receiver.clear()
+        rdk_status_receiver.clear()
+        control_loop_enabled = True
         print(
             f"[FlexivDualTargetFrame] startup initialization applied reason={reason}; "
             f"Studio home hold={max(0.0, float(args.reset_settle_sec)):.3f}s",
@@ -571,14 +770,33 @@ def run(args: argparse.Namespace) -> int:
         latest = quest_target_receiver.poll_latest()
         for side, target in latest.items():
             arms[side].latest_quest_target = target
+        for side, closed in quest_target_receiver.take_latest_grippers().items():
+            arms[side].pending_gripper_closed = bool(closed)
         for arm in arms.values():
             if not quest_target_is_fresh(arm.latest_quest_target, max_age_sec=float(args.quest_target_max_age_sec)):
                 arm.latest_quest_target = None
                 arm.mapper.reset()
 
-    def _step_arm(arm: ArmRuntime, dt: float) -> None:
-        nonlocal servo_cycle
-        arm.sim_node.SendRobotStates(flexivsimplugin.SimRobotStates(servo_cycle, arm.robot.q, arm.robot.dq))
+    def _apply_quest_gripper(arm: ArmRuntime) -> None:
+        closed = arm.pending_gripper_closed
+        if closed is None or closed == arm.applied_gripper_closed:
+            return
+        if arm.robot.gripper is None:
+            return
+        if closed:
+            arm.robot.gripper.close()
+        else:
+            arm.robot.gripper.open()
+        arm.applied_gripper_closed = closed
+        print(
+            f"[FlexivDualTargetFrame] {arm.side} Quest gripper "
+            f"{'closed' if closed else 'opened'} (direct Isaac control)",
+            flush=True,
+        )
+
+    def _update_arm_target(arm: ArmRuntime, target_dt: float) -> None:
+        """Sample and publish one target pose at the low-rate target clock."""
+
         base_position, base_orientation = arm.robot.get_world_pose()
         target_position, target_orientation = arm.target_frame.get_world_pose()
         pose_base_tcp_des = select_pose_base_tcp_des(
@@ -588,11 +806,30 @@ def run(args: argparse.Namespace) -> int:
             base_position=base_position,
             base_orientation_wxyz=base_orientation,
         )
+        if (
+            arm.latest_quest_target is None
+            and arm.rdk_world_calibration is not None
+        ):
+            pose_base_tcp_des = arm.rdk_world_calibration.world_pose_to_rdk(
+                world_position=target_position,
+                world_orientation_wxyz=target_orientation,
+            )
         control_pose_base_tcp = pose_base_tcp_des
+        if (
+            arm.latest_quest_target is None
+            and arm.target_control_source == "quest"
+            and arm.quest_goal_pose_base_tcp is not None
+        ):
+            # Releasing squeeze stops Quest packets. Keep the last raw Quest
+            # goal instead of falling back to the startup TargetFrame pose.
+            # The limiter below may continue moving toward this fixed goal.
+            control_pose_base_tcp = list(arm.quest_goal_pose_base_tcp)
         current_pose_base_tcp = None
         reset_hold_active = arm.reset_hold_pose_base_tcp is not None and arm.reset_hold_cycles_remaining > 0
         if reset_hold_active:
             control_pose_base_tcp = list(arm.reset_hold_pose_base_tcp)
+            # Keep the visible target exactly on the initialized flange while
+            # the two Studio controllers finish starting.
             sync_target_to_base_tcp_pose(
                 arm.target_frame,
                 pose_base_tcp_des=control_pose_base_tcp,
@@ -601,125 +838,239 @@ def run(args: argparse.Namespace) -> int:
             )
             arm.mapper.reset()
             arm.limiter.reset(control_pose_base_tcp)
-        elif arm.latest_quest_target is not None and args.quest_target_mode == "relative":
-            current_pose_base_tcp = _current_pose_base_tcp(arm)
-            control_pose_base_tcp = arm.mapper.update(arm.latest_quest_target, current_pose_base_tcp)
+        elif arm.latest_quest_target is not None:
+            # Quest deltas are commands in Flexiv's RDK base frame. The
+            # wall-mounted Isaac articulation has a different base-axis
+            # convention, so use the TCP measured by the RDK streamer as the
+            # position anchor instead of deriving it from the USD root.
+            rdk_anchor_pose = arm.rdk_current_pose_base_tcp or arm.rdk_reference_pose_base_tcp
+            if rdk_anchor_pose is not None:
+                current_pose_base_tcp = list(rdk_anchor_pose)
+                if args.quest_target_mode == "relative":
+                    control_pose_base_tcp = arm.mapper.update(
+                        arm.latest_quest_target,
+                        current_pose_base_tcp,
+                    )
+                arm.quest_goal_pose_base_tcp = [float(value) for value in control_pose_base_tcp]
+            else:
+                arm.mapper.reset()
 
-        if arm.latest_quest_target is not None and not reset_hold_active:
-            if current_pose_base_tcp is None:
-                current_pose_base_tcp = _current_pose_base_tcp(arm)
+        if not reset_hold_active and not arm.target_control_requested:
+            activation_source = None
+            if arm.latest_quest_target is not None:
+                activation_source = "quest"
+            current_target_world_pose = [
+                *[float(value) for value in target_position],
+                *[float(value) for value in target_orientation],
+            ]
+            if (
+                activation_source is None
+                and not args.enable_quest_target_udp
+                and arm.idle_target_world_pose is not None
+                and cartesian_pose_changed(
+                arm.idle_target_world_pose,
+                current_target_world_pose,
+                position_tolerance_m=float(args.target_activation_position_tolerance_m),
+                orientation_tolerance_rad=float(args.target_activation_orientation_tolerance_rad),
+                )
+            ):
+                activation_source = "target-frame"
+            if activation_source is not None:
+                arm.target_control_requested = True
+                arm.target_control_source = activation_source
+                print(
+                    f"[FlexivDualTargetFrame] {arm.side} target control armed by {activation_source}; "
+                    "waiting for RDK operational acknowledgement "
+                    f"target_world={[round(value, 6) for value in current_target_world_pose]}",
+                    flush=True,
+                )
+
+        quest_goal_active = bool(
+            arm.target_control_source == "quest"
+            and arm.quest_goal_pose_base_tcp is not None
+        )
+        if quest_goal_active and not reset_hold_active:
             if arm.limiter.last_pose is None:
-                arm.limiter.reset(current_pose_base_tcp)
-            control_pose_base_tcp = arm.limiter.limit(control_pose_base_tcp, dt=float(dt))
-            sync_target_to_base_tcp_pose(
-                arm.target_frame,
-                pose_base_tcp_des=control_pose_base_tcp,
-                base_position=base_position,
-                base_orientation_wxyz=base_orientation,
+                limiter_seed = (
+                    current_pose_base_tcp
+                    or arm.latest_control_pose_base_tcp
+                    or arm.rdk_current_pose_base_tcp
+                    or arm.rdk_reference_pose_base_tcp
+                )
+                if limiter_seed is not None:
+                    arm.limiter.reset(limiter_seed)
+            control_pose_base_tcp = arm.limiter.limit(
+                arm.quest_goal_pose_base_tcp,
+                dt=float(target_dt),
             )
         elif not reset_hold_active:
             arm.limiter.reset()
 
         arm.latest_control_pose_base_tcp = [float(value) for value in control_pose_base_tcp]
 
-        target_active = arm.latest_quest_target is not None or reset_hold_active
-        if target_active and arm.target_pose_gate.should_publish(servo_cycle):
-            arm.target_pose_publisher.publish(
-                build_target_pose_packet(
-                    serial_number=arm.serial_number,
-                    joint_group=arm.joint_group,
-                    servo_cycle=servo_cycle,
-                    pose_base_tcp_des=control_pose_base_tcp,
-                    monotonic_time=time.monotonic(),
-                )
+        if not reset_hold_active:
+            user_target_active = bool(
+                arm.target_control_requested
+                and arm.rdk_ready
+                and arm.effort_control_enabled
+                and arm.rdk_reference_pose_base_tcp is not None
             )
+            publish_pose_base_tcp = control_pose_base_tcp
+            if not user_target_active:
+                publish_pose_base_tcp = (
+                    list(arm.rdk_reference_pose_base_tcp)
+                    if arm.rdk_reference_pose_base_tcp is not None
+                    else _current_pose_base_tcp(arm)
+                )
+            packet = build_target_pose_packet(
+                serial_number=arm.serial_number,
+                joint_group=arm.joint_group,
+                servo_cycle=servo_cycle,
+                pose_base_tcp_des=publish_pose_base_tcp,
+                monotonic_time=time.monotonic(),
+            )
+            # The streamer ignores the uncalibrated packet pose until it has
+            # latched Studio's actual TCP and Isaac has entered effort mode.
+            packet["control_active"] = user_target_active
+            arm.target_pose_publisher.publish(packet)
 
         if reset_hold_active:
-            arm.reset_hold_cycles_remaining -= 1
+            arm.reset_hold_cycles_remaining = max(
+                0,
+                arm.reset_hold_cycles_remaining - arm.target_pose_gate.period_cycles,
+            )
             if arm.reset_hold_cycles_remaining <= 0:
                 arm.reset_hold_pose_base_tcp = None
-                print(f"[FlexivDualTargetFrame] {arm.side} startup/reset Studio hold completed", flush=True)
+                idle_position, idle_orientation = arm.target_frame.get_world_pose()
+                arm.idle_target_world_pose = [
+                    *[float(value) for value in idle_position],
+                    *[float(value) for value in idle_orientation],
+                ]
+                print(
+                    f"[FlexivDualTargetFrame] {arm.side} startup/reset hold completed; "
+                    "starting RDK current-TCP coordinate handoff",
+                    flush=True,
+                )
+
+    def _update_quest_target_frames() -> None:
+        """Render the two limited Quest targets without touching the 2 kHz loop."""
+
+        if not args.enable_quest_target_udp:
+            return
+        for arm in arms.values():
+            pose_base_tcp = arm.quest_goal_pose_base_tcp
+            calibration = arm.rdk_world_calibration
+            if pose_base_tcp is None or calibration is None:
+                continue
+            world_position, world_orientation = calibration.rdk_pose_to_world(pose_base_tcp)
+            arm.target_frame.set_world_pose(
+                position=np.array(world_position),
+                orientation=np.array(world_orientation),
+            )
+
+    def _update_rdk_statuses() -> None:
+        readiness = rdk_status_receiver.poll()
+        for side, ready in readiness.items():
+            arm = arms[side]
+            packet = rdk_status_receiver.latest_packet(side)
+            if ready and packet is not None:
+                reference_pose = _finite_status_pose(packet, "reference_pose_base_tcp")
+                current_pose = _finite_status_pose(packet, "current_pose_base_tcp")
+                if reference_pose is not None:
+                    if arm.rdk_reference_pose_base_tcp is None:
+                        print(
+                            f"[FlexivDualTargetFrame] calibrated {side} RDK TCP reference "
+                            f"{[round(value, 6) for value in reference_pose]}",
+                            flush=True,
+                        )
+                    arm.rdk_reference_pose_base_tcp = reference_pose
+                    if arm.idle_target_world_pose is not None:
+                        arm.rdk_world_calibration = RdkWorldFrameCalibration.from_reference_pair(
+                            reference_world_pose=arm.idle_target_world_pose,
+                            reference_pose_base_tcp=reference_pose,
+                        )
+                if current_pose is not None:
+                    arm.rdk_current_pose_base_tcp = current_pose
+            if ready and not arm.rdk_ready:
+                print(f"[FlexivDualTargetFrame] RDK operational {side} {arm.serial_number}", flush=True)
+            elif not ready and arm.rdk_ready:
+                print(
+                    f"[FlexivDualTargetFrame] RDK not ready {side} {arm.serial_number}; pausing user target handoff",
+                    flush=True,
+                )
+            arm.rdk_ready = bool(ready)
+
+    def _apply_arm_studio_torque(arm: ArmRuntime) -> None:
+        """Receive and apply Studio's unmodified torque command for one 2 kHz cycle."""
 
         connected = arm.sim_node.connected()
         if connected and not arm.last_connected:
             print(
-                f"[FlexivDualTargetFrame] SimPlugin connected {arm.side} {arm.serial_number}; "
-                f"warming up {max(0, int(args.target_drive_warmup_cycles))} cycles",
+                f"[FlexivDualTargetFrame] SimPlugin connected {arm.side} {arm.serial_number}",
                 flush=True,
             )
-            arm.target_drive_warmup_remaining = max(0, int(args.target_drive_warmup_cycles))
             arm.effort_control_enabled = False
-            arm.valid_target_drive_streak = 0
-            arm.robot.switch_control_mode("position")
-            arm.robot.teleport_to(arm.robot.q)
         if not connected:
             if arm.last_connected:
                 print(f"[FlexivDualTargetFrame] SimPlugin disconnected {arm.side} {arm.serial_number}", flush=True)
-                arm.robot.switch_control_mode("position")
-                arm.robot.teleport_to(arm.robot.q)
+                if arm.articulation_ready:
+                    _hold_arm_position(arm)
             arm.last_connected = False
             arm.effort_control_enabled = False
-            arm.valid_target_drive_streak = 0
             return
         arm.last_connected = True
-        if not _is_robot_ready(arm.robot):
-            return
-        if joint_speed_limit_exceeded(arm.robot.dq, max_abs_rad_s=float(args.max_joint_speed_rad_s)):
+        if not arm.articulation_ready:
+            arm.articulation_ready = _is_robot_ready(arm.robot)
+            if not arm.articulation_ready:
+                return
+        # Stage1 manual mode establishes a Cartesian hold at the measured TCP
+        # before effort control begins.  TargetFrame movement only releases
+        # the calibrated user target; it does not gate this safe handoff.
+        if not arm.rdk_ready or arm.rdk_reference_pose_base_tcp is None:
             if arm.effort_control_enabled:
-                arm.robot.switch_control_mode("position")
-                arm.robot.teleport_to(arm.robot.q)
+                _hold_arm_position(arm)
                 arm.effort_control_enabled = False
-            arm.valid_target_drive_streak = 0
-            if servo_cycle - arm.last_invalid_target_drive_cycle >= int(physics_hz):
-                print(f"[FlexivDualTargetFrame] {arm.side} joint speed limit exceeded; leaving effort control", flush=True)
-                arm.last_invalid_target_drive_cycle = servo_cycle
             return
         if not arm.sim_node.WaitForRobotCommands(max(0, int(args.command_timeout_ms))):
             return
-        if arm.target_drive_warmup_remaining > 0:
-            arm.target_drive_warmup_remaining -= 1
-            return
-        target_drives, torque_norm = valid_target_drives_or_none(
-            arm.sim_node.robot_commands().target_drives,
-            max_norm=float(args.max_target_drive_norm),
-            max_abs=float(args.max_target_drive_abs),
-        )
-        if target_drives is None:
-            if arm.effort_control_enabled:
-                arm.robot.switch_control_mode("position")
-                arm.robot.teleport_to(arm.robot.q)
-                arm.effort_control_enabled = False
-            arm.valid_target_drive_streak = 0
-            if servo_cycle - arm.last_invalid_target_drive_cycle >= int(physics_hz):
-                print(
-                    f"[FlexivDualTargetFrame] {arm.side} rejected target_drives norm={torque_norm:.3g}; "
-                    "waiting for Studio/SimPlugin to settle",
-                    flush=True,
-                )
-                arm.last_invalid_target_drive_cycle = servo_cycle
-            return
-        target_drive_scale = float(args.target_drive_scale)
-        if target_drive_scale != 1.0:
-            target_drives = [float(value) * target_drive_scale for value in target_drives]
-            torque_norm = math.sqrt(sum(float(value) * float(value) for value in target_drives))
+        target_drives = arm.sim_node.robot_commands().target_drives
         arm.latest_target_drives = list(target_drives[:7])
-        if reset_hold_active:
-            arm.valid_target_drive_streak = 0
-            return
-        arm.valid_target_drive_streak += 1
-        if arm.valid_target_drive_streak < max(1, int(args.target_drive_required_valid_cycles)):
+        if arm.reset_hold_pose_base_tcp is not None and arm.reset_hold_cycles_remaining > 0:
             return
         if not arm.effort_control_enabled:
             arm.robot.switch_control_mode("effort")
             arm.effort_control_enabled = True
         arm.robot.apply_torques(target_drives)
 
-    def on_physics_step(dt):
+    target_update_gate = arms["left"].target_pose_gate
+    target_update_dt = target_update_gate.period_cycles / physics_hz
+
+    def on_physics_step(_dt):
         nonlocal servo_cycle
+        if not control_loop_enabled:
+            return
+        for arm in arms.values():
+            if not arm.articulation_ready:
+                arm.articulation_ready = _is_robot_ready(arm.robot)
+            if not arm.articulation_ready:
+                return
         servo_cycle += 1
-        _update_quest_targets()
-        _step_arm(arms["left"], dt)
-        _step_arm(arms["right"], dt)
+        # The official multi-robot bridge sends every robot state before it
+        # waits for any command. This keeps the two Studio controllers on the
+        # same servo cycle even when one transport is Docker-backed.
+        for arm in arms.values():
+            arm.sim_node.SendRobotStates(
+                flexivsimplugin.SimRobotStates(servo_cycle, arm.robot.q, arm.robot.dq)
+            )
+        if target_update_gate.should_publish(servo_cycle):
+            _update_quest_targets()
+            _apply_quest_gripper(arms["left"])
+            _apply_quest_gripper(arms["right"])
+            _update_arm_target(arms["left"], target_update_dt)
+            _update_arm_target(arms["right"], target_update_dt)
+            _update_rdk_statuses()
+        for arm in arms.values():
+            _apply_arm_studio_torque(arm)
 
     def publish_gateway_sample() -> None:
         nonlocal gateway_client, gateway_last_connect_attempt, gateway_last_publish, pending_reset_control
@@ -764,12 +1115,18 @@ def run(args: argparse.Namespace) -> int:
         def _target_frame_state(arm: ArmRuntime) -> dict[str, Any]:
             base_position, base_orientation = arm.robot.get_world_pose()
             target_position, target_orientation = arm.target_frame.get_world_pose()
-            base_tcp_pose = world_target_to_flexiv_pose(
-                world_position=target_position,
-                world_orientation_wxyz=target_orientation,
-                base_position=base_position,
-                base_orientation_wxyz=base_orientation,
-            )
+            if arm.rdk_world_calibration is not None:
+                base_tcp_pose = arm.rdk_world_calibration.world_pose_to_rdk(
+                    world_position=target_position,
+                    world_orientation_wxyz=target_orientation,
+                )
+            else:
+                base_tcp_pose = world_target_to_flexiv_pose(
+                    world_position=target_position,
+                    world_orientation_wxyz=target_orientation,
+                    base_position=base_position,
+                    base_orientation_wxyz=base_orientation,
+                )
             latest_quest = None
             if arm.latest_quest_target is not None:
                 latest_quest = {
@@ -830,12 +1187,36 @@ def run(args: argparse.Namespace) -> int:
                     "left": _target_frame_state(left),
                     "right": _target_frame_state(right),
                 },
+                "control_state": {
+                    "left": {
+                        "target_control_requested": bool(left.target_control_requested),
+                        "target_control_source": left.target_control_source,
+                        "rdk_ready": bool(left.rdk_ready),
+                        "effort_control_enabled": bool(left.effort_control_enabled),
+                    },
+                    "right": {
+                        "target_control_requested": bool(right.target_control_requested),
+                        "target_control_source": right.target_control_source,
+                        "rdk_ready": bool(right.rdk_ready),
+                        "effort_control_enabled": bool(right.effort_control_enabled),
+                    },
+                },
                 "stage3_task": stage3_task,
                 "scene_config": str(args.scene_config) if args.scene_config else None,
                 "scene_objects": scene_object_summary,
                 "reset": {
                     "last_seq": int(last_reset_seq),
                     "holding_start_pose": bool(left.reset_hold_cycles_remaining > 0 or right.reset_hold_cycles_remaining > 0),
+                    "state": (
+                        "moving"
+                        if left.reset_hold_cycles_remaining > 0 or right.reset_hold_cycles_remaining > 0
+                        else "succeeded"
+                        if last_reset_seq > 0
+                        else "idle"
+                    ),
+                    "ready": not bool(
+                        left.reset_hold_cycles_remaining > 0 or right.reset_hold_cycles_remaining > 0
+                    ),
                 },
             },
         }
@@ -862,23 +1243,29 @@ def run(args: argparse.Namespace) -> int:
     for camera in stage2_cameras:
         camera.initialize()
     initialize_like_startup("startup", reset_world=False)
+    _select_target(arms["left"].target_prim_path)
     if not args.manual_play:
         omni.timeline.get_timeline_interface().play()
 
     print(
         f"[FlexivDualTargetFrame] Ready. control_source=studio-bridge. physics_hz={physics_hz:g}. "
-        f"left={args.left_serial_number} right={args.right_serial_number}",
+        f"target_pose_hz={physics_hz / max(1, arms['left'].target_pose_gate.period_cycles):.3f}. "
+        f"left={args.left_serial_number} right={args.right_serial_number}. "
+        f"Drag {arms['left'].target_prim_path}; select {arms['right'].target_prim_path} for the right arm.",
         flush=True,
     )
 
     reset_needed = False
     frame_count = 0
-    rate_limiter = StepRateLimiter(physics_hz)
-    render_gate = TargetPosePublishGate.from_hz(float(args.render_hz), physics_freq=physics_hz)
     try:
         while simulation_app.is_running():
             frame_count += 1
-            world.step(render=render_gate.should_publish(frame_count))
+            # World batches physics_dt substeps internally until rendering_dt.
+            # At 2000/30 Hz this invokes the callback about 66-67 times per
+            # rendered frame without crossing Python's world.step boundary for
+            # every 0.5 ms physics tick.
+            world.step(render=True)
+            _update_quest_target_frames()
             publish_gateway_sample()
             if pending_reset_control is not None:
                 control = pending_reset_control
@@ -896,7 +1283,6 @@ def run(args: argparse.Namespace) -> int:
                 reset_needed = False
             if args.smoke_test and args.max_frames > 0 and frame_count >= args.max_frames:
                 break
-            rate_limiter.sleep()
     finally:
         try:
             world.remove_physics_callback("dual_target_frame_step")
@@ -906,6 +1292,7 @@ def run(args: argparse.Namespace) -> int:
             arm.target_pose_publisher.close()
         if quest_target_receiver is not None:
             quest_target_receiver.close()
+        rdk_status_receiver.close()
         if gateway_client is not None:
             gateway_client.close()
         if args.smoke_test:

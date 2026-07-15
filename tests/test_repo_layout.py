@@ -31,6 +31,7 @@ class RepoLayoutTests(unittest.TestCase):
             "SETUP.md",
             "configs",
             "datasets",
+            "docker",
             "docs",
             "flexiv_data_collection",
             "flexiv_sim_scenes",
@@ -51,6 +52,40 @@ class RepoLayoutTests(unittest.TestCase):
     def test_root_repo_does_not_keep_environment_links_or_generated_dirs(self):
         for name in ("isaacsim", "exts", "recordings", ".venv-grpc"):
             self.assertFalse((ROOT / name).exists(), name)
+
+    def test_dual_studio_guide_keeps_action_and_isaac_on_host(self):
+        guide = (ROOT / "docs/dual_arm_teleop_docker_guide_zh.md").read_text(encoding="utf-8")
+
+        self.assertIn('LEFT_ROBOT_SERIAL="Rizon4-qSaFLh"', guide)
+        self.assertIn('RIGHT_ROBOT_SERIAL="Rizon4-I0LIRN"', guide)
+        self.assertIn("--source-simulator simulator1", guide)
+        self.assertIn("Isaac Sim、双臂 Bridge、RDK streamer、gateway、Quest/fake sender 和 recorder 都运行在宿主机", guide)
+        self.assertIn("<enable>1</enable>", guide)
+        self.assertIn("externalEthernetConfig.xml", guide)
+
+    def test_dual_studio_container_does_not_run_host_rdk_streamer(self):
+        docker_root = ROOT / "docker/flexiv-studio"
+        dockerfile = (docker_root / "Dockerfile").read_text(encoding="utf-8")
+        compose = (docker_root / "compose.yaml").read_text(encoding="utf-8")
+        entrypoint = (docker_root / "entrypoint.sh").read_text(encoding="utf-8")
+        healthcheck = (docker_root / "healthcheck.sh").read_text(encoding="utf-8")
+        prepare_runtime = (docker_root / "prepare-runtime.sh").read_text(encoding="utf-8")
+
+        self.assertIn("127.0.0.1:${FLEXIV_STUDIO_VNC_PORT:-5902}:5900", compose)
+        self.assertNotIn("rdk_target_streamer", compose)
+        self.assertNotIn("rdk_target_streamer", entrypoint)
+        self.assertNotIn("rdk_target_streamer", healthcheck)
+        self.assertIn("--addamb=cap_sys_nice", entrypoint)
+        self.assertIn("exec -a flexiv-docker-robot-control", entrypoint)
+        self.assertIn("exec -a flexiv-docker-simulation", entrypoint)
+        self.assertIn("^flexiv-docker-robot-control", healthcheck)
+        self.assertIn("^flexiv-docker-simulation", healthcheck)
+        self.assertIn("setcap cap_sys_nice=ep /sbin/capsh", dockerfile)
+        self.assertIn("RobotControlApp exited; restarting the container runtime", entrypoint)
+        self.assertIn("FlexivSimulation exited; restarting the container runtime", entrypoint)
+        self.assertIn('"<enable>1</enable>"', prepare_runtime)
+        self.assertIn("externalEthernetConfig.xml", prepare_runtime)
+        self.assertIn("externalEthernetConfig.xml", healthcheck)
 
     def test_runtime_scripts_are_split_and_point_to_flexiv_quest_assets(self):
         expected = {
@@ -113,6 +148,7 @@ class RepoLayoutTests(unittest.TestCase):
                     "57681",
                     "--gateway-endpoint",
                     "tcp://127.0.0.1:5791",
+                    "--gpu-dynamics",
                 ]
             )
         )
@@ -121,6 +157,7 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("Rizon4-L", dual_command)
         self.assertIn("--right-serial-number", dual_command)
         self.assertIn("Rizon4-R", dual_command)
+        self.assertIn("--gpu-dynamics", dual_command)
 
     def test_external_rdk_target_streamer_uses_compatible_rdk_client(self):
         streamer = load_script("start_rdk_target_streamer.py")
@@ -133,6 +170,8 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertEqual(env["PYTHONPATH"].split(":")[:2], [str(compat_path), "existing"])
         self.assertIn("rdk_target_streamer.py", command[1])
         self.assertNotIn("--network-interface-whitelist", command)
+        self.assertIn("--no-clear-fault", command)
+        self.assertIn("--no-reconnect-on-error", command)
 
     def test_isaac_follow_startup_does_not_embed_rdk_client(self):
         follow = load_script("start_isaac_follow.py")
@@ -140,6 +179,13 @@ class RepoLayoutTests(unittest.TestCase):
 
         self.assertFalse(hasattr(follow, "build_env"))
         self.assertNotIn("--rdk-target-hz", command)
+
+    def test_stack_stop_covers_single_dual_and_quest_processes(self):
+        stop = load_script("stop_flexiv_stack.py")
+
+        self.assertIn("follow_ball_with_studio.py", stop.DEFAULT_NEEDLES)
+        self.assertIn("dual_follow_with_studio.py", stop.DEFAULT_NEEDLES)
+        self.assertIn("rizon4_quest_target_publisher.py", stop.DEFAULT_NEEDLES)
 
     def test_isaac_follow_startup_can_set_rdk_target_frequency(self):
         follow = load_script("start_isaac_follow.py")

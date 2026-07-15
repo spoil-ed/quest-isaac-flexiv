@@ -24,6 +24,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--examples-ext", type=Path, default=None)
     parser.add_argument("--manual-play", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--gpu-dynamics", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--physics-hz", type=float, default=None)
     parser.add_argument("--render-hz", type=float, default=None)
     parser.add_argument("--enable-quest-target-udp", action="store_true")
@@ -31,24 +32,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--quest-target-udp-port", type=int, default=None)
     parser.add_argument("--quest-target-max-age-sec", type=float, default=None)
     parser.add_argument("--quest-target-mode", choices=("absolute", "relative"), default="relative")
-    parser.add_argument("--quest-relative-orientation-mode", choices=("packet", "reference", "current"), default="packet")
+    parser.add_argument(
+        "--quest-relative-orientation-mode",
+        choices=("packet", "relative", "reference", "current"),
+        default="packet",
+    )
     parser.add_argument("--quest-axis-map", default=None)
     parser.add_argument("--quest-position-scale", type=float, default=1.0)
     parser.add_argument("--quest-position-deadband-m", type=float, default=None)
     parser.add_argument("--quest-workspace-min", default=None)
     parser.add_argument("--quest-workspace-max", default=None)
+    parser.add_argument("--quest-workspace-clipping", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--left-target-pose-udp-host", default=None)
     parser.add_argument("--left-target-pose-udp-port", type=int, default=None)
     parser.add_argument("--right-target-pose-udp-host", default=None)
     parser.add_argument("--right-target-pose-udp-port", type=int, default=None)
+    parser.add_argument("--left-rdk-status-udp-host", default=None)
+    parser.add_argument("--left-rdk-status-udp-port", type=int, default=None)
+    parser.add_argument("--right-rdk-status-udp-host", default=None)
+    parser.add_argument("--right-rdk-status-udp-port", type=int, default=None)
+    parser.add_argument("--rdk-status-max-age-sec", type=float, default=None)
     parser.add_argument("--target-pose-publish-hz", type=float, default=None)
+    parser.add_argument("--target-activation-position-tolerance-m", type=float, default=None)
+    parser.add_argument("--target-activation-orientation-tolerance-rad", type=float, default=None)
     parser.add_argument("--command-timeout-ms", type=int, default=None)
     parser.add_argument("--max-linear-speed-m-s", type=float, default=None)
     parser.add_argument("--max-angular-speed-rad-s", type=float, default=None)
-    parser.add_argument("--max-joint-speed-rad-s", type=float, default=None)
-    parser.add_argument("--max-target-drive-abs", type=float, default=None)
-    parser.add_argument("--max-target-drive-norm", type=float, default=None)
-    parser.add_argument("--target-drive-scale", type=float, default=None)
     parser.add_argument("--gateway-endpoint", default="")
     parser.add_argument("--gateway-fps", type=float, default=None)
     parser.add_argument("--gateway-jpeg-quality", type=int, default=None)
@@ -88,6 +97,7 @@ def build_command(args: argparse.Namespace) -> list[str]:
         command.append("--manual-play")
     if args.headless:
         command.append("--headless")
+    command.append("--gpu-dynamics" if args.gpu_dynamics else "--no-gpu-dynamics")
     for option, value in (
         ("--physics-hz", args.physics_hz),
         ("--render-hz", args.render_hz),
@@ -102,20 +112,24 @@ def build_command(args: argparse.Namespace) -> list[str]:
         ("--left-target-pose-udp-port", args.left_target_pose_udp_port),
         ("--right-target-pose-udp-host", args.right_target_pose_udp_host),
         ("--right-target-pose-udp-port", args.right_target_pose_udp_port),
+        ("--left-rdk-status-udp-host", args.left_rdk_status_udp_host),
+        ("--left-rdk-status-udp-port", args.left_rdk_status_udp_port),
+        ("--right-rdk-status-udp-host", args.right_rdk_status_udp_host),
+        ("--right-rdk-status-udp-port", args.right_rdk_status_udp_port),
+        ("--rdk-status-max-age-sec", args.rdk_status_max_age_sec),
         ("--target-pose-publish-hz", args.target_pose_publish_hz),
+        ("--target-activation-position-tolerance-m", args.target_activation_position_tolerance_m),
+        ("--target-activation-orientation-tolerance-rad", args.target_activation_orientation_tolerance_rad),
         ("--command-timeout-ms", args.command_timeout_ms),
         ("--max-linear-speed-m-s", args.max_linear_speed_m_s),
         ("--max-angular-speed-rad-s", args.max_angular_speed_rad_s),
-        ("--max-joint-speed-rad-s", args.max_joint_speed_rad_s),
-        ("--max-target-drive-abs", args.max_target_drive_abs),
-        ("--max-target-drive-norm", args.max_target_drive_norm),
-        ("--target-drive-scale", args.target_drive_scale),
         ("--gateway-fps", args.gateway_fps),
         ("--gateway-jpeg-quality", args.gateway_jpeg_quality),
     ):
         _maybe_extend(command, option, value)
     if args.enable_quest_target_udp:
         command.append("--enable-quest-target-udp")
+    command.append("--quest-workspace-clipping" if args.quest_workspace_clipping else "--no-quest-workspace-clipping")
     if args.gateway_endpoint:
         command.extend(["--gateway-endpoint", str(args.gateway_endpoint)])
     command.append("--coordinated-reset" if args.coordinated_reset else "--no-coordinated-reset")

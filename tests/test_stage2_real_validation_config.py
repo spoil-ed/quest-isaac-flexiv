@@ -107,6 +107,9 @@ class Stage2RealValidationConfigTests(unittest.TestCase):
             self.assertEqual(args.left_target_pose_udp_port, 6102)
             self.assertEqual(args.right_target_pose_udp_port, 6103)
             self.assertEqual(args.quest_target_udp_port, 6104)
+            self.assertEqual(args.left_rdk_status_udp_port, 57682)
+            self.assertEqual(args.right_rdk_status_udp_port, 57683)
+            self.assertFalse(args.rdk_clear_fault)
             self.assertEqual(args.scene_camera_names, ["cam_front"])
             self.assertEqual(args.scene_camera_keys, ["color_0"])
             self.assertEqual(args.repo_id_prefix, "local/stage2")
@@ -169,6 +172,70 @@ class Stage2RealValidationConfigTests(unittest.TestCase):
             self.assertEqual(args.joint_group, "ARM_SCENE")
             self.assertEqual(args.usd, tmp_path / "scene.usd")
             self.assertEqual(args.examples_ext, tmp_path / "examples")
+
+    def test_dual_isaac_app_manual_frame_mode_does_not_enable_quest_receiver(self):
+        dual_app = load_dual_app()
+
+        manual_args = dual_app.parse_args([])
+        quest_args = dual_app.parse_args(["--enable-quest-target-udp"])
+
+        self.assertFalse(manual_args.enable_quest_target_udp)
+        self.assertTrue(quest_args.enable_quest_target_udp)
+        self.assertEqual(manual_args.left_rdk_status_udp_port, 57682)
+        self.assertEqual(manual_args.right_rdk_status_udp_port, 57683)
+
+    def test_dual_app_batches_physics_substeps_and_keeps_raw_studio_torque(self):
+        source = DUAL_APP.read_text(encoding="utf-8")
+
+        self.assertIn("world.step(render=True)", source)
+        self.assertNotIn("StepRateLimiter", source)
+        self.assertNotIn("valid_target_drives_or_none", source)
+        self.assertNotIn("target_drive_scale", source)
+        self.assertIn("arm.robot.apply_torques(target_drives)", source)
+
+    def test_quest_mode_does_not_author_usd_inside_the_target_update_branch(self):
+        source = DUAL_APP.read_text(encoding="utf-8")
+        quest_branch = source.split(
+            "elif arm.latest_quest_target is not None:",
+            maxsplit=1,
+        )[1].split("if not reset_hold_active and not arm.target_control_requested:", maxsplit=1)[0]
+
+        self.assertIn("arm.quest_goal_pose_base_tcp", quest_branch)
+        self.assertNotIn("sync_target_to_base_tcp_pose", quest_branch)
+        self.assertNotIn("arm.target_frame.set_world_pose", quest_branch)
+
+    def test_quest_target_frame_is_updated_on_the_render_loop(self):
+        source = DUAL_APP.read_text(encoding="utf-8")
+        render_update = source.split(
+            "def _update_quest_target_frames() -> None:",
+            maxsplit=1,
+        )[1].split("def _update_rdk_statuses()", maxsplit=1)[0]
+        render_loop = source.split("while simulation_app.is_running():", maxsplit=1)[1]
+
+        self.assertIn("arm.rdk_world_calibration", render_update)
+        self.assertIn("calibration.rdk_pose_to_world", render_update)
+        self.assertIn("arm.target_frame.set_world_pose", render_update)
+        self.assertIn("world.step(render=True)", render_loop)
+        self.assertIn("_update_quest_target_frames()", render_loop)
+
+    def test_quest_relative_anchor_uses_rdk_tcp_not_isaac_world_conversion(self):
+        source = DUAL_APP.read_text(encoding="utf-8")
+        relative_branch = source.split(
+            "elif arm.latest_quest_target is not None:",
+            maxsplit=1,
+        )[1].split("if not reset_hold_active and not arm.target_control_requested:", maxsplit=1)[0]
+
+        self.assertIn("arm.rdk_current_pose_base_tcp", relative_branch)
+        self.assertIn("arm.rdk_reference_pose_base_tcp", relative_branch)
+        self.assertIn('if args.quest_target_mode == "relative":', relative_branch)
+        self.assertNotIn("_current_pose_base_tcp(arm)", relative_branch)
+
+    def test_quest_release_holds_the_last_raw_goal_and_keeps_limiting_toward_it(self):
+        source = DUAL_APP.read_text(encoding="utf-8")
+
+        self.assertIn('arm.target_control_source == "quest"', source)
+        self.assertIn("control_pose_base_tcp = list(arm.quest_goal_pose_base_tcp)", source)
+        self.assertIn("arm.limiter.limit(\n                arm.quest_goal_pose_base_tcp", source)
 
 
 if __name__ == "__main__":

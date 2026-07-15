@@ -296,6 +296,10 @@ def wait_for_reset(
         state = str(status.get("state", ""))
         if state in ("idle", "succeeded") and bool(status.get("ready", True)):
             return status
+        # Backward compatibility for the original dual-arm bridge status,
+        # which exposed only whether it was still holding the start pose.
+        if not state and "holding_start_pose" in status and not bool(status["holding_start_pose"]):
+            return status
         if state == "failed" and expected_seq is not None:
             raise RuntimeError(str(status.get("error") or f"reset seq={seq} failed"))
         if state == "failed":

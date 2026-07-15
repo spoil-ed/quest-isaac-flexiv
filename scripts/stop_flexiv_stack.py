@@ -16,6 +16,8 @@ import flexiv_runtime
 DEFAULT_NEEDLES = [
     "rdk_target_streamer.py",
     "follow_ball_with_studio.py",
+    "dual_follow_with_studio.py",
+    "rizon4_quest_target_publisher.py",
     "FlexivSimulation",
     "RobotControlApp",
     "FlexivElementsStudio",

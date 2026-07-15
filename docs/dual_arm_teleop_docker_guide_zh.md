@@ -1,500 +1,253 @@
-# Quest Isaac Flexiv 双臂遥操 Docker 外置说明
+# Flexiv 双臂 Studio：宿主机 + Docker
 
-本文档放在 `quest-isaac-flexiv` 仓库外，用于指导用户配置双臂遥操所需的 Flexiv Elements Studio Docker 会话，并和旧仓库 Stage2 双臂控制、录制、转换流程配合使用。
-
-适用主仓库：
-
-```bash
-/data/qiming/quest_flexiv/quest-isaac-flexiv
-```
-
-## 1. 总体边界
-
-Docker 在本流程中只负责隔离两套 Flexiv Elements Studio GUI 会话：
+Stage2/Stage3 需要两套相互独立的 Flexiv Elements Studio runtime。同一宿主机直接启动两套 Studio 会共享固定端口和用户数据，因此本项目采用以下拓扑：
 
 ```text
-flexiv-studio-left  -> VNC 127.0.0.1:5900 -> simulator0 / left serial
-flexiv-studio-right -> VNC 127.0.0.1:5902 -> simulator1 / right serial
+宿主机 action ─┬─ RDK 左臂 ─ Docker Studio（qSaFLh）─┐
+               └─ RDK 右臂 ─ 宿主机 Studio（I0LIRN）─┴─ SimPlugin ─ 宿主机双臂 Isaac Bridge
 ```
 
-以下组件仍建议跑在宿主机：
+这与 Flexiv 官方多机器人方案一致：Docker 容器替代官方步骤中的第二台 Ubuntu 电脑，Docker bridge 替代两机之间的有线网络。Isaac Sim、双臂 Bridge、RDK streamer、gateway、Quest/fake sender 和 recorder 都运行在宿主机；Docker 只隔离左臂 Studio、RobotControlApp、FlexivSimulation 和显示会话。不要再启动两个 Studio 容器。
 
-- Isaac Sim 6.0.1 和 `dual_follow_with_studio.py`
-- 本仓库 Stage2 gateway、recorder、converter、validator
-- 两个 `rdk_target_streamer.py`
-- Quest publisher 或 fake Quest sender
+数据是双向流动的：Isaac Bridge 经 SimPlugin 向两套控制器发布机器人状态，两套控制器再把 `target_drives` 返回给同一个 Bridge；宿主机 action 则经两个 RDK streamer 分别送入左右控制器。
 
-这样做的原因是 Isaac Sim 对 GPU、驱动、扩展路径和 `flexivsimplugin` 版本较敏感，而 Docker 的主要收益是把两套 Studio 用户数据、显示会话和 VNC 窗口隔离开。
+Docker 模板位于 `docker/flexiv-studio/`。Flexiv 原厂程序受许可证约束，不提交到仓库；准备脚本会将用户已有的 Studio 复制到已忽略的 `.deps/docker_studio/`。
 
-当前旧仓库 Stage2 已具备双臂 fake 闭环和双臂录制验证能力；真实 Quest 双手遥操还处在脚本组合阶段。`rizon4_quest_target_publisher.py` 每个进程只发布一个 `side`，而它内部的 TeleVuer 服务默认使用固定 `8012` 端口，因此双 publisher 同机并行需要实际端口验证或后续改造成单进程双手 publisher。本文档会分别标明“已稳定验证路径”和“真实 Quest 使用注意事项”。
+## 1. 前置条件
 
-网络上有一个硬限制：不要把两套 Studio 容器改成 `network_mode: host`。两套 Studio 会在各自命名空间内使用相同的内部端口，例如 `127.0.0.1:17002` 一类服务；共享 host network 时第二套会话很容易因为端口占用直接退出。默认 compose 只把 VNC 映射到宿主机，这是最稳的隔离形态。
+- Linux x86_64 和可用的 NVIDIA 驱动。
+- Docker Engine、Compose v2 和 NVIDIA Container Toolkit。
+- 一套已能在宿主机运行的 Flexiv Elements Studio。
+- 在仓库根目录执行本文命令。
+- 项目 Python 默认使用 `conda activate isaacsim` 后的环境。
 
-如果宿主机上的 RDK streamer 无法通过 serial 找到容器内 Studio，请优先按第 11 节排查 Remote Mode 和 serial；仍然失败时，有三条路线：
-
-- 临时使用两套宿主机/虚拟机 Studio 会话做验收。
-- 识别 RobotControlApp/RDK 实际需要的端口后，在 compose 中显式映射左右容器端口，不要切到 host network。
-- 把对应侧的 RDK streamer 也放进同一个 Studio 容器内运行，但这需要额外挂载本仓库、Python/RDK 环境和脚本，不属于当前旧仓库默认路径。
-
-## 2. 前置条件
-
-宿主机需要具备：
-
-- Docker Engine 和 Docker Compose v2
-- 可运行的 Flexiv Elements Studio 安装目录
-- 已配置好的 `simulator0` 和 `simulator1`
-- `quest-isaac-flexiv` 的 Stage2 依赖已安装
-- Meta Quest 与宿主机在同一局域网
-
-建议先定义这些变量：
+Ubuntu 可以安装发行版 Docker 包：
 
 ```bash
-export QIF_ROOT=/data/qiming/quest_flexiv/quest-isaac-flexiv
-export SOURCE_STUDIO=/data/qiming/FlexivElementsStudio
-export SESSION_ROOT=/data/qiming/flexiv_studio_docker
-export DOCKER_ROOT=/data/qiming/quest_flexiv/flexiv-studio-docker
-
-export LEFT_ROBOT_SERIAL=Rizon4-VIHhZM
-export RIGHT_ROBOT_SERIAL=Rizon4-WE7ssd
-export HOST_IP=192.168.32.11
-export ISAAC_PYTHON=/path/to/isaacsim/bin/python
-export ISAACSIM_ROOT=/path/to/isaacsim
-export FLEXIV_RDK_PYTHON=/path/to/rdk_or_isaac_python
+sudo apt-get update
+sudo apt-get install -y docker.io docker-buildx docker-compose-v2
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
 ```
 
-`SOURCE_STUDIO` 必须指向含有这些文件的目录：
+重新登录或执行 `newgrp docker` 使用户组生效。配置 NVIDIA runtime：
+
+```bash
+sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+验证：
+
+```bash
+docker compose version
+docker info --format '{{json .Runtimes}}'
+nvidia-ctk cdi list
+```
+
+输出应包含 `nvidia` runtime 和至少一个 `nvidia.com/gpu=...` 设备。
+
+## 2. 设置本机参数
+
+外部安装路径只通过环境变量或 CLI 传入，不写入仓库配置：
+
+```bash
+conda activate isaacsim
+export STUDIO_ROOT="/path/to/FlexivElementsStudio"
+export ISAAC_PYTHON="/path/to/isaacsim/python"
+export LEFT_ROBOT_SERIAL="Rizon4-qSaFLh"
+export RIGHT_ROBOT_SERIAL="Rizon4-I0LIRN"
+```
+
+RDK alias 是 `Rizon4-` 加机械臂硬件序列号最后六位。可用下面的命令读取宿主机模拟器硬件序列号：
+
+```bash
+find "$STUDIO_ROOT/user_data_ui/simDir/simulator0" \
+  -mindepth 2 -maxdepth 2 -name arm_driver_param.xml -printf '%h\n'
+```
+
+宿主机和容器必须使用不同的六位后缀。
+
+## 3. 准备容器侧 Studio 数据
+
+下面的命令只复制宿主机 `simulator1` 的 qSaFLh 数据到隔离副本；副本中的其他 simulator 会被删除：
+
+```bash
+docker/flexiv-studio/prepare-runtime.sh \
+  --studio-root "$STUDIO_ROOT" \
+  --source-simulator simulator1 \
+  --target-suffix "${LEFT_ROBOT_SERIAL#Rizon4-}" \
+  --force
+```
+
+默认输出目录是：
 
 ```text
-FlexivElementsStudio
-RobotControlApp
-FlexivSimulation
-user_data_ui/simDir/simulator0/
-user_data_ui/simDir/simulator1/
+.deps/docker_studio/FlexivElementsStudio/
 ```
 
-如果当前 Studio 还没有 `simulator1`，先在宿主机 Studio 中创建第二台 Rizon4 模拟机器人，并确认两台机器人都能进入 Remote Mode。
+脚本不会修改宿主机 Studio。结束时会同时打印宿主机 alias 和容器 alias；先确认它们不同。
 
-## 3. 准备 Docker 模板
-
-当前 `quest-isaac-flexiv` 仓库不提交 Dockerfile。可以把已有的 Studio Docker 模板复制到外层目录，作为本项目的外置 Docker 环境：
+## 4. 构建并启动左臂容器
 
 ```bash
-mkdir -p "$DOCKER_ROOT"
-rsync -a /data/qiming/flexiv_studio_pipeline/docker/flexiv-studio/ "$DOCKER_ROOT/"
+export FLEXIV_ARM_SERIAL="A02L-00-M6-${LEFT_ROBOT_SERIAL#Rizon4-}"
+docker compose -f docker/flexiv-studio/compose.yaml build
+docker compose -f docker/flexiv-studio/compose.yaml up -d
+docker compose -f docker/flexiv-studio/compose.yaml ps
 ```
 
-如果没有 `/data/qiming/flexiv_studio_pipeline`，需要在 `$DOCKER_ROOT` 下准备等价内容：
+容器使用独立的 `172.28.0.0/24` bridge，避免和宿主机 Studio 的固定端口冲突。VNC 只发布到宿主机回环地址 `127.0.0.1:5902`，没有密码，不应改成公网监听。
 
-- `Dockerfile`：基于 Ubuntu 22.04/CUDA，安装 Xvfb、openbox、x11vnc 和 Qt/X11 运行库
-- `entrypoint.sh`：启动 Xvfb、openbox、x11vnc，然后执行 `./FlexivElementsStudio -p ubuntu_pc`
-- `docker-compose.yml`：定义 `flexiv-studio-left` 和 `flexiv-studio-right` 两个服务
-
-关键 compose 语义如下：
-
-```yaml
-services:
-  flexiv-studio-left:
-    image: flexiv-studio-vnc:local
-    volumes:
-      - ${SESSION_ROOT}/left/FlexivElementsStudio:/opt/FlexivElementsStudio:rw
-    ports:
-      - "127.0.0.1:5900:5900"
-    environment:
-      DISPLAY_NUM: "20"
-      VNC_PORT: "5900"
-      STUDIO_DIR: /opt/FlexivElementsStudio
-      FLEXIV_PHYSICS_ENGINE: external
-
-  flexiv-studio-right:
-    image: flexiv-studio-vnc:local
-    volumes:
-      - ${SESSION_ROOT}/right/FlexivElementsStudio:/opt/FlexivElementsStudio:rw
-    ports:
-      - "127.0.0.1:5902:5902"
-    environment:
-      DISPLAY_NUM: "21"
-      VNC_PORT: "5902"
-      STUDIO_DIR: /opt/FlexivElementsStudio
-      FLEXIV_PHYSICS_ENGINE: external
-```
-
-`FLEXIV_PHYSICS_ENGINE=external` 表示 Studio 使用 External/Isaac Sim 物理后端。若 Studio 包内有 `bin/FlexivSimulation_external`，entrypoint 会把它切换为当前 `FlexivSimulation`。
-
-## 4. 生成左右 Studio 会话
-
-将一份 Studio 安装复制成左右两个独立会话：
+查看界面和日志：
 
 ```bash
-mkdir -p "$SESSION_ROOT/left" "$SESSION_ROOT/right"
-
-rsync -a --delete --exclude 'log/*' \
-  "$SOURCE_STUDIO/" "$SESSION_ROOT/left/FlexivElementsStudio/"
-
-rsync -a --delete --exclude 'log/*' \
-  "$SOURCE_STUDIO/" "$SESSION_ROOT/right/FlexivElementsStudio/"
-
-mkdir -p \
-  "$SESSION_ROOT/left/FlexivElementsStudio/log" \
-  "$SESSION_ROOT/right/FlexivElementsStudio/log"
+sudo apt-get install -y tigervnc-viewer
+vncviewer 127.0.0.1:5902
+docker compose -f docker/flexiv-studio/compose.yaml logs -f studio-left
+docker inspect --format '{{.State.Health.Status}}' flexiv-studio-left
 ```
 
-检查左右 simulator 资源：
+entrypoint 默认启动以下进程：
+
+- Xvfb、openbox 和 x11vnc；
+- FlexivElementsStudio；
+- RobotControlApp；
+- FlexivSimulation。
+
+如需只打开 GUI 并手工配置，启动前设置 `FLEXIV_AUTO_START_RUNTIME=0`。
+
+如果 Docker Hub 不可达，可以从当前 Ubuntu apt 镜像制作本地 `ubuntu:24.04` 基础镜像，再重新 build：
 
 ```bash
-find "$SESSION_ROOT/left/FlexivElementsStudio/user_data_ui/simDir/simulator0" \
-  -maxdepth 3 -name arm_driver_param.xml -print
-
-find "$SESSION_ROOT/right/FlexivElementsStudio/user_data_ui/simDir/simulator1" \
-  -maxdepth 3 -name arm_driver_param.xml -print
+sudo apt-get install -y debootstrap
+sudo debootstrap --variant=minbase noble /tmp/flexiv-ubuntu-rootfs \
+  http://mirrors.tuna.tsinghua.edu.cn/ubuntu
+sudo tar -C /tmp/flexiv-ubuntu-rootfs -cf /tmp/flexiv-ubuntu-rootfs.tar .
+sudo chown "$USER:$USER" /tmp/flexiv-ubuntu-rootfs.tar
+docker import /tmp/flexiv-ubuntu-rootfs.tar ubuntu:24.04
 ```
 
-推荐约定：
-
-- left 容器使用 `simulator0`
-- right 容器使用 `simulator1`
-- left serial 与 Stage2 scene config 中 left serial 一致
-- right serial 与 Stage2 scene config 中 right serial 一致
-
-默认 Stage2 scene 是：
+## 5. 启动宿主机右臂 Studio
 
 ```bash
-$QIF_ROOT/configs/scenes/dual_rizon4_cam_front.yaml
+python scripts/start_elements_studio_ui.py --studio-root "$STUDIO_ROOT"
+python scripts/start_robot_control_app.py --studio-root "$STUDIO_ROOT"
+python scripts/start_flexiv_simulation.py --studio-root "$STUDIO_ROOT"
 ```
 
-其中本机样例为：
+冷启动时宿主机使用 `simulator0`（I0LIRN），Docker 使用 `simulator1`（qSaFLh）。脚本会检测已经存在的同名进程。
 
-```text
-left  Rizon4-VIHhZM
-right Rizon4-WE7ssd
-```
+## 6. 验证两套 runtime
 
-实际机器不同的时候，改 scene config 或运行脚本时用 CLI 覆盖 serial，左右两边必须全链路一致。
-
-## 5. 启动 Studio Docker
-
-构建镜像：
+首先检查进程和容器：
 
 ```bash
-cd "$DOCKER_ROOT"
-SESSION_ROOT="$SESSION_ROOT" docker compose --project-name flexiv-dual-studio build
+python scripts/flexiv_stack_status.py
+docker compose -f docker/flexiv-studio/compose.yaml ps
+docker exec flexiv-studio-left sh -lc \
+  "pgrep -af 'FlexivElementsStudio|RobotControlApp|FlexivSimulation'"
 ```
 
-启动两个 Studio 容器：
+`prepare-runtime.sh` 会把容器 simulator 对齐为与宿主机相同的 External/Ethernet 连接方式。启动 RDK 前检查两侧配置：
 
 ```bash
-SESSION_ROOT="$SESSION_ROOT" docker compose --project-name flexiv-dual-studio up -d \
-  flexiv-studio-left flexiv-studio-right
+rg -n '<enable>|<interface_config_file>' \
+  "$STUDIO_ROOT/user_data_ui/simDir/simulator0/user_data/settings/robotExtInterfaceCfg.xml" \
+  .deps/docker_studio/FlexivElementsStudio/user_data_ui/simDir/simulator1/user_data/settings/robotExtInterfaceCfg.xml
 ```
 
-检查状态：
+两侧都必须是 `<enable>1</enable>` 和 `externalEthernetConfig.xml`。旧版准备脚本生成的 runtime 如果仍是 External IO disabled，重新运行第 3 节的 `prepare-runtime.sh --force`，然后重建容器；不需要把 RDK streamer 放入容器。
 
-```bash
-docker compose --project-name flexiv-dual-studio ps
-docker logs --tail 80 flexiv-studio-left
-docker logs --tail 80 flexiv-studio-right
-```
+手工在 Isaac GUI 中拖动左右 Target Frame 时，不要给 dual app 传 `--enable-quest-target-udp`；此时 Frame 世界位姿会转换为左右 `pose_base_tcp_des`，经宿主机两个 RDK streamer 发送。启用 Quest UDP 后，控制源切换为 Quest packet，程序会在没有新 packet 时暂停用户目标发布。
 
-用 VNC 客户端连接：
+双臂控制就是两套独立的 Stage1 TargetFrame 回路，外置 streamer 是进程边界，Docker 只隔离左臂 Studio。两个 Studio runtime 就绪后，先启动两个 RDK streamer，再启动 Isaac。手动模式下，程序先把两个可见 TargetFrame 对齐到各自末端；streamer 随即锁存 Studio/RDK 实际 TCP，并用“Isaac 末端世界位姿 ↔ RDK TCP”这一对参考位姿直接标定坐标变换。收到 operational 回执后才在 2000 Hz 原样施加对应 SimPlugin torque；用户实际移动 Frame 后才释放标定后的目标。
 
-```text
-left  127.0.0.1:5900
-right 127.0.0.1:5902
-```
-
-在两个 VNC 窗口中分别确认：
-
-- 左窗口选择或连接 `simulator0`
-- 右窗口选择或连接 `simulator1`
-- Physics Engine 是 `External` 或 `Isaac Sim`
-- Remote Mode 选择 `Ethernet`
-- 左右 serial 与 `LEFT_ROBOT_SERIAL`、`RIGHT_ROBOT_SERIAL` 一致
-- 两边没有 fault；如有 fault，先在 Studio 中清除
-
-这一步完成后，Docker 侧只需要保持两个 VNC/Studio 会话在线。
-
-## 6. 配置旧仓库 Stage2
-
-进入主仓库：
-
-```bash
-cd "$QIF_ROOT"
-```
-
-检查 Stage2 配置：
-
-```bash
-sed -n '1,160p' configs/scenes/dual_rizon4_cam_front.yaml
-sed -n '1,180p' configs/pipelines/stage2_dual_rizon4_data_collection.yaml
-```
-
-重点检查：
-
-- `robots[side=left].serial_number`
-- `robots[side=right].serial_number`
-- `quest_target.port`，默认 `57679`
-- `target_pose.left.port`，默认 `57680`
-- `target_pose.right.port`，默认 `57681`
-- `gateway.sample_endpoint`，默认 `tcp://127.0.0.1:5790`
-- `gateway.bridge_endpoint`，默认 `tcp://127.0.0.1:5791`
-
-若本机 serial 不同，优先通过 CLI 覆盖：
-
-```bash
---left-serial-number "$LEFT_ROBOT_SERIAL" \
---right-serial-number "$RIGHT_ROBOT_SERIAL"
-```
-
-## 7. 双臂 fake 闭环验收
-
-在 Studio Docker 已经打开 Remote Mode 后，可以先跑 fake 双臂验收：
-
-```bash
-cd "$QIF_ROOT"
-
-python scripts/run_stage2_dual_rizon4_real_validation.py \
-  --config configs/pipelines/stage2_dual_rizon4_data_collection.yaml \
-  --left-serial-number "$LEFT_ROBOT_SERIAL" \
-  --right-serial-number "$RIGHT_ROBOT_SERIAL" \
-  --rdk-python "$FLEXIV_RDK_PYTHON" \
-  --isaac-python "$ISAAC_PYTHON" \
-  --isaacsim-root "$ISAACSIM_ROOT"
-```
-
-该命令会启动：
-
-- 本仓库 Stage2 gateway
-- 两个 RDK target streamer
-- 双臂 Isaac app
-- fake dual Quest sender
-- recorder
-- LeRobot-style converter
-- strict dual validator
-
-成功后会输出类似：
-
-```text
-datasets/stage1_records/quest_isaac_flexiv_stage2_dual_rizon4_real_<stamp>/
-├── raw/episode_001/data.json
-├── logs/
-├── stage2_dual_rizon4_real_validation.json
-└── stage2_dual_rizon4_real_summary.json
-
-datasets/lerobot/qiming/quest_isaac_flexiv_stage2_dual_rizon4_<stamp>/
-└── videos/observation.images.cam_front/chunk-000/file-000.mp4
-```
-
-fake 验收通过只能说明旧仓库双臂控制、录制和转换链路可用；正式遥操前仍需检查 Quest publisher、证书和局域网访问。
-
-## 8. Quest 双臂遥操使用
-
-当前 `rizon4_quest_target_publisher.py` 是单侧控制器发布器。双臂遥操需要开两个 publisher 进程，分别发送 `side=left` 和 `side=right` 到同一个 Isaac Quest UDP endpoint。
-
-先生成或确认 Quest HTTPS 证书：
-
-```bash
-cd "$QIF_ROOT"
-mkdir -p configs/xr_teleoperate
-
-openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-  -keyout configs/xr_teleoperate/key.pem \
-  -out configs/xr_teleoperate/cert.pem \
-  -subj "/CN=$HOST_IP" \
-  -addext "subjectAltName=IP:$HOST_IP"
-```
-
-启动 Stage2 控制链路时，可以拆分启动，也可以参考验收脚本。手动拆分的核心 Isaac 启动命令是：
+Isaac 外循环也按 30 Hz 渲染，但一次 `world.step(render=True)` 会在内部执行约 66–67 个 0.5 ms 物理子步。每个物理子步都先向两个 SimPlugin 节点发送同一周期的关节状态，再分别等待并原样施加两个 Studio 返回的 `target_drives`。力矩命令不做抽帧、合并、平均、缩放或双臂专属阈值拒绝；因此渲染和目标更新降频不会改变 Studio 控制器使用的物理积分步长。
 
 ```bash
 python scripts/start_dual_isaac_follow.py \
   --isaac-python "$ISAAC_PYTHON" \
   --scene-config configs/scenes/dual_rizon4_cam_front.yaml \
+  --no-gpu-dynamics \
   --left-serial-number "$LEFT_ROBOT_SERIAL" \
   --right-serial-number "$RIGHT_ROBOT_SERIAL" \
-  --enable-quest-target-udp \
-  --quest-target-udp-port 57679 \
+  --no-manual-play \
+  --physics-hz 2000 \
+  --render-hz 30 \
+  --target-pose-publish-hz 30 \
   --left-target-pose-udp-port 57680 \
   --right-target-pose-udp-port 57681 \
-  --quest-relative-orientation-mode reference \
-  --quest-position-scale 1.0 \
-  --quest-position-deadband-m 0.0 \
-  --gateway-endpoint tcp://127.0.0.1:5791 \
-  --gateway-fps 30
+  --left-rdk-status-udp-port 57682 \
+  --right-rdk-status-udp-port 57683
 ```
 
-左手 publisher：
+Isaac 的 GUI/RTX 渲染仍使用 NVIDIA GPU；`--no-gpu-dynamics` 仅让 PhysX 沿用 Stage1 的 CPU 求解，避免这个小型 2000 Hz 场景承担逐步 CPU/GPU 同步开销。不要为了提高 GUI 帧率降低 `--physics-hz`，应保持 2000 Hz 并调整 `--render-hz` 和 `--target-pose-publish-hz`。
+
+分别启动两个 RDK target streamer。两者都应进入 operational 状态，不能持续打印“robot not found”：
 
 ```bash
-.venv-quest/bin/python scripts/rizon4_quest_target_publisher.py \
-  --host-ip "$HOST_IP" \
+python scripts/start_rdk_target_streamer.py \
+  --python "$ISAAC_PYTHON" \
   --serial-number "$LEFT_ROBOT_SERIAL" \
-  --udp-host 127.0.0.1 \
-  --udp-port 57679 \
-  --side left \
-  --enable-button squeeze \
-  --axis-map=-z,-x,y \
-  --position-delta-scale 1.0 \
-  --position-deadband 0.0 \
-  --rate-hz 30
-```
+  --port 57680 \
+  --status-port 57682
 
-右手 publisher：
-
-```bash
-.venv-quest/bin/python scripts/rizon4_quest_target_publisher.py \
-  --host-ip "$HOST_IP" \
+python scripts/start_rdk_target_streamer.py \
+  --python "$ISAAC_PYTHON" \
   --serial-number "$RIGHT_ROBOT_SERIAL" \
-  --udp-host 127.0.0.1 \
-  --udp-port 57679 \
-  --side right \
-  --enable-button squeeze \
-  --axis-map=-z,-x,y \
-  --position-delta-scale 1.0 \
-  --position-deadband 0.0 \
-  --rate-hz 30
+  --port 57681 \
+  --status-port 57683
+
+tail -f logs/rdk_target_streamer*.stderr.log
 ```
 
-两个 publisher 都会打印 Quest 浏览器地址。若两个进程都尝试占用同一个 HTTPS/Vuer 端口而失败，可先只运行一个 publisher 做单侧实机遥操，或将第二个 publisher 改造为复用同一个 TeleVuer/WebXR 会话后再用于正式双手遥操。当前旧仓库原生脚本层面的稳定方案是 fake 双臂和单 publisher 单侧控制；双 publisher 同机并行需要实际端口占用验证。
+正常日志顺序是：两个 streamer 开始监听、两个 `SimPlugin connected`、TargetFrame 初始化到末端、两个 `latched current TCP reference`、两个 `calibrated ... RDK TCP reference`、RDK operational、两侧进入 effort。此时只保持当前 TCP；拖动某个 Frame 后才出现该侧 `target control armed` 并释放用户目标。若出现 `joint torque exceeds the limit`，streamer 会发出 not-ready 状态并锁存退出；不要循环清故障。异常退出后宿主机右臂可能残留 `/dev/shm/*I0LIRN*`；仅在确认宿主机 RobotControlApp 和 FlexivSimulation 已停止后删除这些临时共享内存，再冷启动右臂 runtime。重启 Docker 容器会自动清理左臂容器内的共享内存。
 
-## 9. 录制、转换与视频
-
-启动 gateway：
+确认两侧 External/Ethernet 配置相同后，如果宿主机 RDK 仍无法发现容器 simulator，再检查网络：
 
 ```bash
-python scripts/start_data_gateway.py \
-  --backend bridge \
-  --sample-endpoint tcp://127.0.0.1:5790 \
-  --bridge-endpoint tcp://127.0.0.1:5791 \
-  --fps 30 \
-  --image-size 640x480 \
-  --camera-keys color_0
+ip address show flexiv-studio-bridge
+ping -c 1 172.28.0.2
+docker logs flexiv-studio-left
 ```
 
-启动 recorder：
+发现协议可能依赖网卡广播。此时不要改用 `network_mode: host`，否则两套固定端口会再次冲突；应确认 RDK 未绑定单一物理网卡，并允许 Docker bridge 上的 UDP 流量。
+
+## 7. 运行 Stage3
+
+两套 Studio 都在线且 RDK 能识别两个 alias 后，停止上一步独立测试的 streamer，避免端口被重复占用：
 
 ```bash
-python scripts/record_unitree_json.py \
-  --gateway-endpoint tcp://127.0.0.1:5790 \
-  --task-name dual_teleop_task \
-  --output-root datasets/stage1_records \
-  --fps 30 \
-  --episodes 10 \
-  --image-size 640x480
-```
-
-recorder 快捷键：
-
-- `s`：开始或继续
-- `e`：暂停；暂停后再按一次保存
-- `d`：丢弃当前 episode
-- `r`：请求 reset
-- `q`：退出
-
-转换为 LeRobot-style dataset：
-
-```bash
-python scripts/convert_unitree_json_to_lerobot.py \
-  --raw-dir datasets/stage1_records/dual_teleop_task \
-  --repo-id qiming/dual_teleop_task \
-  --output-root datasets/lerobot \
-  --fps 30
-```
-
-严格验证双臂数据和 H264 MP4：
-
-```bash
-python scripts/validate_data_artifacts.py \
-  --raw-dir datasets/stage1_records/dual_teleop_task \
-  --dataset-root datasets/lerobot/qiming/dual_teleop_task \
-  --strict-dual-arm \
-  --expected-left-serial "$LEFT_ROBOT_SERIAL" \
-  --expected-right-serial "$RIGHT_ROBOT_SERIAL" \
-  --required-camera-names cam_front \
-  --required-camera-keys color_0 \
-  --min-left-q-delta 0.005 \
-  --min-right-q-delta 0.005 \
-  --min-left-torque-norm 1e-8 \
-  --min-right-torque-norm 1e-8 \
-  --min-servo-cycle-delta 5 \
-  --expected-video-fps 30
-```
-
-MP4 默认位置：
-
-```text
-datasets/lerobot/qiming/dual_teleop_task/videos/observation.images.cam_front/chunk-000/file-000.mp4
-```
-
-## 10. 停止与清理
-
-停止旧仓库运行进程：
-
-```bash
-cd "$QIF_ROOT"
 python scripts/stop_flexiv_stack.py
 ```
 
-停止 Docker Studio：
+这不会停止 Docker 容器。随后运行 README 主线中的首个 Stage3 场景：
 
 ```bash
-cd "$DOCKER_ROOT"
-SESSION_ROOT="$SESSION_ROOT" docker compose --project-name flexiv-dual-studio stop
+conda activate isaacsim
+python scripts/run_stage3_sim_scene_validation.py \
+  --config configs/pipelines/stage3_pick_place_redblock_dual.yaml \
+  --left-serial-number "$LEFT_ROBOT_SERIAL" \
+  --right-serial-number "$RIGHT_ROBOT_SERIAL"
 ```
 
-完全删除容器但保留左右 Studio 会话数据：
+成功标准包括：左右 RDK 都 operational、两臂状态都有更新、力矩不是全零、录制和 LeRobot 转换完成。仅能加载 Isaac 场景但 RDK 找不到 robot，不算 Stage3 完成。
+
+## 8. 停止与重建
+
+停止项目进程和右臂容器：
 
 ```bash
-SESSION_ROOT="$SESSION_ROOT" docker compose --project-name flexiv-dual-studio down
+python scripts/stop_flexiv_stack.py
+docker compose -f docker/flexiv-studio/compose.yaml down
 ```
 
-会话数据保留在：
-
-```text
-/data/qiming/flexiv_studio_docker/left/FlexivElementsStudio
-/data/qiming/flexiv_studio_docker/right/FlexivElementsStudio
-```
-
-## 11. 常见问题
-
-### VNC 打开但没有机器人
-
-检查左右会话是否复制了完整 `user_data_ui/simDir`，并确认 VNC 中选中了正确 simulator。左侧应使用 `simulator0`，右侧应使用 `simulator1`。
-
-### RDK streamer 连接不到机器人
-
-检查：
-
-- 两个 VNC 中 Remote Mode 是否已经打开
-- serial 是否和命令行、scene config 完全一致
-- Studio 是否处于 External/Isaac Sim physics engine
-- Docker 容器是否仍在运行
-
-### 视频能生成但机械臂不动
-
-检查：
-
-- `dual_follow_with_studio.py` 日志中是否出现 Stage2 gateway connected
-- `rdk_target_streamer_left/right` 日志是否持续收到 target pose
-- fake 或 Quest packet 的 `side` 是否分别为 `left/right`
-- validator 中 `left_q_delta_norm` 和 `right_q_delta_norm` 是否大于阈值
-
-### 双臂运动过大或姿态突变
-
-正式验收建议使用：
+保留 Studio runtime、只重建镜像：
 
 ```bash
---quest-relative-orientation-mode reference
---quest-position-scale 1.0
---quest-position-deadband-m 0.0
+docker compose -f docker/flexiv-studio/compose.yaml build --no-cache
 ```
 
-这会避免 fake/Quest packet 中固定四元数在 relative 模式下造成不必要的姿态跳变。
-
-### Docker 权限不足
-
-如果当前用户不在 `docker` 组，可以临时使用：
-
-```bash
-sg docker -c 'docker compose --project-name flexiv-dual-studio ps'
-```
-
-长期使用建议由管理员把当前用户加入 `docker` 组后重新登录。
+宿主机 Studio 更新后，重新执行 `prepare-runtime.sh --force`。不要将 `.deps/docker_studio/`、Flexiv 许可证、原厂二进制或用户绝对路径提交到 Git。

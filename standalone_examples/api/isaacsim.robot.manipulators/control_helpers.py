@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import NamedTuple
 
@@ -91,3 +92,63 @@ def target_pose_control_is_active(
     if quest_target_receiver_enabled:
         return latest_quest_target is not None
     return True
+
+
+def cartesian_pose_changed(
+    reference_pose,
+    candidate_pose,
+    *,
+    position_tolerance_m: float = 1e-4,
+    orientation_tolerance_rad: float = 1e-3,
+) -> bool:
+    """Return whether two RDK poses differ beyond translation/rotation tolerances.
+
+    Poses use Flexiv order ``[x, y, z, qw, qx, qy, qz]``. Quaternion sign is
+    ignored, so ``q`` and ``-q`` represent the same orientation.
+    """
+
+    reference = [float(value) for value in reference_pose]
+    candidate = [float(value) for value in candidate_pose]
+    if len(reference) != 7 or len(candidate) != 7:
+        raise ValueError("Cartesian poses must contain 7 values")
+    linear_error = math.sqrt(sum((candidate[index] - reference[index]) ** 2 for index in range(3)))
+    if linear_error > max(0.0, float(position_tolerance_m)):
+        return True
+
+    def normalized_quaternion(pose):
+        quaternion = pose[3:]
+        norm = math.sqrt(sum(value * value for value in quaternion))
+        if norm <= 0.0:
+            raise ValueError("Cartesian pose quaternion must be non-zero")
+        return [value / norm for value in quaternion]
+
+    reference_quaternion = normalized_quaternion(reference)
+    candidate_quaternion = normalized_quaternion(candidate)
+    dot = abs(sum(a * b for a, b in zip(reference_quaternion, candidate_quaternion)))
+    angular_error = 2.0 * math.acos(min(1.0, max(-1.0, dot)))
+    return angular_error > max(0.0, float(orientation_tolerance_rad))
+
+
+def rdk_streamer_status_is_ready(
+    packet,
+    *,
+    serial_number: str,
+    max_age_sec: float,
+    now: float | None = None,
+) -> bool:
+    """Validate a fresh positive readiness packet from one external streamer."""
+
+    if not isinstance(packet, dict):
+        return False
+    if packet.get("schema") != "flexiv_rdk_streamer_status.v1":
+        return False
+    if str(packet.get("serial", "")) != str(serial_number):
+        return False
+    if packet.get("ready") is not True:
+        return False
+    try:
+        packet_time = float(packet["monotonic_time"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    current_time = time.monotonic() if now is None else float(now)
+    return float(max_age_sec) <= 0.0 or current_time - packet_time <= float(max_age_sec)

@@ -18,7 +18,8 @@ robots:
     examples_ext: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
     position: {x: -0.06, y: 0.42, z: 1.08}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
-    initial_q: [0.35, -1.05, 0.55, 1.80, -0.20, 0.75, 0.0]
+    # Must match FlexivSimulation's SRDF group_state "home".
+    initial_q: [0.0, -0.6981317, 0.0, 1.57079632679, 0.0, 0.6981317, 0.0]
     target:
       prim_path: "/World/TargetFrameLeft"
       name: "target_frame_left"
@@ -38,7 +39,7 @@ robots:
     examples_ext: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
     position: {x: -0.06, y: -0.42, z: 1.08}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
-    initial_q: [-0.35, -1.05, -0.55, 1.80, 0.20, 0.75, 0.0]
+    initial_q: [0.0, -0.6981317, 0.0, 1.57079632679, 0.0, 0.6981317, 0.0]
     target:
       prim_path: "/World/TargetFrameRight"
       name: "target_frame_right"
@@ -70,7 +71,8 @@ scene_objects:
   - name: "work_table_top"
     type: "cuboid"
     prim_path: "/World/Stage3/WorkTableTop"
-    position: {x: 0.48, y: 0.0, z: 0.38}
+    # Keep the fixed wall-mounted home flange clear of the collision box.
+    position: {x: 0.48, y: 0.0, z: 0.23}
     size: [0.95, 0.82, 0.06]
     color: [0.18, 0.18, 0.17]
     collision: true
@@ -79,8 +81,8 @@ scene_objects:
   - name: "work_table_front_leg"
     type: "cuboid"
     prim_path: "/World/Stage3/WorkTableFrontLeg"
-    position: {x: 0.82, y: 0.0, z: 0.18}
-    size: [0.04, 0.78, 0.36]
+    position: {x: 0.82, y: 0.0, z: 0.10}
+    size: [0.04, 0.78, 0.20]
     color: [0.28, 0.28, 0.26]
     collision: true
     rigid_body: false

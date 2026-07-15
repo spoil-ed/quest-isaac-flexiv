@@ -3,6 +3,7 @@ import math
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,23 @@ def load_utils():
 
 
 class ElementsStudioUtilsTests(unittest.TestCase):
+    def test_rdk_streamer_reads_current_tcp_pose_for_coordinate_reference(self):
+        utils = load_utils()
+
+        class FakeStates:
+            tcp_pose = [0.3, -0.1, 0.5, 1.0, 0.0, 0.0, 0.0]
+
+        class FakeRobot:
+            def states(self):
+                return FakeStates()
+
+        class FakeRdk:
+            pass
+
+        streamer = utils.RdkCartesianStreamer(FakeRdk, FakeRobot())
+
+        self.assertEqual(streamer.current_tcp_pose(), FakeStates.tcp_pose)
+
     def test_target_drive_limits_check_vector_norm_and_per_joint_magnitude(self):
         utils = load_utils()
 
@@ -76,6 +94,42 @@ class ElementsStudioUtilsTests(unittest.TestCase):
 
         self.assertEqual(count, 3)
         self.assertEqual(robot.zeros, [0.0, 0.0, 0.0])
+
+    def test_hold_robot_joint_positions_synchronizes_drive_target_and_pose(self):
+        utils = load_utils()
+
+        class FakeRobot:
+            q = [9.0, 9.0]
+            num_dof = 3
+
+            def __init__(self):
+                self.calls = []
+
+            def switch_control_mode(self, mode):
+                self.calls.append(("mode", mode))
+
+            def teleport_to(self, values):
+                self.calls.append(("pose", list(values)))
+
+            def set_joint_position_targets(self, values, *, joint_indices):
+                self.calls.append(("targets", list(values), list(joint_indices)))
+
+            def set_joint_velocities(self, values):
+                self.calls.append(("velocities", list(values)))
+
+        robot = FakeRobot()
+        count = utils.hold_robot_joint_positions(robot, [0.1, -0.2])
+
+        self.assertEqual(count, 3)
+        self.assertEqual(
+            robot.calls,
+            [
+                ("mode", "position"),
+                ("pose", [0.1, -0.2]),
+                ("targets", [0.1, -0.2], [0, 1]),
+                ("velocities", [0.0, 0.0, 0.0]),
+            ],
+        )
 
     def test_rdk_pose_from_xyzw_reorders_quaternion_to_wxyz(self):
         utils = load_utils()
@@ -231,6 +285,37 @@ class ElementsStudioUtilsTests(unittest.TestCase):
             ],
         )
 
+    def test_rdk_cartesian_streamer_rejects_faulted_or_non_operational_robot(self):
+        utils = load_utils()
+
+        class FakeRdk:
+            ARM_1 = "arm_one"
+
+        class FakeRobot:
+            def __init__(self):
+                self.is_faulted = True
+                self.is_operational = True
+
+            def fault(self):
+                return self.is_faulted
+
+            def operational(self):
+                return self.is_operational
+
+            def SendCartesianMotionForce(self, *_args):
+                raise AssertionError("a bad robot must not receive a command")
+
+        robot = FakeRobot()
+        streamer = utils.RdkCartesianStreamer(FakeRdk, robot)
+        command = utils.RdkCartesianCommand.from_pose([0.4, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0])
+
+        with self.assertRaisesRegex(RuntimeError, "fault"):
+            streamer.send("ARM_1", command)
+        robot.is_faulted = False
+        robot.is_operational = False
+        with self.assertRaisesRegex(RuntimeError, "operational"):
+            streamer.send("ARM_1", command)
+
     def test_connect_rdk_cartesian_streamer_owns_robot_setup_and_mode_switch(self):
         utils = load_utils()
 
@@ -354,7 +439,7 @@ class ElementsStudioUtilsTests(unittest.TestCase):
         self.assertEqual(command.twist_d, [0.0] * 6)
         self.assertEqual(command.wrench_d, [0.0] * 6)
 
-    def test_connect_rdk_cartesian_streamer_switches_mode_even_if_operational_state_lags_after_enable(self):
+    def test_connect_rdk_cartesian_streamer_waits_for_operational_before_switching_mode(self):
         utils = load_utils()
 
         class FakeMode:
@@ -367,12 +452,14 @@ class ElementsStudioUtilsTests(unittest.TestCase):
                 self.verbose = verbose
                 self.enabled = False
                 self.switched_to = None
+                self.operational_checks = 0
 
             def fault(self):
                 return False
 
             def operational(self):
-                return False
+                self.operational_checks += 1
+                return self.enabled and self.operational_checks >= 3
 
             def Enable(self):
                 self.enabled = True
@@ -396,15 +483,56 @@ class ElementsStudioUtilsTests(unittest.TestCase):
                 cls.created.append(robot)
                 return robot
 
-        streamer = utils.connect_rdk_cartesian_streamer(
-            "Rizon4-I0LIRN",
-            flexivrdk=FakeRdk,
-        )
+        with mock.patch.object(utils.time, "sleep") as sleep:
+            streamer = utils.connect_rdk_cartesian_streamer(
+                "Rizon4-I0LIRN",
+                flexivrdk=FakeRdk,
+            )
 
         robot = FakeRdk.created[0]
         self.assertIsInstance(streamer, utils.RdkCartesianStreamer)
         self.assertTrue(robot.enabled)
+        sleep.assert_called_once_with(0.1)
         self.assertEqual(robot.switched_to, "nrt_cartesian")
+
+    def test_connect_rdk_cartesian_streamer_does_not_switch_mode_after_enable_timeout(self):
+        utils = load_utils()
+
+        class FakeRobot:
+            def __init__(self, *_args):
+                self.switched_to = None
+
+            def fault(self):
+                return False
+
+            def operational(self):
+                return False
+
+            def Enable(self):
+                pass
+
+            def mode(self):
+                return "idle"
+
+            def SwitchMode(self, mode):
+                self.switched_to = mode
+
+        class FakeRdk:
+            NRT_CARTESIAN_MOTION_FORCE = "nrt_cartesian"
+            robot = FakeRobot()
+
+            @classmethod
+            def Robot(cls, *_args):
+                return cls.robot
+
+        with self.assertRaisesRegex(TimeoutError, "did not become operational"):
+            utils.connect_rdk_cartesian_streamer(
+                "Rizon4-I0LIRN",
+                flexivrdk=FakeRdk,
+                enable_timeout_sec=0.0,
+            )
+
+        self.assertIsNone(FakeRdk.robot.switched_to)
 
     def test_rdk_runtime_controller_wraps_pose_as_runtime_stream_command(self):
         utils = load_utils()

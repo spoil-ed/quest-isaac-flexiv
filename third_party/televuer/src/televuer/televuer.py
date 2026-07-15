@@ -211,7 +211,7 @@ class TeleVuer:
         return MotionControllers(
             stream=True,
             key="motionControllers",
-            left=False,
+            left=True,
             right=True,
             fps=60,
             eventType=["trigger", "squeeze"],

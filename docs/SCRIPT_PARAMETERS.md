@@ -60,6 +60,9 @@
 | `--network-interface-whitelist` | 空 | 限定 RDK 发现使用的本机 IPv4，多个地址用逗号分隔。 |
 | `--max-age-sec` | `0.5` | 丢弃超过该时长的 Isaac 目标包。 |
 | `--log-hz` | `2` | 目标位姿日志频率；小于等于 0 关闭周期日志。 |
+| `--status-host/port` | 空/`0` | 向双臂 Isaac 回报 RDK operational；Stage2 左右使用 `57682/57683`。 |
+| `--clear-fault/--no-clear-fault` | 不清故障 | 默认保留故障现场，不自动清除 Studio/RDK fault。 |
+| `--reconnect-on-error/--no-reconnect-on-error` | 不重连 | 默认故障锁存退出；仅诊断时显式允许重连。 |
 
 ## Isaac 控制入口
 
@@ -108,7 +111,6 @@ Quest 输入参数：
 | `--command-timeout-ms` | app 默认 | 等待 SimPlugin 命令的单周期超时。 |
 | `--max-linear-speed-m-s` | app 默认 | TCP 平移命令速度上限。 |
 | `--max-angular-speed-rad-s` | app 默认 | TCP 旋转命令速度上限。 |
-| `--max-joint-speed-rad-s` | app 默认 | 关节超速时退出 effort mode 的阈值。 |
 | `--max-target-drive-abs` | app 默认 | 单关节 target drive 绝对值上限。 |
 | `--max-target-drive-norm` | app 默认 | target drive 向量范数上限。 |
 | `--gateway-endpoint` | 空 | 非空时创建 scene 相机并向 gateway 推送数据。 |
@@ -151,8 +153,15 @@ Stage2 双臂 Isaac 启动入口，参数语义与单臂入口一致，差异如
 | `--left-serial-number/right-serial-number` | scene 或本机样例 | 左右 SimPlugin/RDK serial。 |
 | `--left-target-pose-udp-host/port` | `127.0.0.1:57680` | 左臂发给 RDK streamer 的目标位姿地址。 |
 | `--right-target-pose-udp-host/port` | `127.0.0.1:57681` | 右臂发给 RDK streamer 的目标位姿地址。 |
+| `--left-rdk-status-udp-host/port` | `127.0.0.1:57682` | 左臂 streamer operational/fault 回报地址。 |
+| `--right-rdk-status-udp-host/port` | `127.0.0.1:57683` | 右臂 streamer operational/fault 回报地址。 |
+| `--rdk-status-max-age-sec` | `1.0` | status 超过该时间即视为掉线并退回 position hold。 |
+| `--target-activation-position-tolerance-m` | `1e-3` | 手动 Frame 世界坐标平移超过此值后才请求启用对应 RDK 控制。 |
+| `--target-activation-orientation-tolerance-rad` | `0.00873` | 手动 Frame 世界坐标旋转超过约 `0.5°` 后才请求启用对应 RDK 控制。 |
 | `--quest-target-udp-port` | `57679` | 一个 Quest/fake UDP endpoint，通过 packet `side` 字段分流左右臂。 |
 | `--gateway-endpoint` | 空 | 非空时发布 Stage2 dual gateway sample。 |
+
+双臂入口固定采用多速率执行：`--physics-hz 2000` 是 Studio/SimPlugin 状态—力矩闭环，`--render-hz 30` 和 `--target-pose-publish-hz 30` 是 GUI/目标更新。Isaac 在每个渲染步内部批量执行物理子步；Studio 返回的 `target_drives` 每个物理子步原样施加，因此双臂入口不提供 target-drive 缩放、抽帧或阈值参数。启动时 streamer 锁存 Studio/RDK 当前 TCP，并与 Isaac 末端世界位姿标定坐标变换；operational 后进入与 Stage1 相同的 effort 闭环，TargetFrame/Quest 首次变化后才释放用户目标。
 
 ## Quest publisher
 

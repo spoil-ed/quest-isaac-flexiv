@@ -24,11 +24,11 @@ def build_command(_args: argparse.Namespace) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     existing_pid = flexiv_runtime.find_process_by_executable("FlexivElementsStudio")
     if existing_pid is not None:
         flexiv_runtime.print_already_running("STUDIO_UI", existing_pid)
         return 0
-    args = parse_args(argv)
     pid, stdout_path, stderr_path = flexiv_runtime.start_background(
         build_command(args),
         cwd=args.studio_root,

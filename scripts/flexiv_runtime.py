@@ -62,7 +62,9 @@ def python_executable_or_current(value: str | Path | None) -> Path:
 
 
 def studio_env(studio_root: Path = STUDIO_ROOT) -> dict[str, str]:
-    root = Path(studio_root).expanduser()
+    # These variables are interpreted after the child changes into Studio's
+    # working directory, so normalize a caller-supplied relative root first.
+    root = Path(studio_root).expanduser().resolve()
     env = os.environ.copy()
     env["LD_LIBRARY_PATH"] = str(root / "lib") + (":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
     env["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(root / "plugins")
@@ -111,11 +113,24 @@ def pgrep_commands() -> list[tuple[int, str]]:
     return rows
 
 
+def process_is_containerized(pid: int) -> bool:
+    """Return whether a host-visible PID belongs to a container cgroup."""
+
+    try:
+        cgroup = Path(f"/proc/{int(pid)}/cgroup").read_text(encoding="utf-8")
+    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+        return False
+    markers = ("/docker/", "docker-", "/kubepods/", "libpod-", "/containerd/")
+    return any(marker in cgroup for marker in markers)
+
+
 def find_process_by_executable(executable_name: str) -> int | None:
-    """Return an existing process whose argv[0] has the requested basename."""
+    """Return a non-container process whose argv[0] has the requested basename."""
 
     expected = str(executable_name)
     for pid, command in pgrep_commands():
+        if process_is_containerized(pid):
+            continue
         try:
             argv = shlex.split(command)
         except ValueError:
@@ -146,6 +161,7 @@ def stop_matching(needles: list[str], *, timeout: float = 8.0) -> list[int]:
         (pid, command)
         for pid, command in pgrep_commands()
         if pid != own_pid
+        and not process_is_containerized(pid)
         and "pgrep -af" not in command
         and not command.startswith("/bin/bash -lc")
         and any(needle in command for needle in needles)

@@ -165,6 +165,26 @@ def build_quest_packet(
     }
 
 
+def build_gripper_packet(
+    *,
+    seq: int,
+    side: str,
+    closed: bool,
+    now: float,
+    serial_number: str = DEFAULT_SERIAL_NUMBER,
+    joint_group: str = DEFAULT_JOINT_GROUP,
+) -> dict:
+    return {
+        "schema": "rizon4_quest_gripper.v1",
+        "serial": str(serial_number),
+        "joint_group": str(joint_group),
+        "seq": int(seq),
+        "side": str(side),
+        "closed": bool(closed),
+        "monotonic_time": float(now),
+    }
+
+
 class QuestRelativeMapper:
     def __init__(
         self,
@@ -188,6 +208,7 @@ class QuestRelativeMapper:
         self.position_deadband = max(0.0, float(position_deadband))
         self._position_zero: list[float] | None = None
         self._engage_time: float | None = None
+        self._settled = False
 
     def update(self, pose_matrix: list[list[float]], *, enabled: bool, seq: int, now: float) -> dict | None:
         position_openxr = pose_matrix_position(pose_matrix)
@@ -196,6 +217,7 @@ class QuestRelativeMapper:
         if not enabled:
             self._position_zero = None
             self._engage_time = None
+            self._settled = False
             return None
 
         if self._position_zero is None:
@@ -203,21 +225,17 @@ class QuestRelativeMapper:
             self._engage_time = float(now)
         tcp_quat = quat_multiply_wxyz(hand_quat, self.tcp_rot_offset_wxyz)
 
-        if self._engage_time is not None and float(now) - self._engage_time < self.engage_settle_sec:
+        if not self._settled:
+            if self._engage_time is not None and float(now) - self._engage_time < self.engage_settle_sec:
+                # Do not expose the button-press transient to Isaac. Keep
+                # tracking the hand zero until squeeze has remained stable.
+                self._position_zero = list(mapped_position)
+                return None
+            # The first packet after settling is exactly zero displacement.
+            # Isaac uses this packet to latch the current RDK TCP and current
+            # hand orientation as its two relative-motion origins.
             self._position_zero = list(mapped_position)
-            delta = [0.0, 0.0, 0.0]
-            pose = delta + tcp_quat
-            return build_quest_packet(
-                seq=seq,
-                side=self.side,
-                pose_base_tcp_des=pose,
-                controller_position_openxr=position_openxr,
-                controller_delta_base=delta,
-                now=now,
-                reason="tracking",
-                serial_number=self.serial_number,
-                joint_group=self.joint_group,
-            )
+            self._settled = True
 
         delta = [
             (mapped_position[index] - self._position_zero[index]) * self.position_delta_scale
@@ -278,15 +296,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--udp-host", default=DEFAULT_UDP_HOST)
     parser.add_argument("--udp-port", type=int, default=DEFAULT_UDP_PORT)
     parser.add_argument("--serial-number", default=DEFAULT_SERIAL_NUMBER)
+    parser.add_argument("--left-serial-number", default="Rizon4-qSaFLh")
+    parser.add_argument("--right-serial-number", default=DEFAULT_SERIAL_NUMBER)
     parser.add_argument("--joint-group", default=DEFAULT_JOINT_GROUP)
-    parser.add_argument("--side", choices=["left", "right"], default="right")
+    parser.add_argument("--side", choices=["left", "right", "both"], default="right")
     parser.add_argument("--enable-button", choices=["squeeze", "trigger", "thumbstick"], default="squeeze")
+    parser.add_argument("--gripper-button", choices=["squeeze", "trigger", "thumbstick"], default="trigger")
     parser.add_argument("--axis-map", default=DEFAULT_AXIS_MAP)
     parser.add_argument("--position-delta-scale", type=float, default=1.0)
     parser.add_argument("--position-deadband", type=float, default=0.0)
     parser.add_argument("--engage-settle-sec", type=float, default=0.25)
     parser.add_argument("--right-tcp-rot-offset", default="0.0,0.70710678,0.0,0.70710678")
     parser.add_argument("--enable-threshold", type=float, default=0.5)
+    parser.add_argument("--gripper-threshold", type=float, default=0.5)
     parser.add_argument("--televuer-root", type=Path, default=DEFAULT_TELEVUER_ROOT)
     parser.add_argument("--cert-file", default=str(DEFAULT_CERT_FILE))
     parser.add_argument("--key-file", default=str(DEFAULT_KEY_FILE))
@@ -309,23 +331,35 @@ def main(argv: list[str] | None = None) -> int:
         cert_file=args.cert_file,
         key_file=args.key_file,
     )
-    mapper = QuestRelativeMapper(
-        side=args.side,
-        serial_number=args.serial_number,
-        joint_group=args.joint_group,
-        axis_map=args.axis_map,
-        position_delta_scale=args.position_delta_scale,
-        tcp_rot_offset_wxyz=parse_csv_floats(args.right_tcp_rot_offset, 4, "right-tcp-rot-offset"),
-        engage_settle_sec=args.engage_settle_sec,
-        position_deadband=args.position_deadband,
-    )
+    sides = ("left", "right") if args.side == "both" else (args.side,)
+    serial_numbers = {
+        "left": args.left_serial_number if args.side == "both" else args.serial_number,
+        "right": args.right_serial_number if args.side == "both" else args.serial_number,
+    }
+    mappers = {
+        side: QuestRelativeMapper(
+            side=side,
+            serial_number=serial_numbers[side],
+            joint_group=args.joint_group,
+            axis_map=args.axis_map,
+            position_delta_scale=args.position_delta_scale,
+            tcp_rot_offset_wxyz=parse_csv_floats(
+                args.right_tcp_rot_offset,
+                4,
+                "right-tcp-rot-offset",
+            ),
+            engage_settle_sec=args.engage_settle_sec,
+            position_deadband=args.position_deadband,
+        )
+        for side in sides
+    }
     publisher = UdpJsonPublisher(args.udp_host, args.udp_port)
     url = f"https://{args.host_ip}:8012/?ws=wss://{args.host_ip}:8012"
     print("[Rizon4QuestTargetPublisher] Open this URL in the Quest browser:", flush=True)
     print(url, flush=True)
     print(
         "[Rizon4QuestTargetPublisher] Enter VR, allow controller tracking, "
-        f"hold {args.enable_button} on the {args.side} controller, then move it.",
+        f"hold {args.enable_button} on the {args.side} controller(s), then move them.",
         flush=True,
     )
     print(f"[Rizon4QuestTargetPublisher] UDP target: {args.udp_host}:{args.udp_port}", flush=True)
@@ -337,29 +371,61 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             now = time.monotonic()
             ready = bool(tv.motion_data_ready)
-            button_value = select_button_value(tv, args.side, args.enable_button) if ready else 0.0
-            enabled = ready and select_enable(
-                tv,
-                args.side,
-                args.enable_button,
-                threshold=args.enable_threshold,
-            )
-            packet = None
-            reason = "not_ready" if not ready else "disabled"
-            if ready:
-                packet = mapper.update(select_controller_pose(tv, args.side), enabled=enabled, seq=seq, now=now)
-                if packet is not None:
-                    reason = str(packet.get("reason", "tracking"))
-                    publisher.publish(packet)
+            states = []
+            for side in sides:
+                button_value = select_button_value(tv, side, args.enable_button) if ready else 0.0
+                gripper_value = select_button_value(tv, side, args.gripper_button) if ready else 0.0
+                enabled = ready and select_enable(
+                    tv,
+                    side,
+                    args.enable_button,
+                    threshold=args.enable_threshold,
+                )
+                gripper_closed = ready and select_enable(
+                    tv,
+                    side,
+                    args.gripper_button,
+                    threshold=args.gripper_threshold,
+                )
+                packet = None
+                reason = "not_ready" if not ready else ("settling" if enabled else "disabled")
+                if ready:
+                    publisher.publish(
+                        build_gripper_packet(
+                            seq=seq,
+                            side=side,
+                            closed=gripper_closed,
+                            now=now,
+                            serial_number=serial_numbers[side],
+                            joint_group=args.joint_group,
+                        )
+                    )
                     sent += 1
+                    packet = mappers[side].update(
+                        select_controller_pose(tv, side),
+                        enabled=enabled,
+                        seq=seq,
+                        now=now,
+                    )
+                    if packet is not None:
+                        reason = str(packet.get("reason", "tracking"))
+                        publisher.publish(packet)
+                        sent += 1
+                states.append((side, button_value, enabled, gripper_value, gripper_closed, reason, packet))
             if args.log_hz > 0.0 and now - last_log >= 1.0 / float(args.log_hz):
-                pose_text = ""
-                if packet is not None:
-                    pose_text = f" pose={[round(value, 4) for value in packet['pose_base_tcp_des']]}"
+                state_text = []
+                for side, button_value, enabled, gripper_value, gripper_closed, reason, packet in states:
+                    pose_text = ""
+                    if packet is not None:
+                        pose_text = f" pose={[round(value, 4) for value in packet['pose_base_tcp_des']]}"
+                    state_text.append(
+                        f"{side}[enabled={enabled} {args.enable_button}Value={button_value:.3f} "
+                        f"{args.gripper_button}Value={gripper_value:.3f} gripper_closed={gripper_closed} "
+                        f"reason={reason}{pose_text}]"
+                    )
                 print(
-                    f"[Rizon4QuestTargetPublisher] seq={seq} ready={ready} enabled={enabled} "
-                    f"{args.enable_button}Value={button_value:.3f} "
-                    f"reason={reason} sent={sent} udp={args.udp_host}:{args.udp_port}{pose_text}",
+                    f"[Rizon4QuestTargetPublisher] seq={seq} ready={ready} "
+                    f"{' '.join(state_text)} sent={sent} udp={args.udp_host}:{args.udp_port}",
                     flush=True,
                 )
                 last_log = now

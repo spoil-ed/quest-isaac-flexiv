@@ -1,4 +1,5 @@
 import importlib.util
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -72,6 +73,66 @@ class ControlHelpersTests(unittest.TestCase):
             )
         )
 
+    def test_cartesian_pose_changed_uses_translation_and_quaternion_angle(self):
+        helpers = load_control_helpers()
+        reference = [0.4, -0.1, 0.3, 1.0, 0.0, 0.0, 0.0]
+
+        self.assertFalse(
+            helpers.cartesian_pose_changed(
+                reference,
+                [0.40005, -0.1, 0.3, -1.0, 0.0, 0.0, 0.0],
+                position_tolerance_m=1e-4,
+            )
+        )
+        self.assertTrue(
+            helpers.cartesian_pose_changed(
+                reference,
+                [0.4002, -0.1, 0.3, 1.0, 0.0, 0.0, 0.0],
+                position_tolerance_m=1e-4,
+            )
+        )
+        half_angle = math.radians(0.2) / 2.0
+        self.assertTrue(
+            helpers.cartesian_pose_changed(
+                reference,
+                [0.4, -0.1, 0.3, math.cos(half_angle), math.sin(half_angle), 0.0, 0.0],
+                orientation_tolerance_rad=math.radians(0.1),
+            )
+        )
+
+    def test_rdk_streamer_status_requires_matching_fresh_positive_packet(self):
+        helpers = load_control_helpers()
+        packet = {
+            "schema": "flexiv_rdk_streamer_status.v1",
+            "serial": "Rizon4-test01",
+            "ready": True,
+            "monotonic_time": 10.0,
+        }
+
+        self.assertTrue(
+            helpers.rdk_streamer_status_is_ready(
+                packet,
+                serial_number="Rizon4-test01",
+                max_age_sec=0.5,
+                now=10.4,
+            )
+        )
+        self.assertFalse(
+            helpers.rdk_streamer_status_is_ready(
+                packet,
+                serial_number="Rizon4-test01",
+                max_age_sec=0.5,
+                now=10.6,
+            )
+        )
+        self.assertFalse(
+            helpers.rdk_streamer_status_is_ready(
+                {**packet, "ready": False},
+                serial_number="Rizon4-test01",
+                max_age_sec=0.5,
+                now=10.1,
+            )
+        )
 
 if __name__ == "__main__":
     unittest.main()

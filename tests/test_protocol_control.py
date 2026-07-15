@@ -87,6 +87,19 @@ class ProtocolControlTests(unittest.TestCase):
 
         self.assertEqual(status["state"], "succeeded")
 
+    def test_recorder_accepts_completed_legacy_dual_arm_reset(self):
+        sample = {
+            "sim_state": {
+                "bridge": {
+                    "reset": {"last_seq": 2, "holding_start_pose": False}
+                }
+            }
+        }
+        with mock.patch.object(recorder, "request_sample", return_value=sample):
+            status = recorder.wait_for_reset(object(), expected_seq=2, timeout_sec=1.0)
+
+        self.assertFalse(status["holding_start_pose"])
+
     def test_recorder_preflight_returns_historical_reset_failure_for_recovery(self):
         failed = {
             "sim_state": {

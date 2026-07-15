@@ -1,28 +1,90 @@
-# Minimal single-arm Flexiv bridge configuration.
+# Dual-arm pick/place scene consumed by dual_follow_with_studio.py.
+# Runtime serial aliases must still be supplied with CLI options.
+
+task:
+  name: "pick_place_redblock_flexiv_dual"
+  source_task: "../../../../../unitree/unitree_sim_isaaclab/tasks/g1_tasks/pick_place_redblock_g1_29dof_dex1"
+  description: "Wall-mounted dual Flexiv arms over a tabletop with one red block"
+  fake_trajectory_profile: "pick_place_redblock_dual"
+
 robots:
-  - serial_number: "Rizon4-I0LIRN"
-    name: "Rizon4_I0LIRN"
-    # Legacy bridge config: set explicitly for your local Flexiv Isaac workspace,
-    # or copy from configs/scenes/single_rizon4_cam_front.yaml.
-    usd: ""
-    position:
-      x: 0.07108
-      y: -0.86763
-      z: 0.0
-    orientation:
-      w: 0.0
-      x: 0.0
-      y: 0.0
-      z: 1.0
-    initial_q: [0.0, 0.0, 0.0, 0.0, 0.0, 4.7124, 0.0]
+  - side: "left"
+    serial_number: "Rizon4-VIHhZM"
+    joint_group: "ARM_1"
+    prim_path: "/World/Flexiv/LeftRizon4"
+    name: "LeftRizon4"
+    end_effector_prim_name: "flange"
+    usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+    examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+    position: {x: -0.06, y: 0.42, z: 1.08}
+    orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
+    initial_q: [0.0, -0.6981317, 0.0, 1.57079632679, 0.0, 0.6981317, 0.0]
+    target:
+      prim_path: "/World/TargetFrameLeft"
+      name: "target_frame_left"
+      position: {x: 0.48, y: 0.18, z: 0.56}
+      euler_deg: {x: 0.0, y: 0.0, z: 0.0}
+    target_pose: {host: "127.0.0.1", port: 57680}
 
-env_usd: ""
+  - side: "right"
+    serial_number: "Rizon4-WE7ssd"
+    joint_group: "ARM_1"
+    prim_path: "/World/Flexiv/RightRizon4"
+    name: "RightRizon4"
+    end_effector_prim_name: "flange"
+    usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+    examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+    position: {x: -0.06, y: -0.42, z: 1.08}
+    orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
+    initial_q: [0.0, -0.6981317, 0.0, 1.57079632679, 0.0, 0.6981317, 0.0]
+    target:
+      prim_path: "/World/TargetFrameRight"
+      name: "target_frame_right"
+      position: {x: 0.48, y: -0.18, z: 0.56}
+      euler_deg: {x: 0.0, y: 0.0, z: 0.0}
+    target_pose: {host: "127.0.0.1", port: 57681}
 
-motion:
-  enabled: false
-  mode: "bridge_only"
-  amplitude: 0.035
-  frequency: 0.3
-  joint_index: 3
-  kp: 1200.0
-  kd: 80.0
+cameras:
+  - name: "cam_front"
+    resolution: [640, 480]
+    fps: 30
+    focal_length: 2.0
+    position: {x: 2.05, y: 0.0, z: 1.35}
+    look_at: {x: 0.42, y: 0.0, z: 0.60}
+    up: {x: 0.0, y: 0.0, z: 1.0}
+
+scene_objects:
+  - name: "back_wall"
+    type: "cuboid"
+    prim_path: "/World/Stage3/BackWall"
+    position: {x: -0.12, y: 0.0, z: 1.00}
+    size: [0.05, 1.35, 0.56]
+    color: [0.72, 0.72, 0.70]
+    collision: false
+    rigid_body: false
+  - name: "work_table_top"
+    type: "cuboid"
+    prim_path: "/World/Stage3/WorkTableTop"
+    # Keep the wall-mounted home flange clear of the tabletop collision box.
+    position: {x: 0.48, y: 0.0, z: 0.23}
+    size: [0.95, 0.82, 0.06]
+    color: [0.18, 0.18, 0.17]
+    collision: true
+    rigid_body: false
+  - name: "red_block"
+    type: "cuboid"
+    prim_path: "/World/Stage3/RedBlock"
+    position: {x: 0.48, y: 0.12, z: 0.305}
+    size: [0.06, 0.06, 0.06]
+    color: [1.0, 0.0, 0.0]
+    mass: 1.0
+    collision: true
+    rigid_body: true
+  - name: "place_pad"
+    type: "cuboid"
+    prim_path: "/World/Stage3/PlacePad"
+    position: {x: 0.62, y: -0.22, z: 0.275}
+    size: [0.18, 0.18, 0.02]
+    color: [0.08, 0.22, 0.75]
+    collision: false
+    rigid_body: false

@@ -25,6 +25,8 @@ DEFAULT_QUEST_TARGET_UDP_HOST = os.environ.get("FLEXIV_STAGE2_QUEST_TARGET_UDP_H
 DEFAULT_QUEST_TARGET_UDP_PORT = int(os.environ.get("FLEXIV_STAGE2_QUEST_TARGET_UDP_PORT", "57679"))
 DEFAULT_LEFT_TARGET_POSE_UDP_PORT = int(os.environ.get("FLEXIV_STAGE2_LEFT_TARGET_POSE_UDP_PORT", "57680"))
 DEFAULT_RIGHT_TARGET_POSE_UDP_PORT = int(os.environ.get("FLEXIV_STAGE2_RIGHT_TARGET_POSE_UDP_PORT", "57681"))
+DEFAULT_LEFT_RDK_STATUS_UDP_PORT = int(os.environ.get("FLEXIV_STAGE2_LEFT_RDK_STATUS_UDP_PORT", "57682"))
+DEFAULT_RIGHT_RDK_STATUS_UDP_PORT = int(os.environ.get("FLEXIV_STAGE2_RIGHT_RDK_STATUS_UDP_PORT", "57683"))
 
 
 def _import_helpers() -> None:
@@ -266,6 +268,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--left-target-pose-udp-port", type=int)
     parser.add_argument("--right-target-pose-udp-host")
     parser.add_argument("--right-target-pose-udp-port", type=int)
+    parser.add_argument("--left-rdk-status-udp-host")
+    parser.add_argument("--left-rdk-status-udp-port", type=int)
+    parser.add_argument("--right-rdk-status-udp-host")
+    parser.add_argument("--right-rdk-status-udp-port", type=int)
     parser.add_argument("--fake-host")
     parser.add_argument("--fake-axis")
     parser.add_argument("--fake-right-axis")
@@ -281,15 +287,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gateway-jpeg-quality", type=int)
     parser.add_argument("--physics-hz", type=float)
     parser.add_argument("--render-hz", type=float)
+    parser.add_argument("--gpu-dynamics", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--quest-position-scale", type=float)
     parser.add_argument("--quest-position-deadband-m", type=float)
-    parser.add_argument("--quest-relative-orientation-mode", choices=("packet", "reference", "current"))
+    parser.add_argument(
+        "--quest-relative-orientation-mode",
+        choices=("packet", "relative", "reference", "current"),
+    )
     parser.add_argument("--max-linear-speed-m-s", type=float)
     parser.add_argument("--max-angular-speed-rad-s", type=float)
-    parser.add_argument("--max-joint-speed-rad-s", type=float)
-    parser.add_argument("--target-drive-warmup-cycles", type=int)
-    parser.add_argument("--target-drive-required-valid-cycles", type=int)
-    parser.add_argument("--target-drive-scale", type=float)
     parser.add_argument("--isaac-max-frames", type=int)
     parser.add_argument("--target-pose-publish-hz", type=float)
     parser.add_argument("--rdk-clear-fault", action=argparse.BooleanOptionalAction, default=None)
@@ -299,8 +305,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rdk-retry-last-pose-sec", type=float)
     parser.add_argument("--target-axis-length", type=float)
     parser.add_argument("--target-axis-radius", type=float)
-    parser.add_argument("--max-target-drive-norm", type=float)
-    parser.add_argument("--max-target-drive-abs", type=float)
     parser.add_argument("--probe-timeout-sec", type=float, default=180.0)
     parser.add_argument("--startup-timeout-sec", type=float, default=300.0)
     parser.add_argument("--min-left-q-delta", type=float)
@@ -436,6 +440,7 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.gateway_jpeg_quality = int(first_defined(args.gateway_jpeg_quality, cfg_get(pipeline_config, "gateway", "jpeg_quality"), 90))
     args.physics_hz = float(first_defined(args.physics_hz, cfg_get(pipeline_config, "control", "physics_hz"), 30.0))
     args.render_hz = float(first_defined(args.render_hz, cfg_get(pipeline_config, "control", "render_hz"), args.record_fps))
+    args.gpu_dynamics = bool(first_defined(args.gpu_dynamics, cfg_get(pipeline_config, "control", "gpu_dynamics"), False))
     args.quest_position_scale = float(
         first_defined(args.quest_position_scale, cfg_get(pipeline_config, "control", "quest_position_scale"), 0.5)
     )
@@ -451,26 +456,12 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.max_angular_speed_rad_s = float(
         first_defined(args.max_angular_speed_rad_s, cfg_get(pipeline_config, "control", "max_angular_speed_rad_s"), 0.75)
     )
-    args.max_joint_speed_rad_s = float(
-        first_defined(args.max_joint_speed_rad_s, cfg_get(pipeline_config, "control", "max_joint_speed_rad_s"), 1.5)
-    )
-    args.target_drive_warmup_cycles = int(
-        first_defined(args.target_drive_warmup_cycles, cfg_get(pipeline_config, "control", "target_drive_warmup_cycles"), 2)
-    )
-    args.target_drive_required_valid_cycles = int(
-        first_defined(
-            args.target_drive_required_valid_cycles,
-            cfg_get(pipeline_config, "control", "target_drive_required_valid_cycles"),
-            1,
-        )
-    )
-    args.target_drive_scale = float(first_defined(args.target_drive_scale, cfg_get(pipeline_config, "control", "target_drive_scale"), 1.0))
-    args.isaac_max_frames = int(first_defined(args.isaac_max_frames, cfg_get(pipeline_config, "control", "isaac_max_frames"), 12000))
+    args.isaac_max_frames = int(first_defined(args.isaac_max_frames, cfg_get(pipeline_config, "control", "isaac_max_frames"), 900))
     args.probe_timeout_sec = float(first_defined(args.probe_timeout_sec, cfg_get(pipeline_config, "validation", "probe_timeout_sec"), args.probe_timeout_sec))
     args.target_pose_publish_hz = float(
         first_defined(args.target_pose_publish_hz, cfg_get(pipeline_config, "control", "target_pose_publish_hz"), 30.0)
     )
-    args.rdk_clear_fault = bool(first_defined(args.rdk_clear_fault, cfg_get(pipeline_config, "control", "rdk_clear_fault"), True))
+    args.rdk_clear_fault = bool(first_defined(args.rdk_clear_fault, cfg_get(pipeline_config, "control", "rdk_clear_fault"), False))
     args.rdk_strict_clear_fault = bool(
         first_defined(args.rdk_strict_clear_fault, cfg_get(pipeline_config, "control", "rdk_strict_clear_fault"), True)
     )
@@ -485,12 +476,6 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.target_axis_radius = float(
         first_defined(args.target_axis_radius, cfg_get(pipeline_config, "control", "target_axis_radius"), 0.006)
     )
-    args.max_target_drive_norm = float(
-        first_defined(args.max_target_drive_norm, cfg_get(pipeline_config, "control", "max_target_drive_norm"), 200.0)
-    )
-    args.max_target_drive_abs = float(
-        first_defined(args.max_target_drive_abs, cfg_get(pipeline_config, "control", "max_target_drive_abs"), 100.0)
-    )
     args.quest_target_udp_host = str(first_defined(args.quest_target_udp_host, cfg_get(pipeline_config, "quest_target", "host"), DEFAULT_QUEST_TARGET_UDP_HOST))
     args.quest_target_udp_port = int(first_defined(args.quest_target_udp_port, cfg_get(pipeline_config, "quest_target", "port"), DEFAULT_QUEST_TARGET_UDP_PORT))
     args.left_target_pose_udp_host = str(
@@ -504,6 +489,18 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
     )
     args.right_target_pose_udp_port = int(
         first_defined(args.right_target_pose_udp_port, cfg_get(pipeline_config, "target_pose", "right", "port"), cfg_get(right_robot, "target_pose", "port"), DEFAULT_RIGHT_TARGET_POSE_UDP_PORT)
+    )
+    args.left_rdk_status_udp_host = str(
+        first_defined(args.left_rdk_status_udp_host, cfg_get(pipeline_config, "rdk_status", "left", "host"), "127.0.0.1")
+    )
+    args.left_rdk_status_udp_port = int(
+        first_defined(args.left_rdk_status_udp_port, cfg_get(pipeline_config, "rdk_status", "left", "port"), DEFAULT_LEFT_RDK_STATUS_UDP_PORT)
+    )
+    args.right_rdk_status_udp_host = str(
+        first_defined(args.right_rdk_status_udp_host, cfg_get(pipeline_config, "rdk_status", "right", "host"), "127.0.0.1")
+    )
+    args.right_rdk_status_udp_port = int(
+        first_defined(args.right_rdk_status_udp_port, cfg_get(pipeline_config, "rdk_status", "right", "port"), DEFAULT_RIGHT_RDK_STATUS_UDP_PORT)
     )
     args.fake_host = str(first_defined(args.fake_host, cfg_get(pipeline_config, "fake_sender", "host"), args.quest_target_udp_host))
     args.fake_axis = str(first_defined(args.fake_axis, cfg_get(pipeline_config, "fake_sender", "axis"), "x"))
@@ -605,6 +602,8 @@ class RealValidationRunner:
         assert_udp_port_free(self.args.quest_target_udp_host, self.args.quest_target_udp_port)
         assert_udp_port_free(self.args.left_target_pose_udp_host, self.args.left_target_pose_udp_port)
         assert_udp_port_free(self.args.right_target_pose_udp_host, self.args.right_target_pose_udp_port)
+        assert_udp_port_free(self.args.left_rdk_status_udp_host, self.args.left_rdk_status_udp_port)
+        assert_udp_port_free(self.args.right_rdk_status_udp_host, self.args.right_rdk_status_udp_port)
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         json_print(
@@ -628,6 +627,8 @@ class RealValidationRunner:
                 "quest_target_udp": f"{self.args.quest_target_udp_host}:{self.args.quest_target_udp_port}",
                 "left_target_pose_udp": f"{self.args.left_target_pose_udp_host}:{self.args.left_target_pose_udp_port}",
                 "right_target_pose_udp": f"{self.args.right_target_pose_udp_host}:{self.args.right_target_pose_udp_port}",
+                "left_rdk_status_udp": f"{self.args.left_rdk_status_udp_host}:{self.args.left_rdk_status_udp_port}",
+                "right_rdk_status_udp": f"{self.args.right_rdk_status_udp_host}:{self.args.right_rdk_status_udp_port}",
             }
         )
 
@@ -906,6 +907,11 @@ class RealValidationRunner:
                     "--switch-mode" if self.args.rdk_switch_mode else "--no-switch-mode",
                     "--retry-last-pose-sec",
                     str(float(self.args.rdk_retry_last_pose_sec)),
+                    "--no-reconnect-on-error",
+                    "--status-host",
+                    getattr(self.args, f"{side}_rdk_status_udp_host"),
+                    "--status-port",
+                    str(int(getattr(self.args, f"{side}_rdk_status_udp_port"))),
                     "--log-hz",
                     "5",
                 ],
@@ -936,6 +942,7 @@ class RealValidationRunner:
                 str(float(self.args.physics_hz)),
                 "--render-hz",
                 str(float(self.args.render_hz)),
+                "--gpu-dynamics" if self.args.gpu_dynamics else "--no-gpu-dynamics",
                 "--enable-quest-target-udp",
                 "--quest-target-udp-host",
                 self.args.quest_target_udp_host,
@@ -957,6 +964,14 @@ class RealValidationRunner:
                 self.args.right_target_pose_udp_host,
                 "--right-target-pose-udp-port",
                 str(int(self.args.right_target_pose_udp_port)),
+                "--left-rdk-status-udp-host",
+                self.args.left_rdk_status_udp_host,
+                "--left-rdk-status-udp-port",
+                str(int(self.args.left_rdk_status_udp_port)),
+                "--right-rdk-status-udp-host",
+                self.args.right_rdk_status_udp_host,
+                "--right-rdk-status-udp-port",
+                str(int(self.args.right_rdk_status_udp_port)),
                 "--target-pose-publish-hz",
                 str(float(self.args.target_pose_publish_hz)),
                 "--target-axis-length",
@@ -965,22 +980,10 @@ class RealValidationRunner:
                 str(float(self.args.target_axis_radius)),
                 "--command-timeout-ms",
                 "1",
-                "--target-drive-warmup-cycles",
-                str(int(self.args.target_drive_warmup_cycles)),
-                "--target-drive-required-valid-cycles",
-                str(int(self.args.target_drive_required_valid_cycles)),
-                "--target-drive-scale",
-                str(float(self.args.target_drive_scale)),
                 "--max-linear-speed-m-s",
                 str(float(self.args.max_linear_speed_m_s)),
                 "--max-angular-speed-rad-s",
                 str(float(self.args.max_angular_speed_rad_s)),
-                "--max-joint-speed-rad-s",
-                str(float(self.args.max_joint_speed_rad_s)),
-                "--max-target-drive-norm",
-                str(float(self.args.max_target_drive_norm)),
-                "--max-target-drive-abs",
-                str(float(self.args.max_target_drive_abs)),
                 "--gateway-endpoint",
                 self.bridge_endpoint,
                 "--gateway-fps",
@@ -1142,12 +1145,9 @@ class RealValidationRunner:
             "control": {
                 "physics_hz": float(self.args.physics_hz),
                 "render_hz": float(self.args.render_hz),
+                "gpu_dynamics": bool(self.args.gpu_dynamics),
                 "quest_position_scale": float(self.args.quest_position_scale),
                 "quest_relative_orientation_mode": self.args.quest_relative_orientation_mode,
-                "max_target_drive_norm": float(self.args.max_target_drive_norm),
-                "max_target_drive_abs": float(self.args.max_target_drive_abs),
-                "target_drive_scale": float(self.args.target_drive_scale),
-                "max_joint_speed_rad_s": float(self.args.max_joint_speed_rad_s),
                 "target_axis_length": float(self.args.target_axis_length),
                 "target_axis_radius": float(self.args.target_axis_radius),
                 "rdk_clear_fault": bool(self.args.rdk_clear_fault),
@@ -1155,6 +1155,16 @@ class RealValidationRunner:
                 "rdk_servo_on": bool(self.args.rdk_servo_on),
                 "rdk_switch_mode": bool(self.args.rdk_switch_mode),
                 "rdk_retry_last_pose_sec": float(self.args.rdk_retry_last_pose_sec),
+            },
+            "rdk_status": {
+                "left": {
+                    "host": self.args.left_rdk_status_udp_host,
+                    "port": int(self.args.left_rdk_status_udp_port),
+                },
+                "right": {
+                    "host": self.args.right_rdk_status_udp_host,
+                    "port": int(self.args.right_rdk_status_udp_port),
+                },
             },
             "video_validation": {
                 "expected_video_fps": float(self.args.expected_video_fps),

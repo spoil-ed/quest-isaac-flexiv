@@ -24,6 +24,13 @@ class QuestTargetPacket(NamedTuple):
     controller_delta_base: list[float] | None = None
 
 
+class QuestGripperPacket(NamedTuple):
+    seq: int
+    side: str
+    closed: bool
+    monotonic_time: float
+
+
 class QuestAxisMapEntry(NamedTuple):
     source_index: int
     sign: float
@@ -31,7 +38,50 @@ class QuestAxisMapEntry(NamedTuple):
 
 class QuestRelativeReference(NamedTuple):
     controller_position_openxr: list[float]
+    controller_orientation_base: list[float]
     tcp_pose_base: list[float]
+
+
+class RdkWorldFrameCalibration(NamedTuple):
+    """Rigid transform between Isaac world and the canonical RDK base frame."""
+
+    world_from_rdk_base_position: tuple[float, float, float]
+    world_from_rdk_base_orientation_wxyz: tuple[float, float, float, float]
+
+    @classmethod
+    def from_reference_pair(cls, *, reference_world_pose, reference_pose_base_tcp):
+        world_pose = parse_float_list(reference_world_pose, expected=7, name="reference_world_pose")
+        rdk_pose = parse_float_list(reference_pose_base_tcp, expected=7, name="reference_pose_base_tcp")
+        world_tcp_orientation = _wxyz_to_xyzw(world_pose[3:7])
+        rdk_tcp_orientation = _wxyz_to_xyzw(rdk_pose[3:7])
+        world_from_rdk_orientation = _quat_mul_xyzw(
+            world_tcp_orientation,
+            _quat_conjugate_xyzw(rdk_tcp_orientation),
+        )
+        rdk_tcp_offset_world = _rotate_vector_xyzw(world_from_rdk_orientation, rdk_pose[:3])
+        world_from_rdk_position = tuple(
+            world_pose[index] - rdk_tcp_offset_world[index]
+            for index in range(3)
+        )
+        return cls(
+            world_from_rdk_base_position=triple(world_from_rdk_position),
+            world_from_rdk_base_orientation_wxyz=_xyzw_to_wxyz(world_from_rdk_orientation),
+        )
+
+    def world_pose_to_rdk(self, *, world_position, world_orientation_wxyz) -> list[float]:
+        return world_target_to_flexiv_pose(
+            world_position=world_position,
+            world_orientation_wxyz=world_orientation_wxyz,
+            base_position=self.world_from_rdk_base_position,
+            base_orientation_wxyz=self.world_from_rdk_base_orientation_wxyz,
+        )
+
+    def rdk_pose_to_world(self, pose_base_tcp):
+        return flexiv_pose_to_world_target(
+            pose_base_tcp_des=pose_base_tcp,
+            base_position=self.world_from_rdk_base_position,
+            base_orientation_wxyz=self.world_from_rdk_base_orientation_wxyz,
+        )
 
 
 def triple(values) -> tuple[float, float, float]:
@@ -195,7 +245,7 @@ def cartesian_pose_error(current_pose, target_pose) -> tuple[float, float]:
 
 
 class CartesianTargetLimiter:
-    """Clamp workspace and rate-limit a base-frame TCP target."""
+    """Optionally clamp workspace and rate-limit a base-frame TCP target."""
 
     def __init__(
         self,
@@ -204,12 +254,14 @@ class CartesianTargetLimiter:
         workspace_max,
         max_linear_speed_m_s: float,
         max_angular_speed_rad_s: float,
+        clamp_workspace: bool = True,
     ) -> None:
         self.workspace_min = parse_float_list(workspace_min, expected=3, name="workspace_min")
         self.workspace_max = parse_float_list(workspace_max, expected=3, name="workspace_max")
         clamp_xyz(self.workspace_min, self.workspace_min, self.workspace_max)
         self.max_linear_speed_m_s = float(max_linear_speed_m_s)
         self.max_angular_speed_rad_s = float(max_angular_speed_rad_s)
+        self.clamp_workspace = bool(clamp_workspace)
         self.last_pose: list[float] | None = None
 
     def reset(self, pose=None) -> None:
@@ -224,7 +276,11 @@ class CartesianTargetLimiter:
 
     def limit(self, desired_pose, *, dt: float) -> list[float]:
         desired = parse_float_list(desired_pose, expected=7, name="desired_pose")
-        desired_xyz = clamp_xyz(desired[:3], self.workspace_min, self.workspace_max)
+        desired_xyz = (
+            clamp_xyz(desired[:3], self.workspace_min, self.workspace_max)
+            if self.clamp_workspace
+            else list(desired[:3])
+        )
         desired_quat = normalize_quat_wxyz(desired[3:])
         if self.last_pose is None:
             self.last_pose = desired_xyz + desired_quat
@@ -264,25 +320,39 @@ class QuestRelativeTargetMapper:
         workspace_max,
         position_deadband_m: float = 0.0,
         orientation_mode: str = "packet",
+        clamp_workspace: bool = True,
     ) -> None:
         self.axis_map = axis_map
         self.scale = float(scale)
         self.workspace_min = parse_float_list(workspace_min, expected=3, name="workspace_min")
         self.workspace_max = parse_float_list(workspace_max, expected=3, name="workspace_max")
         self.position_deadband_m = max(0.0, float(position_deadband_m))
-        if orientation_mode not in {"packet", "reference", "current"}:
-            raise ValueError("orientation_mode must be one of: packet, reference, current")
+        self.clamp_workspace = bool(clamp_workspace)
+        if orientation_mode not in {"packet", "relative", "reference", "current"}:
+            raise ValueError("orientation_mode must be one of: packet, relative, reference, current")
         self.orientation_mode = orientation_mode
         self.reference: QuestRelativeReference | None = None
 
     def reset(self) -> None:
         self.reference = None
 
+    def _limit_xyz(self, xyz) -> list[float]:
+        values = parse_float_list(xyz, expected=3, name="xyz")
+        if not self.clamp_workspace:
+            return values
+        return clamp_xyz(values, self.workspace_min, self.workspace_max)
+
     def _orientation_for_update(self, quest_target: QuestTargetPacket, current_pose: list[float]) -> list[float]:
         if self.orientation_mode == "current":
             return list(current_pose[3:7])
         if self.orientation_mode == "reference" and self.reference is not None:
             return list(self.reference.tcp_pose_base[3:7])
+        if self.orientation_mode == "relative" and self.reference is not None:
+            source_zero = _wxyz_to_xyzw(self.reference.controller_orientation_base)
+            source_current = _wxyz_to_xyzw(quest_target.pose_base_tcp_des[3:7])
+            source_delta = _quat_mul_xyzw(source_current, _quat_conjugate_xyzw(source_zero))
+            target_zero = _wxyz_to_xyzw(self.reference.tcp_pose_base[3:7])
+            return list(_xyzw_to_wxyz(_quat_mul_xyzw(source_delta, target_zero)))
         return list(quest_target.pose_base_tcp_des[3:7])
 
     def update(self, quest_target: QuestTargetPacket, current_pose_base_tcp: list[float]) -> list[float]:
@@ -297,14 +367,13 @@ class QuestRelativeTargetMapper:
             if self.reference is None:
                 self.reference = QuestRelativeReference(
                     controller_position_openxr=[0.0, 0.0, 0.0],
+                    controller_orientation_base=list(quest_target.pose_base_tcp_des[3:7]),
                     tcp_pose_base=list(current_pose),
                 )
                 return list(current_pose)
             orientation = self._orientation_for_update(quest_target, current_pose)
-            xyz = clamp_xyz(
-                [self.reference.tcp_pose_base[index] + delta_base[index] for index in range(3)],
-                self.workspace_min,
-                self.workspace_max,
+            xyz = self._limit_xyz(
+                [self.reference.tcp_pose_base[index] + delta_base[index] for index in range(3)]
             )
             return xyz + orientation
         if quest_target.controller_position_openxr is None:
@@ -313,6 +382,7 @@ class QuestRelativeTargetMapper:
         if self.reference is None:
             self.reference = QuestRelativeReference(
                 controller_position_openxr=controller_position,
+                controller_orientation_base=list(quest_target.pose_base_tcp_des[3:7]),
                 tcp_pose_base=list(current_pose),
             )
             return list(current_pose)
@@ -323,10 +393,8 @@ class QuestRelativeTargetMapper:
         delta_base = map_openxr_delta_to_base(delta_openxr, axis_map=self.axis_map, scale=self.scale)
         delta_base = [0.0 if abs(value) < self.position_deadband_m else value for value in delta_base]
         orientation = self._orientation_for_update(quest_target, current_pose)
-        xyz = clamp_xyz(
-            [self.reference.tcp_pose_base[index] + delta_base[index] for index in range(3)],
-            self.workspace_min,
-            self.workspace_max,
+        xyz = self._limit_xyz(
+            [self.reference.tcp_pose_base[index] + delta_base[index] for index in range(3)]
         )
         return xyz + orientation
 
@@ -441,6 +509,25 @@ def world_target_to_flexiv_pose(
     rel_ori_xyzw = _quat_mul_xyzw(inv_base, wo)
     qw, qx, qy, qz = _xyzw_to_wxyz(rel_ori_xyzw)
     return [rel_pos[0], rel_pos[1], rel_pos[2], qw, qx, qy, qz]
+
+
+def calibrated_world_target_to_flexiv_pose(
+    *,
+    world_position,
+    world_orientation_wxyz,
+    reference_world_pose,
+    reference_pose_base_tcp,
+) -> list[float]:
+    """Convert a world target using one measured world/RDK TCP pose pair."""
+
+    calibration = RdkWorldFrameCalibration.from_reference_pair(
+        reference_world_pose=reference_world_pose,
+        reference_pose_base_tcp=reference_pose_base_tcp,
+    )
+    return calibration.world_pose_to_rdk(
+        world_position=world_position,
+        world_orientation_wxyz=world_orientation_wxyz,
+    )
 
 
 def select_pose_base_tcp_des(
@@ -654,6 +741,39 @@ def parse_quest_target_packet(
         gripper_open_ratio=gripper_open_ratio,
         monotonic_time=monotonic_time,
         controller_delta_base=controller_delta_base,
+    )
+
+
+def parse_quest_gripper_packet(
+    packet: dict,
+    *,
+    serial_number: str,
+    joint_group: str,
+    now: float | None = None,
+    max_age_sec: float = 0.5,
+) -> QuestGripperPacket | None:
+    if not isinstance(packet, dict) or packet.get("schema") != "rizon4_quest_gripper.v1":
+        return None
+    if str(packet.get("serial", "")) != str(serial_number):
+        return None
+    if str(packet.get("joint_group", "")) != str(joint_group):
+        return None
+    if not isinstance(packet.get("closed"), bool):
+        return None
+    try:
+        packet_time = float(packet.get("monotonic_time", time.monotonic()))
+        seq = int(packet.get("seq", -1))
+    except (TypeError, ValueError):
+        return None
+    current = time.monotonic() if now is None else float(now)
+    age = current - packet_time
+    if max_age_sec > 0.0 and (age < -1.0 or age > float(max_age_sec)):
+        return None
+    return QuestGripperPacket(
+        seq=seq,
+        side=str(packet.get("side", "")),
+        closed=bool(packet["closed"]),
+        monotonic_time=packet_time,
     )
 
 

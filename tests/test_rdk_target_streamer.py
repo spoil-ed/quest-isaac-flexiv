@@ -17,6 +17,13 @@ def load_streamer():
 
 
 class RdkTargetStreamerTests(unittest.TestCase):
+    def test_status_packets_include_live_rdk_tcp_pose(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('packet["current_pose_base_tcp"]', source)
+        self.assertIn("current_pose = controller.current_tcp_pose()", source)
+        self.assertIn("publish_ready(True, current_pose)", source)
+
     def test_parse_target_pose_packet_accepts_matching_fresh_packet(self):
         streamer = load_streamer()
 

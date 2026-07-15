@@ -15,6 +15,10 @@ target_pose:
   left: {host: "127.0.0.1", port: 58680}
   right: {host: "127.0.0.1", port: 58681}
 
+rdk_status:
+  left: {host: "127.0.0.1", port: 58682}
+  right: {host: "127.0.0.1", port: 58683}
+
 record:
   task_name: "quest_isaac_flexiv_stage3_pick_place_redblock_dual"
   fps: 30
@@ -25,28 +29,25 @@ record:
   task_steps: "load Stage3 scene; fake dual-arm pick/place waypoints; record Unitree JSON; convert; validate MP4"
 
 control:
-  physics_hz: 30
+  # Match the 2 kHz Flexiv SimPlugin loop; rendering/recording stays at 30 Hz.
+  physics_hz: 2000
   render_hz: 30
+  gpu_dynamics: false
   quest_position_scale: 1.0
   quest_position_deadband_m: 0.0
-  quest_relative_orientation_mode: "reference"
-  max_linear_speed_m_s: 0.05
-  max_angular_speed_rad_s: 0.40
-  max_joint_speed_rad_s: 4.0
-  target_drive_warmup_cycles: 2
-  target_drive_required_valid_cycles: 2
-  target_drive_scale: 0.02
-  isaac_max_frames: 16000
+  quest_relative_orientation_mode: "packet"
+  max_linear_speed_m_s: 0.50
+  max_angular_speed_rad_s: 0.75
+  # max_frames counts rendered frames; 900 frames is 30 s at 30 Hz.
+  isaac_max_frames: 900
   target_pose_publish_hz: 30
   target_axis_length: 0.30
   target_axis_radius: 0.010
-  rdk_clear_fault: true
-  rdk_strict_clear_fault: false
+  rdk_clear_fault: false
+  rdk_strict_clear_fault: true
   rdk_servo_on: false
   rdk_switch_mode: true
   rdk_retry_last_pose_sec: 1.0
-  max_target_drive_norm: 3000
-  max_target_drive_abs: 3000
 
 convert:
   repo_id: "qiming/quest_isaac_flexiv_stage3_pick_place_redblock_dual"
@@ -73,7 +74,9 @@ fake_sender:
   trajectory_profile: "pick_place_redblock_dual"
   restart_before_record: true
   restart_warmup_sec: 1.0
-  amplitude_m: 0.035
+  # Keep the 8 s validation window clear of the 0.005 rad joint-motion
+  # threshold even when Studio takes a few frames to leave position mode.
+  amplitude_m: 0.040
   cycles: 12
   frames: 12000
   rate_hz: 30

@@ -16,6 +16,7 @@ STAGE3_SCENES = {
     "stack_rgyblock_flexiv_dual": ROOT / "configs/scenes/stack_rgyblock_flexiv_dual.yaml",
     "move_cylinder_flexiv_dual": ROOT / "configs/scenes/move_cylinder_flexiv_dual.yaml",
 }
+STUDIO_HOME_Q = [0.0, -0.6981317, 0.0, 1.57079632679, 0.0, 0.6981317, 0.0]
 
 
 def load_stage2_runner():
@@ -39,8 +40,20 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
                 data = load_scene_config(scene_path)
                 self.assertEqual(scene_task_metadata(data)["name"], task_name)
                 self.assertEqual([camera["name"] for camera in data["cameras"]], ["cam_front"])
+                self.assertEqual(len(data["robots"]), 2)
+                for robot in data["robots"]:
+                    self.assertEqual(robot["initial_q"], STUDIO_HOME_Q)
+                    self.assertTrue(str(robot["usd"]).endswith("/Rizon4_with_Grav.usd"))
+                    expected_y = 0.42 if robot["side"] == "left" else -0.42
+                    self.assertEqual(robot["position"], {"x": -0.06, "y": expected_y, "z": 1.08})
+                    self.assertEqual(
+                        robot["orientation"],
+                        {"w": 0.70710678, "x": 0.0, "y": 0.70710678, "z": 0.0},
+                    )
                 specs = parse_scene_objects(data, config_path=scene_path, validate_assets=True)
                 self.assertEqual({spec.name for spec in specs}, expected_objects[task_name])
+                table = next(spec for spec in specs if spec.name == "work_table_top")
+                self.assertLessEqual(table.position[2] + table.size[2] / 2.0, 0.261)
 
     def test_missing_usd_asset_fails_clearly(self):
         with tempfile.TemporaryDirectory(prefix="stage3_missing_asset_") as tmp:
@@ -70,10 +83,18 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
         args = runner.parse_args(["--config", str(ROOT / "configs/pipelines/stage3_pick_place_redblock_dual.yaml")])
 
         self.assertEqual(args.fake_trajectory_profile, "pick_place_redblock_dual")
+        self.assertEqual(args.physics_hz, 2000.0)
+        self.assertEqual(args.render_hz, 30.0)
+        self.assertFalse(args.gpu_dynamics)
+        self.assertEqual(args.target_pose_publish_hz, 30.0)
+        self.assertEqual(args.isaac_max_frames, 900)
         self.assertEqual(args.scene_task_metadata["name"], "pick_place_redblock_flexiv_dual")
         self.assertIn("red_block", {item["name"] for item in args.scene_object_summary})
         self.assertEqual(args.scene_camera_names, ["cam_front"])
         self.assertEqual(args.scene_camera_keys, ["color_0"])
+        self.assertEqual(args.left_rdk_status_udp_port, 58682)
+        self.assertEqual(args.right_rdk_status_udp_port, 58683)
+        self.assertFalse(args.rdk_clear_fault)
 
 
 if __name__ == "__main__":
