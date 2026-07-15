@@ -18,6 +18,7 @@ PROCESS_LABELS = {
     "RobotControlApp": "ROBOT_CONTROL_APP",
     "FlexivSimulation": "FLEXIV_SIMULATION",
     "follow_ball_with_studio.py": "ISAAC_FOLLOW",
+    "drdk_target_streamer.py": "DRDK_TARGET_STREAMER",
     "rdk_target_streamer.py": "RDK_TARGET_STREAMER",
 }
 

@@ -194,26 +194,21 @@ class ElementsStudioUtilsTests(unittest.TestCase):
         self.assertEqual(command.wrench_d, [0.0] * 6)
         self.assertEqual(command.acc_d, [0.0] * 6)
 
-    def test_rdk_cartesian_streamer_sends_latest_pose_to_joint_group(self):
+    def test_rdk_cartesian_streamer_always_uses_nrt_send_api(self):
         utils = load_utils()
 
-        class FakeCmd:
-            pass
-
         class FakeRdk:
-            ARM_1 = "arm_one"
-            RT_CARTESIAN_MOTION_FORCE = "rt_cartesian"
-
-            @staticmethod
-            def RtCartesianCmd():
-                return FakeCmd()
+            pass
 
         class FakeRobot:
             def __init__(self):
                 self.calls = []
 
-            def StreamCartesianMotionForce(self, commands):
-                self.calls.append(commands)
+            def StreamCartesianMotionForce(self, _commands):
+                raise AssertionError("30 Hz target transport must not use the RT stream API")
+
+            def SendCartesianMotionForce(self, *command):
+                self.calls.append(command)
 
         robot = FakeRobot()
         streamer = utils.RdkCartesianStreamer(FakeRdk, robot)
@@ -223,12 +218,43 @@ class ElementsStudioUtilsTests(unittest.TestCase):
             utils.RdkCartesianCommand.from_pose([0.4, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0]),
         )
 
-        self.assertEqual(len(robot.calls), 1)
-        command = robot.calls[0]["arm_one"]
-        self.assertEqual(command.pose_d, [0.4, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0])
-        self.assertEqual(command.twist_d, [0.0] * 6)
-        self.assertEqual(command.wrench_d, [0.0] * 6)
-        self.assertEqual(command.acc_d, [0.0] * 6)
+        self.assertEqual(robot.calls[0][0], [0.4, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0])
+        self.assertEqual(robot.calls[0][1], [0.0] * 6)
+        self.assertEqual(robot.calls[0][2], [0.0] * 6)
+
+    def test_rdk_cartesian_streamer_uses_grouped_nrt_api_when_available(self):
+        utils = load_utils()
+
+        class FakeNrtCommand:
+            def __init__(self, *values):
+                self.values = values
+
+        class FakeRdk:
+            ARM_1 = "arm_one"
+            NrtCartesianCmd = FakeNrtCommand
+
+        class FakeRobot:
+            def __init__(self):
+                self.sent = []
+
+            def StreamCartesianMotionForce(self, _commands):
+                raise AssertionError("NRT mode must not use the RT stream API")
+
+            def SendCartesianMotionForce(self, commands):
+                self.sent.append(commands)
+
+        robot = FakeRobot()
+        streamer = utils.RdkCartesianStreamer(FakeRdk, robot)
+        streamer.send(
+            "ARM_1",
+            utils.RdkCartesianCommand.from_pose([0.4, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0]),
+        )
+
+        self.assertEqual(set(robot.sent[0]), {"arm_one"})
+        self.assertEqual(
+            robot.sent[0]["arm_one"].values[0],
+            [0.4, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0],
+        )
 
     def test_rdk_cartesian_streamer_uses_rdk_1_9_cartesian_motion_force_api(self):
         utils = load_utils()
@@ -277,10 +303,10 @@ class ElementsStudioUtilsTests(unittest.TestCase):
                     [0.4, -0.1, 0.6, 1.0, 0.0, 0.0, 0.0],
                     [0.0] * 6,
                     [0.0] * 6,
-                    1.5,
-                    3.0,
+                    0.5,
+                    0.75,
+                    2.0,
                     5.0,
-                    10.0,
                 )
             ],
         )
@@ -337,12 +363,11 @@ class ElementsStudioUtilsTests(unittest.TestCase):
             def SwitchMode(self, mode):
                 self.switched_to = mode
 
-            def StreamCartesianMotionForce(self, _commands):
+            def SendCartesianMotionForce(self, *_command):
                 pass
 
         class FakeRdk:
-            ARM_1 = "arm_one"
-            RT_CARTESIAN_MOTION_FORCE = "rt_cartesian"
+            NRT_CARTESIAN_MOTION_FORCE = "nrt_cartesian"
             created = []
 
             @classmethod
@@ -350,10 +375,6 @@ class ElementsStudioUtilsTests(unittest.TestCase):
                 robot = FakeRobot(serial_number, verbose)
                 cls.created.append(robot)
                 return robot
-
-            @staticmethod
-            def RtCartesianCmd():
-                return object()
 
         streamer = utils.connect_rdk_cartesian_streamer(
             "Rizon4-I0LIRN",
@@ -364,13 +385,25 @@ class ElementsStudioUtilsTests(unittest.TestCase):
         self.assertIsInstance(streamer, utils.RdkCartesianStreamer)
         self.assertEqual(FakeRdk.created[0].serial_number, "Rizon4-I0LIRN")
         self.assertTrue(FakeRdk.created[0].verbose)
-        self.assertEqual(FakeRdk.created[0].switched_to, "rt_cartesian")
+        self.assertEqual(FakeRdk.created[0].switched_to, "nrt_cartesian")
 
-    def test_connect_rdk_cartesian_streamer_uses_whitelist_and_enable_without_changing_stream_api(self):
+    def test_rdk_cartesian_mode_prefers_nrt_when_rt_is_also_available(self):
         utils = load_utils()
 
         class FakeMode:
             RT_CARTESIAN_MOTION_FORCE = "rt_cartesian"
+            NRT_CARTESIAN_MOTION_FORCE = "nrt_cartesian"
+
+        class FakeRdk:
+            Mode = FakeMode
+
+        self.assertEqual(utils.rdk_cartesian_mode(FakeRdk), "nrt_cartesian")
+
+    def test_connect_rdk_cartesian_streamer_uses_whitelist_enable_and_nrt_send_api(self):
+        utils = load_utils()
+
+        class FakeMode:
+            NRT_CARTESIAN_MOTION_FORCE = "nrt_cartesian"
 
         class FakeRobot:
             def __init__(self, serial_number, whitelist, verbose):
@@ -396,15 +429,11 @@ class ElementsStudioUtilsTests(unittest.TestCase):
             def SwitchMode(self, mode):
                 self.switched_to = mode
 
-            def StreamCartesianMotionForce(self, commands):
-                self.sent.append(commands)
-
-        class FakeCmd:
-            pass
+            def SendCartesianMotionForce(self, *command):
+                self.sent.append(command)
 
         class FakeRdk:
             Mode = FakeMode
-            ARM_1 = "arm_one"
             created = []
 
             @classmethod
@@ -412,10 +441,6 @@ class ElementsStudioUtilsTests(unittest.TestCase):
                 robot = FakeRobot(serial_number, whitelist, verbose)
                 cls.created.append(robot)
                 return robot
-
-            @staticmethod
-            def RtCartesianCmd():
-                return FakeCmd()
 
         streamer = utils.connect_rdk_cartesian_streamer(
             "Rizon4-I0LIRN",
@@ -433,11 +458,10 @@ class ElementsStudioUtilsTests(unittest.TestCase):
         self.assertEqual(robot.whitelist, ["127.0.0.1"])
         self.assertTrue(robot.verbose)
         self.assertTrue(robot.enabled)
-        self.assertEqual(robot.switched_to, "rt_cartesian")
-        command = robot.sent[0]["arm_one"]
-        self.assertEqual(command.pose_d, [0.4, -0.1, 0.6, 1.0, 0.0, 0.0, 0.0])
-        self.assertEqual(command.twist_d, [0.0] * 6)
-        self.assertEqual(command.wrench_d, [0.0] * 6)
+        self.assertEqual(robot.switched_to, "nrt_cartesian")
+        self.assertEqual(robot.sent[0][0], [0.4, -0.1, 0.6, 1.0, 0.0, 0.0, 0.0])
+        self.assertEqual(robot.sent[0][1], [0.0] * 6)
+        self.assertEqual(robot.sent[0][2], [0.0] * 6)
 
     def test_connect_rdk_cartesian_streamer_waits_for_operational_before_switching_mode(self):
         utils = load_utils()
@@ -534,11 +558,11 @@ class ElementsStudioUtilsTests(unittest.TestCase):
 
         self.assertIsNone(FakeRdk.robot.switched_to)
 
-    def test_rdk_runtime_controller_wraps_pose_as_runtime_stream_command(self):
+    def test_rdk_runtime_controller_sends_pose_as_nrt_runtime_command(self):
         utils = load_utils()
 
         class FakeMode:
-            RT_CARTESIAN_MOTION_FORCE = "rt_cartesian"
+            NRT_CARTESIAN_MOTION_FORCE = "nrt_cartesian"
 
         class FakeRobot:
             def __init__(self, serial_number, whitelist, verbose):
@@ -564,15 +588,11 @@ class ElementsStudioUtilsTests(unittest.TestCase):
             def SwitchMode(self, mode):
                 self.switched_to = mode
 
-            def StreamCartesianMotionForce(self, commands):
-                self.sent.append(commands)
-
-        class FakeCmd:
-            pass
+            def SendCartesianMotionForce(self, *command):
+                self.sent.append(command)
 
         class FakeRdk:
             Mode = FakeMode
-            ARM_1 = "arm_one"
             created = []
 
             @classmethod
@@ -580,10 +600,6 @@ class ElementsStudioUtilsTests(unittest.TestCase):
                 robot = FakeRobot(serial_number, whitelist, verbose)
                 cls.created.append(robot)
                 return robot
-
-            @staticmethod
-            def RtCartesianCmd():
-                return FakeCmd()
 
         settings = utils.RdkRuntimeSettings(
             serial_number="Rizon4-I0LIRN",
@@ -599,12 +615,10 @@ class ElementsStudioUtilsTests(unittest.TestCase):
         self.assertEqual(robot.serial_number, "Rizon4-I0LIRN")
         self.assertEqual(robot.whitelist, ["192.168.32.10"])
         self.assertTrue(robot.enabled)
-        self.assertEqual(robot.switched_to, "rt_cartesian")
-        command = robot.sent[0]["arm_one"]
-        self.assertEqual(command.pose_d, [0.45, 0.0, 0.35, 1.0, 0.0, 0.0, 0.0])
-        self.assertEqual(command.twist_d, [0.0] * 6)
-        self.assertEqual(command.wrench_d, [0.0] * 6)
-        self.assertEqual(command.acc_d, [0.0] * 6)
+        self.assertEqual(robot.switched_to, "nrt_cartesian")
+        self.assertEqual(robot.sent[0][0], [0.45, 0.0, 0.35, 1.0, 0.0, 0.0, 0.0])
+        self.assertEqual(robot.sent[0][1], [0.0] * 6)
+        self.assertEqual(robot.sent[0][2], [0.0] * 6)
 
 
 if __name__ == "__main__":

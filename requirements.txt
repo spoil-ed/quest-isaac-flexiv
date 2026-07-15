@@ -3,8 +3,9 @@
 #
 # External runtimes are still installed separately because they are not ordinary
 # PyPI project dependencies: Isaac Sim 6.0.1, Flexiv Elements Studio,
-# flexivsimplugin==1.2.0, the Flexiv RDK environment, and system ffmpeg/ffprobe
-# with libx264. See README.md for those runtime setup steps.
+# flexivsimplugin==1.2.0, the Flexiv RDK environment, optional
+# flexivdrdk==1.2.1 installed with --no-deps, and system ffmpeg/ffprobe with
+# libx264. See README.md for those runtime setup steps.
 
 # Gateway, recorder, fake sender/smoke tests, config loading and camera JPEGs.
 numpy>=1.26

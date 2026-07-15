@@ -58,7 +58,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     flexiv.add_argument(
         "--no-switch-mode",
         action="store_true",
-        help="Do not switch RDK to RT_CARTESIAN_MOTION_FORCE automatically.",
+        help="Do not switch RDK to NRT_CARTESIAN_MOTION_FORCE automatically.",
     )
     flexiv.add_argument("--clear-fault", action="store_true", help="Ask RDK to clear an existing robot fault.")
     flexiv.add_argument("--servo-on", action="store_true", help="Call ServoOn() before streaming if supported.")

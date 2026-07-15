@@ -298,7 +298,7 @@ rg -n '<enable>|<interface_config_file>' \
 
 两侧都应显示 `<enable>1</enable>` 和 `externalEthernetConfig.xml`。
 
-### 4. 启动两个 RDK streamer
+### 4A. 启动两个独立 RDK streamer（Stage1 兼容 backend）
 
 ```bash
 python scripts/start_rdk_target_streamer.py \
@@ -314,7 +314,36 @@ python scripts/start_rdk_target_streamer.py \
   --status-port 57683
 ```
 
-streamer 默认不自动清 fault、不在异常后自动重连。这样可以避免错误坐标或残留进程导致机械臂反复重新上力。
+streamer 默认进入 `NRT_CARTESIAN_MOTION_FORCE`，通过 `SendCartesianMotionForce()` 把 30 Hz 离散目标交给 runtime。它不做 IK 或力矩解算。streamer 默认不自动清 fault、不在异常后自动重连，以避免错误坐标或残留进程导致机械臂反复重新上力。
+
+### 4B. 启动 DRDK RobotPair（双臂同步 backend）
+
+DRDK 与两个独立 RDK streamer 是互斥 backend：两者会争用相同 UDP 端口和 runtime 控制权，不能同时启动。首次使用时，在 Isaac Python 环境安装与仓库 RDK 1.9.1 兼容的固定版本；`--no-deps` 防止 pip 把 RDK 升级到不兼容版本：
+
+```bash
+"$ISAAC_PYTHON" -m pip install --no-deps flexivdrdk==1.2.1
+```
+
+然后以一个宿主机进程连接 Docker 左 runtime 和宿主机右 runtime：
+
+```bash
+python scripts/start_drdk_target_streamer.py \
+  --python "$ISAAC_PYTHON" \
+  --left-serial-number "$LEFT_ROBOT_SERIAL" \
+  --right-serial-number "$RIGHT_ROBOT_SERIAL" \
+  --left-port 57680 \
+  --right-port 57681 \
+  --left-status-port 57682 \
+  --right-status-port 57683 \
+  --max-linear-speed-m-s 0.5 \
+  --max-angular-speed-rad-s 0.75
+```
+
+DRDK backend 固定使用 `NRT_CARTESIAN_MOTION_FORCE`。它只在收到同一 `servo_cycle` 的左右目标后调用一次 `RobotPair.SendCartesianMotionForce()`；目标的轨迹生成、Cartesian/关节控制和力矩解算仍由两套 Flexiv runtime 完成。
+
+切换 NRT 模式后，streamer 默认读取两臂当前关节位置并调用 `SetNullSpacePosture((q_left, q_right))`，避免进入 Cartesian 控制时零空间参考发生跳变。任务确有固定零空间姿态时可传 `--left-nullspace-posture` 和 `--right-nullspace-posture`，格式均为七个逗号分隔的弧度值。
+
+DRDK RobotPair 的 readiness 是成对的：任一 runtime 断连、fault 或不再 operational 时，streamer 会同时向 Isaac 发布两侧 not-ready 并锁存退出，不自动清 fault 或重连。其日志位于 `logs/drdk_target_streamer_dual*.stdout.log`。
 
 ### 5. 启动当前验证过的 Isaac GUI 场景
 
@@ -341,12 +370,13 @@ python scripts/start_dual_isaac_follow.py \
 
 ```bash
 tail -f logs/rdk_target_streamer*.stdout.log \
+  logs/drdk_target_streamer_dual*.stdout.log \
   logs/isaac_dual_follow_target*.stdout.log
 ```
 
 正常启动顺序应包含：
 
-1. 两个 streamer 监听目标端口并连接各自 RDK alias。
+1. 两个独立 RDK streamer 或一个 DRDK RobotPair streamer 监听目标端口并连接两侧 alias。
 2. 两个 `SimPlugin connected`。
 3. 左右 TargetFrame 初始化到各自机械臂末端。
 4. 两个 streamer 输出 `latched current TCP reference`。

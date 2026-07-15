@@ -64,6 +64,30 @@
 | `--clear-fault/--no-clear-fault` | 不清故障 | 默认保留故障现场，不自动清除 Studio/RDK fault。 |
 | `--reconnect-on-error/--no-reconnect-on-error` | 不重连 | 默认故障锁存退出；仅诊断时显式允许重连。 |
 
+该脚本固定使用 `NRT_CARTESIAN_MOTION_FORCE` 和 `SendCartesianMotionForce()`；30 Hz 客户端不使用 RT streaming API，轨迹生成与控制解算由 Flexiv runtime 完成。
+
+### `start_drdk_target_streamer.py`
+
+双臂 DRDK backend，与两个 `start_rdk_target_streamer.py` 进程互斥。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--python` | `ISAAC_PYTHON` | 运行 DRDK streamer 的 Python。 |
+| `--left/right-serial-number` | Stage2 左右 alias | DRDK `RobotPair` 连接的两个不同 runtime alias。 |
+| `--left/right-port` | `57680/57681` | 接收 Isaac 左右目标的 UDP 端口。 |
+| `--left/right-status-port` | `57682/57683` | 向 Isaac 返回左右 ready、参考 TCP 和当前 TCP。 |
+| `--left/right-translation-in-world` | `0,0,0` | DRDK RobotPair 世界坐标中的 base 平移；当前 base-frame 目标链保持零值。 |
+| `--left/right-nullspace-posture` | 空 | 七轴零空间参考，弧度；为空时在切换 NRT 后读取该臂当前 `q`。 |
+| `--nullspace-tracking-weight` | `0.5` | 两臂参考关节姿态跟踪权重，范围 `[0.1, 1.0]`。 |
+| `--max-linear-speed-m-s` | `0.5` | NRT runtime 轨迹生成器的最大线速度。 |
+| `--max-angular-speed-rad-s` | `0.75` | NRT runtime 轨迹生成器的最大角速度。 |
+| `--max-linear-acc-m-s2` | `2.0` | 最大线加速度。 |
+| `--max-angular-acc-rad-s2` | `5.0` | 最大角加速度。 |
+| `--network-interface-whitelist` | 空 | DRDK 发现允许使用的本机 IPv4，逗号分隔。 |
+| `--clear-fault/--no-clear-fault` | 不清故障 | 默认保留故障现场。 |
+
+该脚本固定使用 `NRT_CARTESIAN_MOTION_FORCE`。它只同步转发目标并设置 runtime 的零空间参考，不执行 IK、动力学或力矩解算；任一侧故障会使 RobotPair 两侧同时 not-ready 并退出。
+
 ## Isaac 控制入口
 
 ### `start_isaac_follow.py`

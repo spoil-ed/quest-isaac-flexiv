@@ -94,6 +94,7 @@ class RepoLayoutTests(unittest.TestCase):
             "flexiv_studio_teleop.py",
             "convert_unitree_json_to_lerobot.py",
             "fake_rizon4_quest_sender.py",
+            "drdk_target_streamer.py",
             "rdk_target_streamer.py",
             "record_unitree_json.py",
             "rizon4_quest_target_publisher.py",
@@ -104,6 +105,7 @@ class RepoLayoutTests(unittest.TestCase):
             "run_stage3_sim_scene_validation.py",
             "start_data_gateway.py",
             "start_dual_isaac_follow.py",
+            "start_drdk_target_streamer.py",
             "start_elements_studio_ui.py",
             "start_robot_control_app.py",
             "start_flexiv_simulation.py",
@@ -172,6 +174,21 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertNotIn("--network-interface-whitelist", command)
         self.assertIn("--no-clear-fault", command)
         self.assertIn("--no-reconnect-on-error", command)
+
+    def test_external_drdk_target_streamer_uses_compatible_rdk_client(self):
+        streamer = load_script("start_drdk_target_streamer.py")
+        compat_path = ROOT
+        streamer.RDK_COMPAT_PATH = compat_path
+
+        env = streamer.build_env({"PYTHONPATH": "existing"})
+        command = streamer.build_command(streamer.parse_args([]))
+
+        self.assertEqual(env["PYTHONPATH"].split(":")[:2], [str(compat_path), "existing"])
+        self.assertIn("drdk_target_streamer.py", command[1])
+        self.assertIn("--left-serial-number", command)
+        self.assertIn("--right-serial-number", command)
+        self.assertIn("--nullspace-tracking-weight", command)
+        self.assertIn("--no-clear-fault", command)
 
     def test_isaac_follow_startup_does_not_embed_rdk_client(self):
         follow = load_script("start_isaac_follow.py")

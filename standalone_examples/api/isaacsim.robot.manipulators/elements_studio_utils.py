@@ -17,15 +17,15 @@ from typing import Iterable, NamedTuple
 
 
 STUDIO_CAL_REACHABILITY_METHOD = "/proto.robot.motion.MotionService/CalReachability"
-RDK_CARTESIAN_MAX_LINEAR_VEL = 1.5
-RDK_CARTESIAN_MAX_ANGULAR_VEL = 3.0
-RDK_CARTESIAN_MAX_LINEAR_ACC = 5.0
-RDK_CARTESIAN_MAX_ANGULAR_ACC = 10.0
+RDK_CARTESIAN_MAX_LINEAR_VEL = 0.5
+RDK_CARTESIAN_MAX_ANGULAR_VEL = 0.75
+RDK_CARTESIAN_MAX_LINEAR_ACC = 2.0
+RDK_CARTESIAN_MAX_ANGULAR_ACC = 5.0
 
 
 @dataclass(frozen=True)
 class RdkCartesianCommand:
-    """Transport-neutral representation of flexivrdk.RtCartesianCmd data."""
+    """Transport-neutral Cartesian target passed to Flexiv runtime."""
 
     pose_d: list[float]
     twist_d: list[float]
@@ -285,40 +285,38 @@ class StudioReachabilityClient:
         self._channel.close()
 
 
-def make_rdk_cartesian_command(flexivrdk, command: RdkCartesianCommand):
-    """Create a flexivrdk.RtCartesianCmd from a transport-neutral command."""
-
-    cmd = flexivrdk.RtCartesianCmd()
-    cmd.pose_d = list(command.pose_d)
-    cmd.twist_d = list(command.twist_d)
-    cmd.wrench_d = list(command.wrench_d)
-    cmd.acc_d = list(command.acc_d)
-    return cmd
-
-
 class RdkCartesianStreamer:
-    """Synchronous Flexiv RDK Cartesian target sender.
+    """Synchronous Flexiv RDK NRT Cartesian target sender.
 
     The caller owns connection/reconnection. This class only converts the
-    transport-neutral command into flexivrdk's command object and sends it to
-    the requested joint group.
+    transport-neutral command to the discrete NRT API. Flexiv runtime owns the
+    motion generation and Cartesian control solve.
     """
 
     def __init__(self, flexivrdk, robot) -> None:
         self._flexivrdk = flexivrdk
         self._robot = robot
-        self._uses_stream_api = hasattr(robot, "StreamCartesianMotionForce") and hasattr(flexivrdk, "RtCartesianCmd")
 
     def send(self, joint_group: str, command: RdkCartesianCommand) -> None:
         if hasattr(self._robot, "fault") and self._robot.fault():
             raise RuntimeError("RDK robot fault is active")
         if hasattr(self._robot, "operational") and not self._robot.operational():
             raise RuntimeError("RDK robot is no longer operational")
-        if self._uses_stream_api:
+        if hasattr(self._flexivrdk, "NrtCartesianCmd"):
             group = getattr(self._flexivrdk, str(joint_group))
-            rdk_command = make_rdk_cartesian_command(self._flexivrdk, command)
-            self._robot.StreamCartesianMotionForce({group: rdk_command})
+            nrt_command = self._flexivrdk.NrtCartesianCmd(
+                list(command.pose_d),
+                list(command.wrench_d),
+                list(command.twist_d),
+                RDK_CARTESIAN_MAX_LINEAR_VEL,
+                RDK_CARTESIAN_MAX_ANGULAR_VEL,
+                RDK_CARTESIAN_MAX_LINEAR_ACC,
+                RDK_CARTESIAN_MAX_ANGULAR_ACC,
+            )
+            self._robot.SendCartesianMotionForce({group: nrt_command})
             return
+        # RDK 1.9 exposes the same NRT command as positional arguments and has
+        # no joint-group command wrapper.
         self._robot.SendCartesianMotionForce(
             list(command.pose_d),
             list(command.wrench_d),
@@ -355,16 +353,13 @@ def create_rdk_robot(
 
 
 def rdk_cartesian_mode(flexivrdk):
-    mode_name = "RT_CARTESIAN_MOTION_FORCE"
+    mode_name = "NRT_CARTESIAN_MOTION_FORCE"
     mode_enum = getattr(flexivrdk, "Mode", None)
     if mode_enum is not None and hasattr(mode_enum, mode_name):
         return getattr(mode_enum, mode_name)
     if hasattr(flexivrdk, mode_name):
         return getattr(flexivrdk, mode_name)
-    fallback = "NRT_CARTESIAN_MOTION_FORCE"
-    if mode_enum is not None and hasattr(mode_enum, fallback):
-        return getattr(mode_enum, fallback)
-    return getattr(flexivrdk, fallback)
+    raise AttributeError("Flexiv RDK does not expose NRT_CARTESIAN_MOTION_FORCE")
 
 
 def connect_rdk_cartesian_streamer(
@@ -420,7 +415,7 @@ def connect_rdk_cartesian_streamer(
         logger(f"[FlexivRDK] {serial_number} is operational")
     mode = rdk_cartesian_mode(flexivrdk)
     if bool(switch_mode) and robot.mode() != mode:
-        logger(f"[FlexivRDK] switching {serial_number} to Cartesian motion force")
+        logger(f"[FlexivRDK] switching {serial_number} to NRT Cartesian motion force")
         robot.SwitchMode(mode)
     return RdkCartesianStreamer(flexivrdk, robot)
 

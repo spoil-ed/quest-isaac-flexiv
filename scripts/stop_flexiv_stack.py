@@ -14,6 +14,7 @@ import flexiv_runtime
 
 
 DEFAULT_NEEDLES = [
+    "drdk_target_streamer.py",
     "rdk_target_streamer.py",
     "follow_ball_with_studio.py",
     "dual_follow_with_studio.py",
