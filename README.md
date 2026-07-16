@@ -583,7 +583,7 @@ datasets/lerobot/qiming/quest_isaac_flexiv_stage3_<task>_<stamp>/
 └── videos/observation.images.cam_front/chunk-000/file-000.mp4
 ```
 
-Stage3 scene config 中的 `scene_objects` 支持 `usd`、`articulation`、`cuboid` 和 `cylinder`。Unitree/IsaacLab 资产通过 `${UNITREE_ASSET_ROOT}` 引用；代码会优先使用 `UNITREE_SIM_ISAACLAB_ASSETS`，否则查找相邻 workspace 的 `../unitree/unitree_sim_isaaclab/assets`。
+Stage3 scene config 中的 `scene_objects` 支持 `usd`、`articulation`、`cuboid` 和 `cylinder`。Unitree/IsaacLab 资产通过 `${UNITREE_ASSET_ROOT}` 引用；代码会优先使用 `UNITREE_ASSET_ROOT` 或 `UNITREE_SIM_ISAACLAB_ASSETS`，否则自动探测 `/data/qiming/unitree_sim_isaaclab/assets`，最后再查找相邻 workspace 的 `../unitree/unitree_sim_isaaclab/assets`。
 
 Stage3 fake sender 使用任务 waypoint profile，例如：
 

@@ -13,9 +13,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _default_unitree_asset_root() -> Path:
-    configured = os.environ.get("UNITREE_SIM_ISAACLAB_ASSETS")
+    configured = os.environ.get("UNITREE_ASSET_ROOT") or os.environ.get("UNITREE_SIM_ISAACLAB_ASSETS")
     if configured:
         return Path(configured).expanduser().resolve()
+    local_assets = Path("/data/qiming/unitree_sim_isaaclab/assets")
+    if local_assets.exists():
+        return local_assets.resolve()
     workspace_assets = REPO_ROOT.parent / "unitree" / "unitree_sim_isaaclab" / "assets"
     return workspace_assets.resolve()
 

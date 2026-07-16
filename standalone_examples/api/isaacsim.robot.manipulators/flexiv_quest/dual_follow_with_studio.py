@@ -223,6 +223,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gateway-endpoint", default="")
     parser.add_argument("--gateway-fps", type=float, default=DEFAULT_STAGE1_GATEWAY_FPS)
     parser.add_argument("--gateway-jpeg-quality", type=int, default=DEFAULT_STAGE1_GATEWAY_JPEG_QUALITY)
+    parser.add_argument(
+        "--capture-initial-frame",
+        type=Path,
+        default=None,
+        help="Write one rendered camera frame after startup initialization and exit.",
+    )
+    parser.add_argument("--capture-camera-name", default="cam_front")
+    parser.add_argument("--capture-after-frames", type=int, default=45)
     parser.add_argument("--coordinated-reset", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--reset-settle-sec", type=float, default=2.0)
     parser.add_argument("--startup-joint-tolerance-rad", type=float, default=0.03)
@@ -232,6 +240,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.left_serial_number = args.left_serial_number or DEFAULT_LEFT_SERIAL_NUMBER
     args.right_serial_number = args.right_serial_number or DEFAULT_RIGHT_SERIAL_NUMBER
     args.joint_group = args.joint_group or DEFAULT_JOINT_GROUP
+    if args.capture_initial_frame is not None:
+        args.headless = True
+        if args.max_frames <= 0:
+            args.max_frames = max(int(args.capture_after_frames) + 120, 180)
     if args.smoke_test:
         args.headless = True
     return args
@@ -580,7 +592,7 @@ def run(args: argparse.Namespace) -> int:
             raise RuntimeError(f"Failed to load Stage3 scene objects from {args.scene_config}: {exc}") from exc
 
     stage2_cameras = []
-    if args.gateway_endpoint:
+    if args.gateway_endpoint or args.capture_initial_frame is not None:
         for idx, camera_cfg in enumerate(_load_camera_config(args.scene_config)):
             name = str(camera_cfg.get("name", f"cam_{idx}"))
             pos, ori = camera_pose_from_config(camera_cfg)
@@ -594,7 +606,8 @@ def run(args: argparse.Namespace) -> int:
             camera.set_focal_length(float(camera_cfg.get("focal_length", 2.5)))
             camera.set_world_pose(position=pos, orientation=ori, camera_axes="usd")
             stage2_cameras.append(camera)
-        print(f"[FlexivDualTargetFrame] Stage2 gateway cameras enabled: {len(stage2_cameras)}", flush=True)
+        mode = "gateway/capture" if args.gateway_endpoint else "capture"
+        print(f"[FlexivDualTargetFrame] Stage2 {mode} cameras enabled: {len(stage2_cameras)}", flush=True)
 
     usd = str(Path(args.usd).expanduser().resolve())
     serials = {"left": args.left_serial_number, "right": args.right_serial_number}
@@ -1358,6 +1371,36 @@ def run(args: argparse.Namespace) -> int:
                 pass
             gateway_client = None
 
+    def capture_initial_frame_if_ready(frame_count: int) -> bool:
+        if args.capture_initial_frame is None or frame_count < max(1, int(args.capture_after_frames)):
+            return False
+        if not stage2_cameras:
+            raise RuntimeError("--capture-initial-frame requires at least one camera in --scene-config")
+        selected = stage2_cameras[0]
+        for camera in stage2_cameras:
+            if getattr(camera, "name", "") == args.capture_camera_name or camera.prim_path.endswith(
+                "/" + args.capture_camera_name
+            ):
+                selected = camera
+                break
+        rgba = selected.get_rgba()
+        if rgba is None:
+            return False
+        try:
+            import cv2
+        except ImportError as exc:
+            raise RuntimeError("opencv-python is required for --capture-initial-frame") from exc
+        output_path = Path(args.capture_initial_frame).expanduser().resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(output_path), _camera_rgba_to_bgr(rgba)):
+            raise RuntimeError(f"Failed to write initial frame: {output_path}")
+        print(
+            f"[FlexivDualTargetFrame] initial frame captured camera={args.capture_camera_name} "
+            f"path={output_path}",
+            flush=True,
+        )
+        return True
+
     world.add_physics_callback("dual_target_frame_step", callback_fn=on_physics_step)
     world.reset()
     for camera in stage2_cameras:
@@ -1388,6 +1431,8 @@ def run(args: argparse.Namespace) -> int:
             world.step(render=True)
             _update_quest_target_frames()
             publish_gateway_sample()
+            if capture_initial_frame_if_ready(frame_count):
+                break
             if pending_reset_control is not None:
                 control = pending_reset_control
                 pending_reset_control = None

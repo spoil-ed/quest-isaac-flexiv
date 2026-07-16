@@ -16,7 +16,7 @@ robots:
     end_effector_prim_name: "flange"
     usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
     examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
-    position: {x: -0.06, y: 0.42, z: 1.08}
+    position: {x: -0.06, y: 0.20, z: 1.08}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
     # Safe Studio/SimPlugin handshake posture. initial_q is reached afterward
     # through a rate-limited Cartesian target trajectory.
@@ -37,7 +37,7 @@ robots:
     end_effector_prim_name: "flange"
     usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
     examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
-    position: {x: -0.06, y: -0.42, z: 1.08}
+    position: {x: -0.06, y: -0.20, z: 1.08}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
     bootstrap_q: [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
     initial_q: [-1.301593, -1.71, -0.646, -1.835, -0.132, 1.924, 0]
@@ -53,32 +53,24 @@ cameras:
     resolution: [640, 480]
     fps: 30
     focal_length: 2.0
-    position: {x: 2.05, y: 0.0, z: 1.35}
-    look_at: {x: 0.42, y: 0.0, z: 0.60}
-    up: {x: 0.0, y: 0.0, z: 1.0}
+    position: {x: -0.15, y: 0.0, z: 2.75}
+    look_at: {x: 0.50, y: 0.0, z: 0.45}
+    up: {x: 1.0, y: 0.0, z: 0.0}
 
 scene_objects:
-  - name: "back_wall"
-    type: "cuboid"
-    prim_path: "/World/Stage3/BackWall"
-    position: {x: -0.12, y: 0.0, z: 1.00}
-    size: [0.05, 1.35, 0.56]
-    color: [0.72, 0.72, 0.70]
-    collision: false
-    rigid_body: false
   - name: "work_table_top"
     type: "cuboid"
     prim_path: "/World/Stage3/WorkTableTop"
-    # Keep the wall-mounted home flange clear of the tabletop collision box.
-    position: {x: 0.48, y: 0.0, z: 0.23}
-    size: [0.95, 0.82, 0.06]
+    # Long table: y length is > 2.5x x width, with a raised tabletop.
+    position: {x: 0.50, y: 0.0, z: 0.35}
+    size: [0.74, 1.90, 0.06]
     color: [0.18, 0.18, 0.17]
     collision: true
     rigid_body: false
   - name: "red_block"
     type: "cuboid"
     prim_path: "/World/Stage3/RedBlock"
-    position: {x: 0.48, y: 0.12, z: 0.305}
+    position: {x: 0.48, y: 0.12, z: 0.41}
     size: [0.06, 0.06, 0.06]
     color: [1.0, 0.0, 0.0]
     mass: 1.0
@@ -87,7 +79,7 @@ scene_objects:
   - name: "place_pad"
     type: "cuboid"
     prim_path: "/World/Stage3/PlacePad"
-    position: {x: 0.62, y: -0.22, z: 0.275}
+    position: {x: 0.62, y: -0.32, z: 0.39}
     size: [0.18, 0.18, 0.02]
     color: [0.08, 0.22, 0.75]
     collision: false

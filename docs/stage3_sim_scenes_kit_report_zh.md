@@ -29,7 +29,7 @@ Stage3 scene YAML -> Isaac task objects/camera
 
 - 原始平地双臂场景仍为 `configs/scenes/dual_rizon4_cam_front.yaml`。
 - Stage3 墙挂桌面基准为 `configs/scenes/dual_rizon4_wall_table_base.yaml`，四个任务 scene 在此基础上复制并放置任务物体。
-- Unitree 任务 Python 不作为 runtime 依赖；只通过 `${UNITREE_ASSET_ROOT}` 引用 USD 资产。资产根目录优先读取 `UNITREE_SIM_ISAACLAB_ASSETS`，否则自动发现相邻 Unitree workspace。
+- Unitree 任务 Python 不作为 runtime 依赖；只通过 `${UNITREE_ASSET_ROOT}` 引用 USD 资产。资产根目录优先读取 `UNITREE_ASSET_ROOT` 或 `UNITREE_SIM_ISAACLAB_ASSETS`，否则自动探测 `/data/qiming/unitree_sim_isaaclab/assets`，最后再发现相邻 Unitree workspace。
 - 默认只验收 `cam_front/color_0` 一个主视角，30fps H264。
 - 本阶段验收“任务场景 + fake 遥操闭环视频”，不要求真实物理抓取、堆叠或放入抽屉成功。
 

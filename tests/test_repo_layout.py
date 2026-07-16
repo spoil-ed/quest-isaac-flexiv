@@ -93,6 +93,7 @@ class RepoLayoutTests(unittest.TestCase):
             "flexiv_stack_status.py",
             "flexiv_studio_teleop.py",
             "convert_unitree_json_to_lerobot.py",
+            "capture_stage3_initial_frame.py",
             "fake_rizon4_quest_sender.py",
             "drdk_target_streamer.py",
             "rdk_target_streamer.py",
