@@ -5,12 +5,12 @@ set -Eeuo pipefail
 # Repository-owned paths are derived from this file. External runtimes can be
 # overridden with environment variables; see usage() below.
 
-REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 usage() {
   cat <<'EOF'
-Usage: ./start.sh
+Usage: ./scripts/start.sh
 
 Starts everything needed for dual-arm Quest teleoperation except the recorder:
   Docker left Studio, host right Studio, RobotControlApp, FlexivSimulation,

@@ -39,10 +39,8 @@ class RepoLayoutTests(unittest.TestCase):
             "local_exts",
             "logs",
             "requirements.txt",
-            "record.sh",
             "scripts",
             "spec",
-            "start.sh",
             "standalone_examples",
             "tests",
             "third_party",
@@ -51,12 +49,13 @@ class RepoLayoutTests(unittest.TestCase):
 
         self.assertTrue(actual.issubset(allowed), sorted(actual - allowed))
 
-    def test_root_start_script_starts_dual_stack_without_recorder(self):
-        start_script = ROOT / "start.sh"
+    def test_scripts_start_script_starts_dual_stack_without_recorder(self):
+        start_script = SCRIPTS / "start.sh"
         text = start_script.read_text(encoding="utf-8")
 
         self.assertTrue(start_script.stat().st_mode & 0o111)
         self.assertIn('REPO_ROOT="$(cd --', text)
+        self.assertIn('${BASH_SOURCE[0]}")/..', text)
         self.assertIn("docker/flexiv-studio/compose.yaml", text)
         self.assertIn("start_elements_studio_ui.py", text)
         self.assertIn("start_robot_control_app.py", text)
@@ -71,12 +70,13 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("clearing stale host shared memory", text)
         self.assertNotIn("/home/", text)
 
-    def test_root_record_script_wraps_interactive_recorder(self):
-        record_script = ROOT / "record.sh"
+    def test_scripts_record_script_wraps_interactive_recorder(self):
+        record_script = SCRIPTS / "record.sh"
         text = record_script.read_text(encoding="utf-8")
 
         self.assertTrue(record_script.stat().st_mode & 0o111)
         self.assertIn('REPO_ROOT="$(cd --', text)
+        self.assertIn('${BASH_SOURCE[0]}")/..', text)
         self.assertIn("scripts/record_unitree_json.py", text)
         self.assertIn("--gateway-endpoint", text)
         self.assertIn("--reset-on-save", text)

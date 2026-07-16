@@ -2,10 +2,10 @@
 set -Eeuo pipefail
 
 # Run the interactive dual-arm recorder in the foreground. This script is kept
-# separate from start.sh so restarting the control stack never creates a second
+# separate from scripts/start.sh so restarting the control stack never creates a second
 # recorder or steals keyboard control from the recorder terminal.
 
-REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 die() {
