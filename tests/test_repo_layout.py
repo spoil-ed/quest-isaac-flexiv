@@ -138,6 +138,7 @@ class RepoLayoutTests(unittest.TestCase):
             "flexiv_stack_status.py",
             "flexiv_studio_teleop.py",
             "convert_unitree_json_to_lerobot.py",
+            "capture_stage3_initial_frame.py",
             "fake_rizon4_quest_sender.py",
             "drdk_target_streamer.py",
             "rdk_target_streamer.py",
@@ -256,7 +257,11 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("--left-serial-number", command)
         self.assertIn("--right-serial-number", command)
         self.assertIn(
-            "--left-nullspace-posture=0.0,-0.6981317,0.0,1.57079632679,0.0,0.6981317,0.0",
+            "--left-nullspace-posture=-1.84,1.839,0.555,2.03,2.033,1.777,0.0",
+            command,
+        )
+        self.assertIn(
+            "--right-nullspace-posture=-1.301593,-1.71,-0.646,-1.835,-0.132,1.924,0.0",
             command,
         )
         self.assertIn("--nullspace-tracking-weight", command)

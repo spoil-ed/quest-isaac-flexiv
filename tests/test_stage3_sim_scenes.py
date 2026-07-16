@@ -17,7 +17,11 @@ STAGE3_SCENES = {
     "stack_rgyblock_flexiv_dual": ROOT / "configs/scenes/stack_rgyblock_flexiv_dual.yaml",
     "move_cylinder_flexiv_dual": ROOT / "configs/scenes/move_cylinder_flexiv_dual.yaml",
 }
-STUDIO_HOME_Q = [0.0, -0.6981317, 0.0, 1.57079632679, 0.0, 0.6981317, 0.0]
+STUDIO_HOME_Q = [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
+TASK_INITIAL_Q = {
+    "left": [-1.84, 1.839, 0.555, 2.03, 2.033, 1.777, 0.0],
+    "right": [-1.301593, -1.71, -0.646, -1.835, -0.132, 1.924, 0.0],
+}
 
 
 def load_stage2_runner():
@@ -31,21 +35,26 @@ def load_stage2_runner():
 class Stage3SimSceneConfigTests(unittest.TestCase):
     def test_stage3_task_scene_configs_parse_expected_objects(self):
         expected_objects = {
-            "pick_place_redblock_flexiv_dual": {"back_wall", "work_table_top", "red_block", "place_pad"},
-            "pick_redblock_into_drawer_flexiv_dual": {"back_wall", "work_table_top", "red_block", "drawer_cabinet"},
-            "stack_rgyblock_flexiv_dual": {"back_wall", "work_table_top", "red_block", "yellow_block", "green_block"},
-            "move_cylinder_flexiv_dual": {"back_wall", "work_table_top", "dark_cylinder", "cylinder_goal_band"},
+            "pick_place_redblock_flexiv_dual": {"work_table_top", "red_block", "place_pad"},
+            "pick_redblock_into_drawer_flexiv_dual": {"work_table_top", "red_block", "drawer_cabinet"},
+            "stack_rgyblock_flexiv_dual": {"work_table_top", "red_block", "yellow_block", "green_block"},
+            "move_cylinder_flexiv_dual": {"work_table_top", "dark_cylinder", "cylinder_goal_band"},
         }
         for task_name, scene_path in STAGE3_SCENES.items():
             with self.subTest(task_name=task_name):
                 data = load_scene_config(scene_path)
                 self.assertEqual(scene_task_metadata(data)["name"], task_name)
                 self.assertEqual([camera["name"] for camera in data["cameras"]], ["cam_front"])
+                camera = data["cameras"][0]
+                self.assertEqual(camera["position"]["y"], 0.0)
+                self.assertGreater(camera["position"]["z"], 2.0)
+                self.assertEqual(camera["up"], {"x": 1.0, "y": 0.0, "z": 0.0})
                 self.assertEqual(len(data["robots"]), 2)
                 for robot in data["robots"]:
-                    self.assertEqual(robot["initial_q"], STUDIO_HOME_Q)
+                    self.assertEqual(robot["bootstrap_q"], STUDIO_HOME_Q)
+                    self.assertEqual(robot["initial_q"], TASK_INITIAL_Q[robot["side"]])
                     self.assertTrue(str(robot["usd"]).endswith("/Rizon4_with_Grav.usd"))
-                    expected_y = 0.42 if robot["side"] == "left" else -0.42
+                    expected_y = 0.20 if robot["side"] == "left" else -0.20
                     self.assertEqual(robot["position"], {"x": -0.06, "y": expected_y, "z": 1.08})
                     self.assertEqual(
                         robot["orientation"],
@@ -54,7 +63,8 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
                 specs = parse_scene_objects(data, config_path=scene_path, validate_assets=True)
                 self.assertEqual({spec.name for spec in specs}, expected_objects[task_name])
                 table = next(spec for spec in specs if spec.name == "work_table_top")
-                self.assertLessEqual(table.position[2] + table.size[2] / 2.0, 0.261)
+                self.assertGreaterEqual(table.position[2] + table.size[2] / 2.0, 0.38)
+                self.assertGreaterEqual(table.size[1] / table.size[0], 2.5)
                 self.assertEqual(
                     _configured_xform_scale(table),
                     tuple(size * scale for size, scale in zip(table.size, table.scale)),
