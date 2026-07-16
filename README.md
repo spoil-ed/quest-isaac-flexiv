@@ -130,6 +130,22 @@ python scripts/start_isaac_follow.py \
 
 ### 6. 按 task name 录制 episode
 
+双臂正式采集可在独立终端直接运行包装脚本：
+
+```bash
+./record.sh
+```
+
+默认任务为 `pick_place_redblock_dual`，采集 `10` 条、`30 FPS`、分辨率 `640x480`，保存到 `datasets/stage1_records`，每次保存/丢弃后请求协调 reset。recorder 保持前台运行以接收单键操作。常用覆盖方式：
+
+```bash
+TASK_NAME=another_task EPISODES=20 ./record.sh
+```
+
+也可设置 `TASK_DIR`、`OUTPUT_ROOT`、`FPS`、`IMAGE_SIZE`、`MAX_FRAMES`、`RESET_TIMEOUT_SEC`、`RESET_ON_SAVE`、`GATEWAY_ENDPOINT` 或 `ISAAC_PYTHON`。脚本检测到已有 recorder 时会拒绝重复启动。
+
+底层等价命令如下，仍可用于单臂或自定义参数：
+
 ```bash
 python scripts/record_unitree_json.py \
   --gateway-endpoint tcp://127.0.0.1:5690 \

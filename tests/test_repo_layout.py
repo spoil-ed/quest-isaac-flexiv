@@ -39,6 +39,7 @@ class RepoLayoutTests(unittest.TestCase):
             "local_exts",
             "logs",
             "requirements.txt",
+            "record.sh",
             "scripts",
             "spec",
             "start.sh",
@@ -68,6 +69,18 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("stop_flexiv_stack.py", text)
         self.assertIn("down --remove-orphans", text)
         self.assertIn("clearing stale host shared memory", text)
+        self.assertNotIn("/home/", text)
+
+    def test_root_record_script_wraps_interactive_recorder(self):
+        record_script = ROOT / "record.sh"
+        text = record_script.read_text(encoding="utf-8")
+
+        self.assertTrue(record_script.stat().st_mode & 0o111)
+        self.assertIn('REPO_ROOT="$(cd --', text)
+        self.assertIn("scripts/record_unitree_json.py", text)
+        self.assertIn("--gateway-endpoint", text)
+        self.assertIn("--reset-on-save", text)
+        self.assertIn('exec "${COMMAND[@]}"', text)
         self.assertNotIn("/home/", text)
 
     def test_root_repo_does_not_keep_environment_links_or_generated_dirs(self):
