@@ -31,6 +31,16 @@ def state_packet() -> dict:
             "gripper_button": "trigger",
             "gripper_value": 0.6,
             "gripper_closed": True,
+            "axis_map": "-z,-x,y",
+            "publisher_position_scale": 1.0,
+            "isaac_position_scale": 1.0,
+            "publisher_position_deadband_m": 0.0,
+            "isaac_position_deadband_m": 0.0,
+            "engage_settle_sec": 0.25,
+            "position_mode": "relative",
+            "orientation_mode": "relative",
+            "workspace_clipping": False,
+            "tcp_rot_offset_wxyz": [0.0, 0.70710678, 0.0, 0.70710678],
             "controller_pose_openxr": [0.1, 1.2, -0.3, 1.0, 0.0, 0.0, 0.0],
             "controller_delta_base": [0.01, 0.02, 0.03],
             "target_packet_pose_base_tcp": [0.01, 0.02, 0.03, 1.0, 0.0, 0.0, 0.0],
@@ -62,6 +72,10 @@ class DualArmStatePrinterTests(unittest.TestCase):
         self.assertIn("trigger=0.600", output)
         self.assertIn("OpenXR", output)
         self.assertIn("mapped dxyz", output)
+        self.assertIn("Mapping:", output)
+        self.assertIn("[-dOpenXR.z, -dOpenXR.x, +dOpenXR.y]", output)
+        self.assertIn("q_goal=(q_packet * inverse(q_packet@engage))", output)
+        self.assertIn("hold the last mapped goal", output)
 
     def test_rejects_wrong_joint_count(self):
         packet = state_packet()
@@ -79,6 +93,12 @@ class DualArmStatePrinterTests(unittest.TestCase):
         self.assertAlmostEqual(rpy[0], 0.0, places=6)
         self.assertAlmostEqual(rpy[1], 0.0, places=6)
         self.assertAlmostEqual(rpy[2], 90.0, places=6)
+
+    def test_axis_map_formula_explains_output_axes(self):
+        self.assertEqual(
+            MODULE.axis_map_formula("-z,-x,y"),
+            "[-dOpenXR.z, -dOpenXR.x, +dOpenXR.y]",
+        )
 
 
 if __name__ == "__main__":

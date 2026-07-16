@@ -313,12 +313,21 @@ class DualQuestTargetUdpReceiver:
                     packet["monotonic_time"] = float(packet["monotonic_time"])
                     packet["enable_value"] = float(packet.get("enable_value", 0.0))
                     packet["gripper_value"] = float(packet.get("gripper_value", 0.0))
+                    packet["position_delta_scale"] = float(packet.get("position_delta_scale", 1.0))
+                    packet["position_deadband_m"] = float(packet.get("position_deadband_m", 0.0))
+                    packet["engage_settle_sec"] = float(packet.get("engage_settle_sec", 0.0))
                     pose = packet.get("controller_pose_openxr")
                     if pose is not None:
                         pose = [float(value) for value in pose]
                         if len(pose) != 7 or not all(math.isfinite(value) for value in pose):
                             continue
                         packet["controller_pose_openxr"] = pose
+                    tcp_offset = packet.get("tcp_rot_offset_wxyz")
+                    if tcp_offset is not None:
+                        tcp_offset = [float(value) for value in tcp_offset]
+                        if len(tcp_offset) != 4 or not all(math.isfinite(value) for value in tcp_offset):
+                            continue
+                        packet["tcp_rot_offset_wxyz"] = tcp_offset
                 except (KeyError, TypeError, ValueError):
                     continue
                 self._latest_inputs[side] = packet
@@ -1681,6 +1690,36 @@ def run(args: argparse.Namespace) -> int:
                     ),
                     "gripper_closed": bool(
                         quest_input is not None and quest_input.get("gripper_closed", False)
+                    ),
+                    "axis_map": (
+                        str(args.quest_axis_map)
+                        if quest_input is None
+                        else str(quest_input.get("axis_map", args.quest_axis_map))
+                    ),
+                    "publisher_position_scale": (
+                        1.0
+                        if quest_input is None
+                        else float(quest_input.get("position_delta_scale", 1.0))
+                    ),
+                    "isaac_position_scale": float(args.quest_position_scale),
+                    "publisher_position_deadband_m": (
+                        0.0
+                        if quest_input is None
+                        else float(quest_input.get("position_deadband_m", 0.0))
+                    ),
+                    "isaac_position_deadband_m": float(args.quest_position_deadband_m),
+                    "engage_settle_sec": (
+                        0.0
+                        if quest_input is None
+                        else float(quest_input.get("engage_settle_sec", 0.0))
+                    ),
+                    "position_mode": str(args.quest_target_mode),
+                    "orientation_mode": str(args.quest_relative_orientation_mode),
+                    "workspace_clipping": bool(args.quest_workspace_clipping),
+                    "tcp_rot_offset_wxyz": (
+                        None
+                        if quest_input is None or quest_input.get("tcp_rot_offset_wxyz") is None
+                        else [float(value) for value in quest_input["tcp_rot_offset_wxyz"]]
                     ),
                     "controller_pose_openxr": (
                         None

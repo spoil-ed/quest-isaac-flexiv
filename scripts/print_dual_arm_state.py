@@ -84,6 +84,9 @@ def parse_state_packet(data: bytes) -> dict[str, Any]:
             quest["mapped_goal_pose_base_tcp"] = _optional_float_list(
                 quest.get("mapped_goal_pose_base_tcp"), 7, name=f"{side}.quest.mapped_goal_pose_base_tcp"
             )
+            quest["tcp_rot_offset_wxyz"] = _optional_float_list(
+                quest.get("tcp_rot_offset_wxyz"), 4, name=f"{side}.quest.tcp_rot_offset_wxyz"
+            )
     return packet
 
 
@@ -102,6 +105,32 @@ def quaternion_wxyz_to_rpy_deg(quaternion: list[float]) -> tuple[float, float, f
 
 def _numbers(values: list[float], precision: int = 4) -> str:
     return "[" + ", ".join(f"{value: .{precision}f}" for value in values) + "]"
+
+
+def axis_map_formula(axis_map: str) -> str:
+    components = []
+    for raw_token in str(axis_map).split(","):
+        token = raw_token.strip().lower()
+        sign = "-" if token.startswith("-") else "+"
+        axis = token[1:] if token.startswith(("-", "+")) else token
+        if axis not in {"x", "y", "z"}:
+            return f"axis_map({axis_map})"
+        components.append(f"{sign}dOpenXR.{axis}")
+    if len(components) != 3:
+        return f"axis_map({axis_map})"
+    return "[" + ", ".join(components) + "]"
+
+
+def orientation_mapping_description(mode: str) -> str:
+    if mode == "relative":
+        return "q_goal=(q_packet * inverse(q_packet@engage)) * q_TCP@engage"
+    if mode == "packet":
+        return "q_goal=q_packet"
+    if mode == "reference":
+        return "q_goal=q_TCP@engage (orientation held)"
+    if mode == "current":
+        return "q_goal=q_TCP_current (orientation not commanded)"
+    return f"q_goal uses unknown mode {mode!r}"
 
 
 def format_state(packet: dict[str, Any], *, received_time: float | None = None) -> str:
@@ -159,6 +188,35 @@ def format_state(packet: dict[str, Any], *, received_time: float | None = None) 
             lines.append(f"    packet pose base TCP={_numbers(quest['target_packet_pose_base_tcp'])}")
         if quest.get("mapped_goal_pose_base_tcp") is not None:
             lines.append(f"    mapped goal base TCP={_numbers(quest['mapped_goal_pose_base_tcp'])}")
+        axis_map = str(quest.get("axis_map", "x,y,z"))
+        publisher_scale = float(quest.get("publisher_position_scale", 1.0))
+        isaac_scale = float(quest.get("isaac_position_scale", 1.0))
+        position_mode = str(quest.get("position_mode", "relative"))
+        orientation_mode = str(quest.get("orientation_mode", "relative"))
+        enable_button = str(quest.get("enable_button", "squeeze"))
+        settle_sec = float(quest.get("engage_settle_sec", 0.0))
+        lines.append("    Mapping:")
+        lines.append(
+            f"      XYZ axis_map={axis_map}: dbase={axis_map_formula(axis_map)} "
+            f"* publisher_scale({publisher_scale:g}) * isaac_scale({isaac_scale:g})"
+        )
+        if position_mode == "relative":
+            lines.append(
+                f"      XYZ goal=TCP@{enable_button}-engage + dbase; "
+                f"zero is latched after {settle_sec:g}s settle"
+            )
+        else:
+            lines.append(f"      XYZ goal uses packet directly (position_mode={position_mode})")
+        tcp_offset = quest.get("tcp_rot_offset_wxyz")
+        offset_text = "unknown" if tcp_offset is None else _numbers(tcp_offset)
+        lines.append(
+            f"      QUAT q_packet=axis_map(q_OpenXR) * tcp_offset({offset_text}); "
+            f"{orientation_mapping_description(orientation_mode)}"
+        )
+        lines.append(
+            f"      release {enable_button}: stop following and hold the last mapped goal; "
+            f"workspace_clip={bool(quest.get('workspace_clipping', False))}"
+        )
     return "\n".join(lines)
 
 

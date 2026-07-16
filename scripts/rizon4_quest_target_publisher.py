@@ -198,6 +198,11 @@ def build_quest_input_packet(
     gripper_value: float,
     gripper_closed: bool,
     now: float,
+    axis_map: str = DEFAULT_AXIS_MAP,
+    position_delta_scale: float = 1.0,
+    position_deadband: float = 0.0,
+    engage_settle_sec: float = 0.25,
+    tcp_rot_offset_wxyz: str = "0.0,0.70710678,0.0,0.70710678",
     serial_number: str = DEFAULT_SERIAL_NUMBER,
     joint_group: str = DEFAULT_JOINT_GROUP,
 ) -> dict:
@@ -219,6 +224,15 @@ def build_quest_input_packet(
         "gripper_button": str(gripper_button),
         "gripper_value": float(gripper_value),
         "gripper_closed": bool(gripper_closed),
+        "axis_map": str(axis_map),
+        "position_delta_scale": float(position_delta_scale),
+        "position_deadband_m": float(position_deadband),
+        "engage_settle_sec": float(engage_settle_sec),
+        "tcp_rot_offset_wxyz": _as_float_list(
+            (item.strip() for item in str(tcp_rot_offset_wxyz).split(",") if item.strip()),
+            4,
+            "tcp_rot_offset_wxyz",
+        ),
         "monotonic_time": float(now),
     }
 
@@ -449,6 +463,11 @@ def main(argv: list[str] | None = None) -> int:
                         gripper_value=gripper_value,
                         gripper_closed=gripper_closed,
                         now=now,
+                        axis_map=args.axis_map,
+                        position_delta_scale=args.position_delta_scale,
+                        position_deadband=args.position_deadband,
+                        engage_settle_sec=args.engage_settle_sec,
+                        tcp_rot_offset_wxyz=args.right_tcp_rot_offset,
                         serial_number=serial_numbers[side],
                         joint_group=args.joint_group,
                     )

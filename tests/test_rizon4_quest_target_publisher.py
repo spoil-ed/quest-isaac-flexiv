@@ -245,6 +245,9 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertEqual(len(packet["controller_pose_openxr"]), 7)
         self.assertFalse(packet["enabled"])
         self.assertTrue(packet["gripper_closed"])
+        self.assertEqual(packet["axis_map"], mod.DEFAULT_AXIS_MAP)
+        self.assertEqual(packet["position_delta_scale"], 1.0)
+        self.assertEqual(len(packet["tcp_rot_offset_wxyz"]), 4)
 
     def test_select_enable_accepts_analog_squeeze_threshold(self):
         class FakeTeleVuer:
