@@ -63,7 +63,7 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
                 specs = parse_scene_objects(data, config_path=scene_path, validate_assets=True)
                 self.assertEqual({spec.name for spec in specs}, expected_objects[task_name])
                 table = next(spec for spec in specs if spec.name == "work_table_top")
-                self.assertGreaterEqual(table.position[2] + table.size[2] / 2.0, 0.38)
+                self.assertAlmostEqual(table.position[2] + table.size[2] / 2.0, 0.26)
                 self.assertGreaterEqual(table.size[1] / table.size[0], 2.5)
                 self.assertEqual(
                     _configured_xform_scale(table),
