@@ -606,7 +606,7 @@ python scripts/validate_data_artifacts.py \
 
 Stage3 在 Stage2 双臂闭环上增加 config-driven scene kit，不改变原始平地双臂场景。原始平地配置仍是 `configs/scenes/dual_rizon4_cam_front.yaml`；墙挂桌面任务通过以下 scene/pipeline 显式启用：
 
-Stage3 两臂继续使用本仓库 Isaac extension 中的 `Rizon4_with_Grav.usd`。`bootstrap_q` 必须与两套 Studio 启动参数 `--group_state home` 一致，采用 `[0, -0.698132, 0, 1.5708, 0, 0.698132, 0]`；最终任务 `initial_q` 分别为左 `[-1.84, 1.839, 0.555, 2.03, 2.033, 1.777, 0]`、右 `[-1.301593, -1.71, -0.646, -1.835, -0.132, 1.924, 0]`，同时作为进入 Cartesian 模式后的零空间参考。两臂墙装 base pose 固定为左 `(-0.06, 0.20, 1.08)`、右 `(-0.06, -0.20, 1.08)`、共同绕 Y 轴 `+90°`。启动时 bridge 先以 `bootstrap_q` 完成握手，DRDK 再通过 `NRT_JOINT_POSITION` 平滑到 `initial_q`；切换 Cartesian 后锁存到位 TCP，最后才允许 Quest/TargetFrame 接管。
+Stage3 两臂继续使用本仓库 Isaac extension 中的 `Rizon4_with_Grav.usd`。`bootstrap_q` 必须与两套 Studio 启动参数 `--group_state home` 一致，采用 `[0, -0.698132, 0, 1.5708, 0, 0.698132, 0]`；最终任务 `initial_q` 分别为左 `[-1.8879, 1.7997, 0.5862, 1.9189, 2.1874, 1.8322, -0.1244]`、右 `[-1.18, -1.7187, -0.6799, -1.7503, -0.1607, 1.9371, -0.0858]`。这两套关节角由运行时在保持原 TCP 方向的条件下，将两臂末端从上一版 ready 位姿共同下移 `0.05 m` 后标定得到，同时作为进入 Cartesian 模式后的零空间参考。两臂墙装 base pose 固定为左 `(-0.06, 0.20, 1.08)`、右 `(-0.06, -0.20, 1.08)`、共同绕 Y 轴 `+90°`。启动时 bridge 先以 `bootstrap_q` 完成握手，DRDK 再通过 `NRT_JOINT_POSITION` 平滑到 `initial_q`；切换 Cartesian 后锁存到位 TCP，最后才允许 Quest/TargetFrame 接管。
 
 Flexiv SimPlugin 的物理闭环使用 2000 Hz，`render_hz`、TargetFrame/RDK 目标、gateway 和 recorder 仍为 30 Hz。Isaac `World` 会把 2000 Hz 物理子步批量放进 30 Hz 渲染步中，所以降频的是目标采样、GUI 和数据流，不是 Studio 力矩闭环。不要把 `physics_hz` 降到录像帧率；低频直接应用 Studio effort 会改变积分步长并造成关节振荡和超力矩。
 

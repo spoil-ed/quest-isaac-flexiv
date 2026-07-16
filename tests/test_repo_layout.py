@@ -257,11 +257,11 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("--left-serial-number", command)
         self.assertIn("--right-serial-number", command)
         self.assertIn(
-            "--left-nullspace-posture=-1.84,1.839,0.555,2.03,2.033,1.777,0.0",
+            "--left-nullspace-posture=-1.8879,1.7997,0.5862,1.9189,2.1874,1.8322,-0.1244",
             command,
         )
         self.assertIn(
-            "--right-nullspace-posture=-1.301593,-1.71,-0.646,-1.835,-0.132,1.924,0.0",
+            "--right-nullspace-posture=-1.18,-1.7187,-0.6799,-1.7503,-0.1607,1.9371,-0.0858",
             command,
         )
         self.assertIn("--nullspace-tracking-weight", command)

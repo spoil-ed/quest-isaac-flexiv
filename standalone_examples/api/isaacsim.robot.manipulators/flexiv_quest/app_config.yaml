@@ -21,7 +21,8 @@ robots:
     # Safe Studio/SimPlugin handshake posture. initial_q is reached afterward
     # through a rate-limited Cartesian target trajectory.
     bootstrap_q: [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
-    initial_q: [-1.84, 1.839, 0.555, 2.03, 2.033, 1.777, 0]
+    # Runtime-calibrated posture with the TCP 5 cm below the previous ready pose.
+    initial_q: [-1.8879, 1.7997, 0.5862, 1.9189, 2.1874, 1.8322, -0.1244]
     target:
       prim_path: "/World/TargetFrameLeft"
       name: "target_frame_left"
@@ -40,7 +41,8 @@ robots:
     position: {x: -0.06, y: -0.20, z: 1.08}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
     bootstrap_q: [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
-    initial_q: [-1.301593, -1.71, -0.646, -1.835, -0.132, 1.924, 0]
+    # Runtime-calibrated posture with the TCP 5 cm below the previous ready pose.
+    initial_q: [-1.18, -1.7187, -0.6799, -1.7503, -0.1607, 1.9371, -0.0858]
     target:
       prim_path: "/World/TargetFrameRight"
       name: "target_frame_right"
