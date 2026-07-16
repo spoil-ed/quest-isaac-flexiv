@@ -59,8 +59,8 @@ scene_objects:
   - name: "work_table_top"
     type: "cuboid"
     prim_path: "/World/Stage3/WorkTableTop"
-    # Long table: y length is > 2.5x x width, with a raised tabletop.
-    position: {x: 0.50, y: 0.0, z: 0.23}
+    # Long table lowered to keep the bootstrap-to-initq trajectory collision-free.
+    position: {x: 0.50, y: 0.0, z: 0.13}
     size: [0.74, 1.90, 0.06]
     color: [0.18, 0.18, 0.17]
     collision: true
@@ -68,7 +68,7 @@ scene_objects:
   - name: "red_block"
     type: "cuboid"
     prim_path: "/World/Stage3/RedBlock"
-    position: {x: 0.42, y: 0.18, z: 0.30}
+    position: {x: 0.42, y: 0.18, z: 0.20}
     size: [0.05, 0.05, 0.05]
     color: [1.0, 0.0, 0.0]
     mass: 3.0
@@ -78,7 +78,7 @@ scene_objects:
     type: "articulation"
     prim_path: "/World/Stage3/Cabinet"
     usd: "${UNITREE_ASSET_ROOT}/objects/drawers/cabinet_collider.usd"
-    position: {x: 0.70, y: -0.35, z: 0.28}
+    position: {x: 0.70, y: -0.35, z: 0.18}
     orientation: {w: 0.70710678, x: 0.0, y: 0.0, z: 0.70710678}
     scale: [0.52, 0.52, 0.52]
     joint_positions:

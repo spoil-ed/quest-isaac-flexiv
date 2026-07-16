@@ -59,8 +59,8 @@ scene_objects:
   - name: "work_table_top"
     type: "cuboid"
     prim_path: "/World/Stage3/WorkTableTop"
-    # Long table: y length is > 2.5x x width, with a raised tabletop.
-    position: {x: 0.52, y: 0.0, z: 0.23}
+    # Long table lowered to keep the bootstrap-to-initq trajectory collision-free.
+    position: {x: 0.52, y: 0.0, z: 0.13}
     size: [0.74, 1.90, 0.06]
     color: [0.18, 0.18, 0.17]
     collision: true
@@ -68,7 +68,7 @@ scene_objects:
   - name: "dark_cylinder"
     type: "cylinder"
     prim_path: "/World/Stage3/DarkCylinder"
-    position: {x: 0.54, y: 0.0, z: 0.295}
+    position: {x: 0.54, y: 0.0, z: 0.195}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
     radius: 0.018
     height: 0.35
@@ -79,7 +79,7 @@ scene_objects:
   - name: "cylinder_goal_band"
     type: "cuboid"
     prim_path: "/World/Stage3/CylinderGoalBand"
-    position: {x: 0.66, y: -0.32, z: 0.275}
+    position: {x: 0.66, y: -0.32, z: 0.175}
     size: [0.22, 0.08, 0.018]
     color: [0.05, 0.45, 0.85]
     collision: false

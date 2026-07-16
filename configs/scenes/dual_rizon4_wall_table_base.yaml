@@ -64,8 +64,8 @@ scene_objects:
   - name: "work_table_top"
     type: "cuboid"
     prim_path: "/World/Stage3/WorkTableTop"
-    # Long table: y length is > 2.5x x width, with a raised tabletop.
-    position: {x: 0.50, y: 0.0, z: 0.23}
+    # Long table lowered to keep the bootstrap-to-initq trajectory collision-free.
+    position: {x: 0.50, y: 0.0, z: 0.13}
     size: [0.74, 1.90, 0.06]
     color: [0.18, 0.18, 0.17]
     collision: true
@@ -74,8 +74,8 @@ scene_objects:
   - name: "work_table_front_leg"
     type: "cuboid"
     prim_path: "/World/Stage3/WorkTableFrontLeg"
-    position: {x: 0.82, y: 0.0, z: 0.10}
-    size: [0.04, 1.80, 0.20]
+    position: {x: 0.82, y: 0.0, z: 0.05}
+    size: [0.04, 1.80, 0.10]
     color: [0.28, 0.28, 0.26]
     collision: true
     rigid_body: false
