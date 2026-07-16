@@ -89,6 +89,7 @@ DEFAULT_RIGHT_TARGET_POSE_UDP_PORT = 57681
 DEFAULT_LEFT_RDK_STATUS_UDP_PORT = 57682
 DEFAULT_RIGHT_RDK_STATUS_UDP_PORT = 57683
 DEFAULT_QUEST_TARGET_UDP_PORT = 57679
+DEFAULT_STATE_MONITOR_UDP_PORT = 57684
 
 
 def _read_structured_config(path: Path) -> dict[str, Any] | list[Any]:
@@ -223,6 +224,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gateway-endpoint", default="")
     parser.add_argument("--gateway-fps", type=float, default=DEFAULT_STAGE1_GATEWAY_FPS)
     parser.add_argument("--gateway-jpeg-quality", type=int, default=DEFAULT_STAGE1_GATEWAY_JPEG_QUALITY)
+    parser.add_argument("--state-monitor-udp-host", default="127.0.0.1")
+    parser.add_argument("--state-monitor-udp-port", type=int, default=DEFAULT_STATE_MONITOR_UDP_PORT)
+    parser.add_argument("--state-monitor-hz", type=float, default=10.0)
     parser.add_argument("--coordinated-reset", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--reset-settle-sec", type=float, default=2.0)
     parser.add_argument("--reset-timeout-sec", type=float, default=90.0)
@@ -237,6 +241,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.headless = True
     if float(args.reset_timeout_sec) <= 0.0:
         parser.error("--reset-timeout-sec must be positive")
+    if not 0 <= int(args.state_monitor_udp_port) <= 65535:
+        parser.error("--state-monitor-udp-port must be between 0 and 65535; use 0 to disable")
+    if float(args.state_monitor_hz) <= 0.0:
+        parser.error("--state-monitor-hz must be positive")
     return args
 
 
@@ -717,6 +725,12 @@ def run(args: argparse.Namespace) -> int:
     gateway_client = None
     gateway_last_connect_attempt = 0.0
     gateway_last_publish = 0.0
+    state_monitor_publisher = (
+        TargetPoseUdpPublisher(args.state_monitor_udp_host, args.state_monitor_udp_port)
+        if int(args.state_monitor_udp_port) > 0
+        else None
+    )
+    state_monitor_last_publish = 0.0
     pending_reset_control = None
     last_reset_seq = 0
     reset_state = "idle"
@@ -1555,6 +1569,49 @@ def run(args: argparse.Namespace) -> int:
                 pass
             gateway_client = None
 
+    def publish_state_monitor() -> None:
+        """Publish read-only actual arm state independently of the recorder gateway."""
+
+        nonlocal state_monitor_last_publish
+        if state_monitor_publisher is None:
+            return
+        current_time = time.monotonic()
+        if current_time - state_monitor_last_publish < 1.0 / float(args.state_monitor_hz):
+            return
+        state_monitor_last_publish = current_time
+
+        arm_states = {}
+        for side, arm in arms.items():
+            tcp_position, tcp_orientation = arm.robot.end_effector.get_world_pose()
+            tcp_pose_base = arm.rdk_current_pose_base_tcp
+            if tcp_pose_base is None:
+                tcp_pose_base = _current_pose_base_tcp(arm)
+            arm_states[side] = {
+                "serial": arm.serial_number,
+                "q": [float(value) for value in arm.robot.q],
+                "dq": [float(value) for value in arm.robot.dq],
+                "tcp_pose_base": [float(value) for value in tcp_pose_base],
+                "tcp_pose_world": [
+                    *[float(value) for value in tcp_position],
+                    *[float(value) for value in tcp_orientation],
+                ],
+                "ready": bool(
+                    arm.startup_trajectory_complete
+                    and arm.rdk_ready
+                    and arm.rdk_phase == "ready"
+                    and arm.effort_control_enabled
+                ),
+            }
+        state_monitor_publisher.publish(
+            {
+                "schema": "flexiv_dual_arm_state.v1",
+                "servo_cycle": int(servo_cycle),
+                "stamp_ns": now_ns(),
+                "monotonic_time": current_time,
+                "arms": arm_states,
+            }
+        )
+
     world.add_physics_callback("dual_target_frame_step", callback_fn=on_physics_step)
     world.reset()
     for camera in stage2_cameras:
@@ -1584,6 +1641,7 @@ def run(args: argparse.Namespace) -> int:
             # every 0.5 ms physics tick.
             world.step(render=True)
             _update_quest_target_frames()
+            publish_state_monitor()
             publish_gateway_sample()
             if pending_reset_control is not None:
                 control = pending_reset_control
@@ -1607,6 +1665,8 @@ def run(args: argparse.Namespace) -> int:
         if quest_target_receiver is not None:
             quest_target_receiver.close()
         rdk_status_receiver.close()
+        if state_monitor_publisher is not None:
+            state_monitor_publisher.close()
         if gateway_client is not None:
             gateway_client.close()
         if args.smoke_test:

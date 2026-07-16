@@ -290,6 +290,9 @@ else
     --gateway-endpoint tcp://127.0.0.1:5791 \
     --gateway-fps 30 \
     --gateway-jpeg-quality 90 \
+    --state-monitor-udp-host 127.0.0.1 \
+    --state-monitor-udp-port 57684 \
+    --state-monitor-hz 10 \
     --coordinated-reset \
     --reset-settle-sec 2 \
     --reset-timeout-sec 90

@@ -180,7 +180,25 @@ recorder 快捷键：
 
 recorder 启动、录制中、暂停、保存和丢弃时都会输出录制统计，包括本次完成条数、当前 episode 帧数/时长、任务目录已保存总条数/总帧数/总时长。
 
-### 7. 转换为 LeRobot 数据集
+### 7. 实时查看双臂关节与末端位姿
+
+双臂 Isaac 进程默认以 `10 Hz` 向本机 UDP `57684` 发布只读状态。该通道独立于 gateway/recorder，不占用采集连接，也不会向机器人发送命令。另开终端运行：
+
+```bash
+./print.sh
+```
+
+默认以 `5 Hz` 刷新，分别显示左右臂的 serial、READY 状态、7 个关节角（rad/deg）、关节速度（rad/s），以及 TCP 在机器人基座坐标系和 Isaac 世界坐标系中的位置与四元数。常用选项：
+
+```bash
+./print.sh --rate-hz 10     # 以 10 Hz 刷新
+./print.sh --once           # 收到一帧后退出
+./print.sh --no-clear       # 保留历史输出，不清屏
+```
+
+如果 Isaac 是在加入该功能前启动的，需要在 recorder 退出后用 `./start.sh` 冷启动一次控制栈；`start.sh` 本身不会停止正在运行的 recorder。
+
+### 8. 转换为 LeRobot 数据集
 
 ```bash
 python scripts/convert_unitree_json_to_lerobot.py \
@@ -189,7 +207,7 @@ python scripts/convert_unitree_json_to_lerobot.py \
   --output-root datasets/lerobot
 ```
 
-### 8. 严格验证
+### 9. 严格验证
 
 ```bash
 python scripts/validate_data_artifacts.py \
@@ -202,7 +220,7 @@ python scripts/validate_data_artifacts.py \
   --min-servo-cycle-delta 5
 ```
 
-### 9. 检查与停止
+### 10. 检查与停止
 
 ```bash
 python scripts/flexiv_stack_status.py

@@ -61,6 +61,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gateway-endpoint", default="")
     parser.add_argument("--gateway-fps", type=float, default=None)
     parser.add_argument("--gateway-jpeg-quality", type=int, default=None)
+    parser.add_argument("--state-monitor-udp-host", default=None)
+    parser.add_argument("--state-monitor-udp-port", type=int, default=None)
+    parser.add_argument("--state-monitor-hz", type=float, default=None)
     parser.add_argument("--coordinated-reset", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--reset-settle-sec", type=float, default=2.0)
     parser.add_argument("--reset-timeout-sec", type=float, default=90.0)
@@ -126,6 +129,9 @@ def build_command(args: argparse.Namespace) -> list[str]:
         ("--max-angular-speed-rad-s", args.max_angular_speed_rad_s),
         ("--gateway-fps", args.gateway_fps),
         ("--gateway-jpeg-quality", args.gateway_jpeg_quality),
+        ("--state-monitor-udp-host", args.state_monitor_udp_host),
+        ("--state-monitor-udp-port", args.state_monitor_udp_port),
+        ("--state-monitor-hz", args.state_monitor_hz),
     ):
         _maybe_extend(command, option, value)
     if args.enable_quest_target_udp:

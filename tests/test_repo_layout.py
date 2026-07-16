@@ -40,6 +40,7 @@ class RepoLayoutTests(unittest.TestCase):
             "logs",
             "requirements.txt",
             "record.sh",
+            "print.sh",
             "scripts",
             "spec",
             "start.sh",
@@ -81,6 +82,16 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("--gateway-endpoint", text)
         self.assertIn("--reset-on-save", text)
         self.assertIn('exec "${COMMAND[@]}"', text)
+        self.assertNotIn("/home/", text)
+
+    def test_root_print_script_wraps_dual_arm_state_monitor(self):
+        print_script = ROOT / "print.sh"
+        text = print_script.read_text(encoding="utf-8")
+
+        self.assertTrue(print_script.stat().st_mode & 0o111)
+        self.assertIn('REPO_ROOT="$(cd --', text)
+        self.assertIn("scripts/print_dual_arm_state.py", text)
+        self.assertIn('exec "$PYTHON"', text)
         self.assertNotIn("/home/", text)
 
     def test_root_repo_does_not_keep_environment_links_or_generated_dirs(self):
@@ -131,6 +142,7 @@ class RepoLayoutTests(unittest.TestCase):
             "drdk_target_streamer.py",
             "rdk_target_streamer.py",
             "record_unitree_json.py",
+            "print_dual_arm_state.py",
             "rizon4_quest_target_publisher.py",
             "run_stage1_data_collection_smoke.py",
             "run_stage1_single_rizon4_real_validation.py",
@@ -197,6 +209,21 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("--gpu-dynamics", dual_command)
         self.assertEqual(dual_command[dual_command.index("--quest-relative-orientation-mode") + 1], "relative")
         self.assertEqual(dual_command[dual_command.index("--reset-timeout-sec") + 1], "90.0")
+
+        monitor_command = dual_follow.build_command(
+            dual_follow.parse_args(
+                [
+                    "--state-monitor-udp-host",
+                    "127.0.0.1",
+                    "--state-monitor-udp-port",
+                    "57684",
+                    "--state-monitor-hz",
+                    "10",
+                ]
+            )
+        )
+        self.assertEqual(monitor_command[monitor_command.index("--state-monitor-udp-port") + 1], "57684")
+        self.assertEqual(monitor_command[monitor_command.index("--state-monitor-hz") + 1], "10.0")
 
     def test_external_rdk_target_streamer_uses_compatible_rdk_client(self):
         streamer = load_script("start_rdk_target_streamer.py")
