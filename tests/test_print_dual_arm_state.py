@@ -20,6 +20,22 @@ def state_packet() -> dict:
         "tcp_pose_base": [0.4, 0.0, 0.5, 1.0, 0.0, 0.0, 0.0],
         "tcp_pose_world": [1.4, 0.0, 0.5, 1.0, 0.0, 0.0, 0.0],
         "ready": True,
+        "quest": {
+            "available": True,
+            "seq": 17,
+            "age_sec": 0.01,
+            "motion_data_ready": True,
+            "enable_button": "squeeze",
+            "enable_value": 0.8,
+            "enabled": True,
+            "gripper_button": "trigger",
+            "gripper_value": 0.6,
+            "gripper_closed": True,
+            "controller_pose_openxr": [0.1, 1.2, -0.3, 1.0, 0.0, 0.0, 0.0],
+            "controller_delta_base": [0.01, 0.02, 0.03],
+            "target_packet_pose_base_tcp": [0.01, 0.02, 0.03, 1.0, 0.0, 0.0, 0.0],
+            "mapped_goal_pose_base_tcp": [0.4, 0.1, 0.5, 1.0, 0.0, 0.0, 0.0],
+        },
     }
     return {
         "schema": MODULE.SCHEMA,
@@ -41,6 +57,11 @@ class DualArmStatePrinterTests(unittest.TestCase):
         self.assertIn("q deg", output)
         self.assertIn("TCP base", output)
         self.assertIn("TCP world", output)
+        self.assertIn("Quest", output)
+        self.assertIn("squeeze=0.800", output)
+        self.assertIn("trigger=0.600", output)
+        self.assertIn("OpenXR", output)
+        self.assertIn("mapped dxyz", output)
 
     def test_rejects_wrong_joint_count(self):
         packet = state_packet()

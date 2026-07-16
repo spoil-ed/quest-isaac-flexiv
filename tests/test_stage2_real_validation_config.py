@@ -1,7 +1,9 @@
 import importlib.util
 import json
+import socket
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -28,6 +30,49 @@ def load_dual_app():
 
 
 class Stage2RealValidationConfigTests(unittest.TestCase):
+    def test_dual_quest_receiver_keeps_fresh_read_only_input_state(self):
+        dual_app = load_dual_app()
+        receiver = dual_app.DualQuestTargetUdpReceiver(
+            "127.0.0.1",
+            0,
+            serials={"left": "Rizon4-L", "right": "Rizon4-R"},
+            joint_group="ARM_1",
+            max_age_sec=1.0,
+        )
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sender.sendto(
+                json.dumps(
+                    {
+                        "schema": "rizon4_quest_input.v1",
+                        "serial": "Rizon4-L",
+                        "joint_group": "ARM_1",
+                        "seq": 12,
+                        "side": "left",
+                        "motion_data_ready": True,
+                        "controller_pose_openxr": [0.1, 1.2, -0.3, 1.0, 0.0, 0.0, 0.0],
+                        "enable_button": "squeeze",
+                        "enable_value": 0.7,
+                        "enabled": True,
+                        "gripper_button": "trigger",
+                        "gripper_value": 0.2,
+                        "gripper_closed": False,
+                        "monotonic_time": time.monotonic(),
+                    }
+                ).encode("utf-8"),
+                receiver._socket.getsockname(),
+            )
+            receiver.poll_latest()
+            packet = receiver.latest_input("left")
+
+            self.assertIsNotNone(packet)
+            self.assertEqual(packet["seq"], 12)
+            self.assertTrue(packet["enabled"])
+            self.assertEqual(packet["controller_pose_openxr"][:3], [0.1, 1.2, -0.3])
+        finally:
+            sender.close()
+            receiver.close()
+
     def test_json_config_supplies_dual_serials_paths_ports_and_outputs(self):
         module = load_validation_script()
         with tempfile.TemporaryDirectory(prefix="stage2_real_config_") as tmp:

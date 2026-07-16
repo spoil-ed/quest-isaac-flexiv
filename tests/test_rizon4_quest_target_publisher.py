@@ -224,6 +224,28 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertEqual(packet["side"], "left")
         self.assertTrue(packet["closed"])
 
+    def test_build_input_packet_reports_pose_and_buttons_without_enabling_control(self):
+        packet = mod.build_quest_input_packet(
+            seq=9,
+            side="left",
+            motion_data_ready=True,
+            controller_pose_openxr=[0.1, 1.2, -0.3, 1.0, 0.0, 0.0, 0.0],
+            enable_button="squeeze",
+            enable_value=0.2,
+            enabled=False,
+            gripper_button="trigger",
+            gripper_value=0.7,
+            gripper_closed=True,
+            now=13.0,
+            serial_number="Rizon4-qSaFLh",
+        )
+
+        self.assertEqual(packet["schema"], "rizon4_quest_input.v1")
+        self.assertEqual(packet["serial"], "Rizon4-qSaFLh")
+        self.assertEqual(len(packet["controller_pose_openxr"]), 7)
+        self.assertFalse(packet["enabled"])
+        self.assertTrue(packet["gripper_closed"])
+
     def test_select_enable_accepts_analog_squeeze_threshold(self):
         class FakeTeleVuer:
             right_ctrl_squeeze = False

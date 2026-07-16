@@ -266,6 +266,9 @@ class DualQuestTargetUdpReceiver:
         self._socket.bind(self._address)
         self._socket.setblocking(False)
         self._pending_grippers: dict[str, bool] = {}
+        self._latest_inputs: dict[str, dict[str, Any] | None] = {
+            side: None for side in self._serials
+        }
 
     @property
     def address(self) -> tuple[str, int]:
@@ -286,6 +289,27 @@ class DualQuestTargetUdpReceiver:
                 continue
             side = str(packet.get("side", "")).lower()
             if side not in self._serials:
+                continue
+            if packet.get("schema") == "rizon4_quest_input.v1":
+                if (
+                    str(packet.get("serial", "")) != self._serials[side]
+                    or str(packet.get("joint_group", "")) != self._joint_group
+                ):
+                    continue
+                try:
+                    packet["seq"] = int(packet.get("seq", -1))
+                    packet["monotonic_time"] = float(packet["monotonic_time"])
+                    packet["enable_value"] = float(packet.get("enable_value", 0.0))
+                    packet["gripper_value"] = float(packet.get("gripper_value", 0.0))
+                    pose = packet.get("controller_pose_openxr")
+                    if pose is not None:
+                        pose = [float(value) for value in pose]
+                        if len(pose) != 7 or not all(math.isfinite(value) for value in pose):
+                            continue
+                        packet["controller_pose_openxr"] = pose
+                except (KeyError, TypeError, ValueError):
+                    continue
+                self._latest_inputs[side] = packet
                 continue
             gripper = parse_quest_gripper_packet(
                 packet,
@@ -310,9 +334,20 @@ class DualQuestTargetUdpReceiver:
         self._pending_grippers.clear()
         return latest
 
+    def latest_input(self, side: str) -> dict[str, Any] | None:
+        packet = self._latest_inputs.get(str(side))
+        if packet is None:
+            return None
+        age_sec = time.monotonic() - float(packet["monotonic_time"])
+        if age_sec < -1.0 or age_sec > self._max_age_sec:
+            return None
+        return packet
+
     def clear(self) -> None:
         self.poll_latest()
         self.take_latest_grippers()
+        for side in self._latest_inputs:
+            self._latest_inputs[side] = None
 
     def close(self) -> None:
         self._socket.close()
@@ -1586,6 +1621,12 @@ def run(args: argparse.Namespace) -> int:
             tcp_pose_base = arm.rdk_current_pose_base_tcp
             if tcp_pose_base is None:
                 tcp_pose_base = _current_pose_base_tcp(arm)
+            quest_input = (
+                None
+                if quest_target_receiver is None
+                else quest_target_receiver.latest_input(side)
+            )
+            quest_target = arm.latest_quest_target
             arm_states[side] = {
                 "serial": arm.serial_number,
                 "q": [float(value) for value in arm.robot.q],
@@ -1601,6 +1642,54 @@ def run(args: argparse.Namespace) -> int:
                     and arm.rdk_phase == "ready"
                     and arm.effort_control_enabled
                 ),
+                "quest": {
+                    "available": quest_input is not None,
+                    "seq": None if quest_input is None else int(quest_input["seq"]),
+                    "age_sec": (
+                        None
+                        if quest_input is None
+                        else max(0.0, current_time - float(quest_input["monotonic_time"]))
+                    ),
+                    "motion_data_ready": bool(
+                        quest_input is not None and quest_input.get("motion_data_ready", False)
+                    ),
+                    "enable_button": (
+                        "squeeze" if quest_input is None else str(quest_input.get("enable_button", "squeeze"))
+                    ),
+                    "enable_value": (
+                        0.0 if quest_input is None else float(quest_input.get("enable_value", 0.0))
+                    ),
+                    "enabled": bool(quest_input is not None and quest_input.get("enabled", False)),
+                    "gripper_button": (
+                        "trigger" if quest_input is None else str(quest_input.get("gripper_button", "trigger"))
+                    ),
+                    "gripper_value": (
+                        0.0 if quest_input is None else float(quest_input.get("gripper_value", 0.0))
+                    ),
+                    "gripper_closed": bool(
+                        quest_input is not None and quest_input.get("gripper_closed", False)
+                    ),
+                    "controller_pose_openxr": (
+                        None
+                        if quest_input is None or quest_input.get("controller_pose_openxr") is None
+                        else [float(value) for value in quest_input["controller_pose_openxr"]]
+                    ),
+                    "controller_delta_base": (
+                        None
+                        if quest_target is None or quest_target.controller_delta_base is None
+                        else [float(value) for value in quest_target.controller_delta_base]
+                    ),
+                    "target_packet_pose_base_tcp": (
+                        None
+                        if quest_target is None
+                        else [float(value) for value in quest_target.pose_base_tcp_des]
+                    ),
+                    "mapped_goal_pose_base_tcp": (
+                        None
+                        if arm.quest_goal_pose_base_tcp is None
+                        else [float(value) for value in arm.quest_goal_pose_base_tcp]
+                    ),
+                },
             }
         state_monitor_publisher.publish(
             {

@@ -49,6 +49,10 @@ def _float_list(value: Any, length: int, *, name: str) -> list[float]:
     return result
 
 
+def _optional_float_list(value: Any, length: int, *, name: str) -> list[float] | None:
+    return None if value is None else _float_list(value, length, name=name)
+
+
 def parse_state_packet(data: bytes) -> dict[str, Any]:
     packet = json.loads(data.decode("utf-8"))
     if not isinstance(packet, dict) or packet.get("schema") != SCHEMA:
@@ -64,6 +68,22 @@ def parse_state_packet(data: bytes) -> dict[str, Any]:
         arm["dq"] = _float_list(arm.get("dq"), 7, name=f"{side}.dq")
         arm["tcp_pose_base"] = _float_list(arm.get("tcp_pose_base"), 7, name=f"{side}.tcp_pose_base")
         arm["tcp_pose_world"] = _float_list(arm.get("tcp_pose_world"), 7, name=f"{side}.tcp_pose_world")
+        quest = arm.get("quest")
+        if quest is not None:
+            if not isinstance(quest, dict):
+                raise ValueError(f"{side}.quest must be an object")
+            quest["controller_pose_openxr"] = _optional_float_list(
+                quest.get("controller_pose_openxr"), 7, name=f"{side}.quest.controller_pose_openxr"
+            )
+            quest["controller_delta_base"] = _optional_float_list(
+                quest.get("controller_delta_base"), 3, name=f"{side}.quest.controller_delta_base"
+            )
+            quest["target_packet_pose_base_tcp"] = _optional_float_list(
+                quest.get("target_packet_pose_base_tcp"), 7, name=f"{side}.quest.target_packet_pose_base_tcp"
+            )
+            quest["mapped_goal_pose_base_tcp"] = _optional_float_list(
+                quest.get("mapped_goal_pose_base_tcp"), 7, name=f"{side}.quest.mapped_goal_pose_base_tcp"
+            )
     return packet
 
 
@@ -98,6 +118,7 @@ def format_state(packet: dict[str, Any], *, received_time: float | None = None) 
         dq = arm["dq"]
         base = arm["tcp_pose_base"]
         world = arm["tcp_pose_world"]
+        quest = arm.get("quest")
         rpy = quaternion_wxyz_to_rpy_deg(base[3:])
         lines.extend(
             [
@@ -111,6 +132,33 @@ def format_state(packet: dict[str, Any], *, received_time: float | None = None) 
                 f"  TCP world   xyz(m)={_numbers(world[:3])}  quat={_numbers(world[3:])}",
             ]
         )
+        if not isinstance(quest, dict) or not quest.get("available", False):
+            lines.append("  Quest       unavailable")
+            continue
+        controller_pose = quest.get("controller_pose_openxr")
+        quest_age_ms = 1000.0 * float(quest.get("age_sec") or 0.0)
+        lines.append(
+            f"  Quest       seq={quest.get('seq', '-')} age={quest_age_ms:.1f}ms "
+            f"tracking_ready={bool(quest.get('motion_data_ready', False))}"
+        )
+        lines.append(
+            f"    {quest.get('enable_button', 'enable')}={float(quest.get('enable_value', 0.0)):.3f} "
+            f"enabled={bool(quest.get('enabled', False))}  "
+            f"{quest.get('gripper_button', 'gripper')}={float(quest.get('gripper_value', 0.0)):.3f} "
+            f"closed={bool(quest.get('gripper_closed', False))}"
+        )
+        if controller_pose is not None:
+            controller_rpy = quaternion_wxyz_to_rpy_deg(controller_pose[3:])
+            lines.append(
+                f"    OpenXR     xyz(m)={_numbers(controller_pose[:3])} "
+                f"quat={_numbers(controller_pose[3:])} RPY(deg)={_numbers(list(controller_rpy), 2)}"
+            )
+        if quest.get("controller_delta_base") is not None:
+            lines.append(f"    mapped dxyz base(m)={_numbers(quest['controller_delta_base'])}")
+        if quest.get("target_packet_pose_base_tcp") is not None:
+            lines.append(f"    packet pose base TCP={_numbers(quest['target_packet_pose_base_tcp'])}")
+        if quest.get("mapped_goal_pose_base_tcp") is not None:
+            lines.append(f"    mapped goal base TCP={_numbers(quest['mapped_goal_pose_base_tcp'])}")
     return "\n".join(lines)
 
 

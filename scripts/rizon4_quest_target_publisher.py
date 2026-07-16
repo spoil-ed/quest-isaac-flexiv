@@ -185,6 +185,44 @@ def build_gripper_packet(
     }
 
 
+def build_quest_input_packet(
+    *,
+    seq: int,
+    side: str,
+    motion_data_ready: bool,
+    controller_pose_openxr: list[float] | None,
+    enable_button: str,
+    enable_value: float,
+    enabled: bool,
+    gripper_button: str,
+    gripper_value: float,
+    gripper_closed: bool,
+    now: float,
+    serial_number: str = DEFAULT_SERIAL_NUMBER,
+    joint_group: str = DEFAULT_JOINT_GROUP,
+) -> dict:
+    return {
+        "schema": "rizon4_quest_input.v1",
+        "serial": str(serial_number),
+        "joint_group": str(joint_group),
+        "seq": int(seq),
+        "side": str(side),
+        "motion_data_ready": bool(motion_data_ready),
+        "controller_pose_openxr": (
+            None
+            if controller_pose_openxr is None
+            else _as_float_list(controller_pose_openxr, 7, "controller_pose_openxr")
+        ),
+        "enable_button": str(enable_button),
+        "enable_value": float(enable_value),
+        "enabled": bool(enabled),
+        "gripper_button": str(gripper_button),
+        "gripper_value": float(gripper_value),
+        "gripper_closed": bool(gripper_closed),
+        "monotonic_time": float(now),
+    }
+
+
 class QuestRelativeMapper:
     def __init__(
         self,
@@ -388,7 +426,34 @@ def main(argv: list[str] | None = None) -> int:
                     threshold=args.gripper_threshold,
                 )
                 packet = None
+                controller_matrix = select_controller_pose(tv, side) if ready else None
+                controller_pose_openxr = (
+                    None
+                    if controller_matrix is None
+                    else [
+                        *pose_matrix_position(controller_matrix),
+                        *pose_matrix_quat_wxyz(controller_matrix),
+                    ]
+                )
                 reason = "not_ready" if not ready else ("settling" if enabled else "disabled")
+                publisher.publish(
+                    build_quest_input_packet(
+                        seq=seq,
+                        side=side,
+                        motion_data_ready=ready,
+                        controller_pose_openxr=controller_pose_openxr,
+                        enable_button=args.enable_button,
+                        enable_value=button_value,
+                        enabled=enabled,
+                        gripper_button=args.gripper_button,
+                        gripper_value=gripper_value,
+                        gripper_closed=gripper_closed,
+                        now=now,
+                        serial_number=serial_numbers[side],
+                        joint_group=args.joint_group,
+                    )
+                )
+                sent += 1
                 if ready:
                     publisher.publish(
                         build_gripper_packet(
@@ -402,7 +467,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     sent += 1
                     packet = mappers[side].update(
-                        select_controller_pose(tv, side),
+                        controller_matrix,
                         enabled=enabled,
                         seq=seq,
                         now=now,
