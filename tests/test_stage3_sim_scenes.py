@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from flexiv_sim_scenes.config import load_scene_config, parse_scene_objects, scene_task_metadata
+from flexiv_sim_scenes.isaac import _configured_xform_scale
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +55,19 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
                 self.assertEqual({spec.name for spec in specs}, expected_objects[task_name])
                 table = next(spec for spec in specs if spec.name == "work_table_top")
                 self.assertLessEqual(table.position[2] + table.size[2] / 2.0, 0.261)
+                self.assertEqual(
+                    _configured_xform_scale(table),
+                    tuple(size * scale for size, scale in zip(table.size, table.scale)),
+                )
+
+    def test_scene_reset_restores_transforms_velocities_and_joint_state(self):
+        source = (ROOT / "flexiv_sim_scenes/isaac.py").read_text(encoding="utf-8")
+
+        self.assertIn("def reset_scene_objects(", source)
+        self.assertIn("_set_xform(stage, spec, scale=_configured_xform_scale(spec))", source)
+        self.assertIn("CreateVelocityAttr", source)
+        self.assertIn("CreateAngularVelocityAttr", source)
+        self.assertIn("_reset_joint_positions_and_velocities(stage, spec)", source)
 
     def test_missing_usd_asset_fails_clearly(self):
         with tempfile.TemporaryDirectory(prefix="stage3_missing_asset_") as tmp:

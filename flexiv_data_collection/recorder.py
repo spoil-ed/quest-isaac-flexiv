@@ -349,7 +349,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--reset-timeout-sec",
         type=float,
-        default=25.0,
+        default=90.0,
         help="Maximum time to wait for Isaac/RDK reset completion before failing.",
     )
     parser.add_argument("--start-key", default="s")
@@ -415,10 +415,24 @@ def main(argv: list[str] | None = None) -> int:
     def perform_reset(reason: str) -> dict[str, Any]:
         nonlocal reset_failed
         try:
-            return request_reset(client, reason, timeout_sec=args.reset_timeout_sec)
-        except Exception:
+            status = request_reset(client, reason, timeout_sec=args.reset_timeout_sec)
+        except Exception as exc:
             reset_failed = True
+            print(
+                f"[recorder] reset failed: {exc}; recorder remains alive, "
+                f"press {args.reset_key} to retry",
+                flush=True,
+            )
             raise
+        reset_failed = False
+        return status
+
+    def try_perform_reset(reason: str) -> bool:
+        try:
+            perform_reset(reason)
+        except Exception:
+            return False
+        return True
 
     try:
         print(
@@ -435,7 +449,9 @@ def main(argv: list[str] | None = None) -> int:
             if key == args.reset_key:
                 now = time.monotonic()
                 if now - last_keyboard_reset >= max(0.0, float(args.reset_key_cooldown_sec)):
-                    perform_reset("keyboard")
+                    if not try_perform_reset("keyboard"):
+                        paused = bool(active)
+                        print_recording_status(event="reset失败，录制已暂停")
                     last_keyboard_reset = now
                 else:
                     print("[recorder] ignored repeated reset key", flush=True)
@@ -447,7 +463,7 @@ def main(argv: list[str] | None = None) -> int:
                 paused = False
                 frames_this_episode = 0
                 if args.reset_on_save:
-                    perform_reset("discard")
+                    try_perform_reset("discard")
                 print("[recorder] discarded active episode", flush=True)
                 print_recording_status(event="已丢弃")
                 continue
@@ -467,7 +483,9 @@ def main(argv: list[str] | None = None) -> int:
                         "[recorder] previous reset failed; requesting a fresh recovery reset",
                         flush=True,
                     )
-                    perform_reset("startup_recovery")
+                    if not try_perform_reset("startup_recovery"):
+                        time.sleep(0.1)
+                        continue
                 episode_dir = writer.create_episode()
                 active = True
                 paused = False
@@ -488,7 +506,7 @@ def main(argv: list[str] | None = None) -> int:
                     episodes_done += 1
                     frames_this_episode = 0
                     if args.reset_on_save:
-                        perform_reset("save")
+                        try_perform_reset("save")
                     print(f"[recorder] saved {saved}", flush=True)
                     print_recording_status(event="已保存")
                 continue
@@ -517,7 +535,7 @@ def main(argv: list[str] | None = None) -> int:
                 episodes_done += 1
                 frames_this_episode = 0
                 if args.reset_on_save:
-                    perform_reset("max_frames")
+                    try_perform_reset("max_frames")
                 print(f"[recorder] saved {saved}", flush=True)
                 print_recording_status(event="达到帧数上限并保存")
     except KeyboardInterrupt:

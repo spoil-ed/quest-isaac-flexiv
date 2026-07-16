@@ -34,6 +34,14 @@ def _set_xform(stage: Any, spec: SceneObjectSpec, *, scale: tuple[float, float, 
     xformable.AddScaleOp().Set(Gf.Vec3f(*(scale or spec.scale)))
 
 
+def _configured_xform_scale(spec: SceneObjectSpec) -> tuple[float, float, float]:
+    if spec.object_type == "cuboid":
+        sx, sy, sz = spec.size or (0.05, 0.05, 0.05)
+        ox, oy, oz = spec.scale
+        return (sx * ox, sy * oy, sz * oz)
+    return spec.scale
+
+
 def _apply_display_color(stage: Any, spec: SceneObjectSpec) -> None:
     if spec.color is None:
         return
@@ -68,9 +76,7 @@ def _define_cuboid(stage: Any, spec: SceneObjectSpec) -> None:
 
     cube = UsdGeom.Cube.Define(stage, spec.prim_path)
     cube.CreateSizeAttr(1.0)
-    sx, sy, sz = spec.size or (0.05, 0.05, 0.05)
-    ox, oy, oz = spec.scale
-    _set_xform(stage, spec, scale=(sx * ox, sy * oy, sz * oz))
+    _set_xform(stage, spec, scale=_configured_xform_scale(spec))
     _apply_display_color(stage, spec)
     _apply_physics(stage, spec)
 
@@ -125,6 +131,45 @@ def _apply_initial_joint_positions(stage: Any, spec: SceneObjectSpec) -> dict[st
     return status
 
 
+def _reset_joint_positions_and_velocities(stage: Any, spec: SceneObjectSpec) -> dict[str, bool]:
+    """Restore every authored state/drive attribute for configured scene joints."""
+
+    from pxr import Usd
+
+    if not spec.joint_positions:
+        return {}
+    root = stage.GetPrimAtPath(spec.prim_path)
+    if not root.IsValid():
+        return {name: False for name in spec.joint_positions}
+    status = {name: False for name in spec.joint_positions}
+    for prim in Usd.PrimRange(root):
+        name = prim.GetName()
+        if name not in spec.joint_positions:
+            continue
+        restored = False
+        for attr_name in (
+            "state:linear:physics:position",
+            "state:angular:physics:position",
+            "drive:linear:physics:targetPosition",
+            "drive:angular:physics:targetPosition",
+        ):
+            attr = prim.GetAttribute(attr_name)
+            if attr and attr.IsValid():
+                attr.Set(float(spec.joint_positions[name]))
+                restored = True
+        for attr_name in (
+            "state:linear:physics:velocity",
+            "state:angular:physics:velocity",
+            "drive:linear:physics:targetVelocity",
+            "drive:angular:physics:targetVelocity",
+        ):
+            attr = prim.GetAttribute(attr_name)
+            if attr and attr.IsValid():
+                attr.Set(0.0)
+        status[name] = restored
+    return status
+
+
 def _add_usd_reference(stage: Any, spec: SceneObjectSpec) -> dict[str, Any]:
     from isaacsim.core.utils.stage import add_reference_to_stage
 
@@ -159,6 +204,46 @@ def build_scene_objects(
         summary.update(extra)
         summaries.append(summary)
     return summaries
+
+
+def reset_scene_objects(
+    world: Any,
+    scene_config: dict[str, Any],
+    *,
+    config_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Restore configured scene transforms, rigid velocities, and joint states."""
+
+    from pxr import Gf, UsdPhysics
+
+    specs = parse_scene_objects(scene_config, config_path=config_path, validate_assets=True)
+    stage = _stage_from_world(world)
+    results: list[dict[str, Any]] = []
+    for spec in specs:
+        prim = stage.GetPrimAtPath(spec.prim_path)
+        if not prim.IsValid():
+            raise RuntimeError(f"Cannot reset missing scene object prim {spec.prim_path}")
+        _set_xform(stage, spec, scale=_configured_xform_scale(spec))
+        if spec.rigid_body:
+            rigid_api = UsdPhysics.RigidBodyAPI(prim)
+            velocity_attr = rigid_api.GetVelocityAttr()
+            if not velocity_attr or not velocity_attr.IsValid():
+                velocity_attr = rigid_api.CreateVelocityAttr()
+            velocity_attr.Set(Gf.Vec3f(0.0, 0.0, 0.0))
+            angular_velocity_attr = rigid_api.GetAngularVelocityAttr()
+            if not angular_velocity_attr or not angular_velocity_attr.IsValid():
+                angular_velocity_attr = rigid_api.CreateAngularVelocityAttr()
+            angular_velocity_attr.Set(Gf.Vec3f(0.0, 0.0, 0.0))
+        joint_status = _reset_joint_positions_and_velocities(stage, spec)
+        results.append(
+            {
+                "name": spec.name,
+                "prim_path": spec.prim_path,
+                "rigid_body": spec.rigid_body,
+                "joint_position_status": joint_status,
+            }
+        )
+    return results
 
 
 def stage3_sim_state(scene_config: dict[str, Any], scene_objects: list[dict[str, Any]], *, config_path: Path | None) -> dict[str, Any]:

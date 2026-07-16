@@ -319,7 +319,7 @@ class QuestRelativeTargetMapper:
         workspace_min,
         workspace_max,
         position_deadband_m: float = 0.0,
-        orientation_mode: str = "packet",
+        orientation_mode: str = "relative",
         clamp_workspace: bool = True,
     ) -> None:
         self.axis_map = axis_map

@@ -76,6 +76,22 @@ def parse_target_command_packet(
     )
 
 
+def parse_reset_request_seq(packet: dict, *, serial_number: str, joint_group: str) -> int | None:
+    """Return a coordinated-reset sequence carried by a normal target packet."""
+
+    if str(packet.get("schema", "")) != "flexiv_target_pose.v1":
+        return None
+    if str(packet.get("serial", "")) != str(serial_number):
+        return None
+    if str(packet.get("joint_group", "")) != str(joint_group):
+        return None
+    try:
+        reset_seq = int(packet.get("reset_seq", 0))
+    except (TypeError, ValueError):
+        return None
+    return reset_seq if reset_seq > 0 else None
+
+
 def pop_synchronized_target_pair(
     command_buffers: dict[str, dict[int, TargetCommand]], *, after_cycle: int
 ) -> tuple[TargetCommand, TargetCommand] | None:
@@ -178,6 +194,26 @@ def _wait_until_operational(robot_pair, timeout_sec: float) -> None:
         raise TimeoutError(f"DRDK robot pair did not become operational within {float(timeout_sec):.3f}s")
 
 
+def _switch_mode_and_wait(robot_pair, target_mode, *, timeout_sec: float) -> None:
+    """Switch both robots and wait until the pair reports the requested mode."""
+
+    if any(current_mode != target_mode for current_mode in robot_pair.mode()):
+        robot_pair.SwitchMode(target_mode)
+    deadline = time.monotonic() + max(0.1, float(timeout_sec))
+    while any(current_mode != target_mode for current_mode in robot_pair.mode()):
+        if not robot_pair.connected() or robot_pair.fault() or not robot_pair.operational():
+            raise RuntimeError(f"DRDK robot pair failed while switching to mode {target_mode}")
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"DRDK robot pair did not enter mode {target_mode} within {timeout_sec:.3f}s")
+        time.sleep(0.01)
+    # RobotPair.mode() can reflect the requested state before the runtime has
+    # completed its controller handoff.  One short stabilization interval
+    # prevents the first command from racing that internal transition.
+    time.sleep(0.05)
+    if any(current_mode != target_mode for current_mode in robot_pair.mode()):
+        raise RuntimeError(f"DRDK robot pair left requested mode {target_mode} during handoff")
+
+
 def _connect_robot_pair(args: argparse.Namespace, *, flexivdrdk):
     whitelist = [item.strip() for item in str(args.network_interface_whitelist).split(",") if item.strip()]
     deadline = time.monotonic() + max(0.0, float(args.connect_timeout_sec))
@@ -206,14 +242,9 @@ def _joint_errors(current_q, target_q) -> list[float]:
     ]
 
 
-def initialize_robot_pair(args: argparse.Namespace, *, flexivdrdk, flexivrdk, progress_callback=None):
-    robot_pair = _connect_robot_pair(args, flexivdrdk=flexivdrdk)
-    if robot_pair.fault():
-        if not args.clear_fault:
-            raise RuntimeError("DRDK robot pair fault is active")
-        cleared = robot_pair.ClearFault()
-        if args.strict_clear_fault and not all(bool(value) for value in cleared):
-            raise RuntimeError(f"DRDK failed to clear both robot faults: {cleared}")
+def move_robot_pair_to_initial_q(args: argparse.Namespace, *, robot_pair, flexivrdk, progress_callback=None):
+    """Move an already connected pair to init_q and enter Cartesian mode."""
+
     _wait_until_operational(robot_pair, float(args.enable_timeout_sec))
 
     states = robot_pair.states()
@@ -226,8 +257,7 @@ def initialize_robot_pair(args: argparse.Namespace, *, flexivdrdk, flexivrdk, pr
         raise ValueError("configured null-space posture length must match each robot DoF")
 
     joint_mode = flexivrdk.Mode.NRT_JOINT_POSITION
-    if any(current_mode != joint_mode for current_mode in robot_pair.mode()):
-        robot_pair.SwitchMode(joint_mode)
+    _switch_mode_and_wait(robot_pair, joint_mode, timeout_sec=float(args.enable_timeout_sec))
     # Follow the official NRT joint-position example: establish the first
     # command from state sampled *after* the mode switch.  Sending a distant
     # task posture as the first command leaves the controller handoff
@@ -327,8 +357,7 @@ def initialize_robot_pair(args: argparse.Namespace, *, flexivdrdk, flexivrdk, pr
     )
 
     cartesian_mode = flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE
-    if any(current_mode != cartesian_mode for current_mode in robot_pair.mode()):
-        robot_pair.SwitchMode(cartesian_mode)
+    _switch_mode_and_wait(robot_pair, cartesian_mode, timeout_sec=float(args.enable_timeout_sec))
     # The runtime resets the null-space reference whenever this mode is
     # re-entered, so install the task initq only after the Cartesian switch.
     robot_pair.SetNullSpacePosture(nullspace_postures)
@@ -338,7 +367,75 @@ def initialize_robot_pair(args: argparse.Namespace, *, flexivdrdk, flexivrdk, pr
         angular_manipulability=(0.0, 0.0),
         ref_positions_tracking=(weight, weight),
     )
+    return nullspace_postures
+
+
+def initialize_connected_robot_pair(args: argparse.Namespace, *, robot_pair, flexivrdk, progress_callback=None):
+    """Perform the startup init flow on an already connected RobotPair."""
+
+    if robot_pair.fault():
+        if not args.clear_fault:
+            raise RuntimeError("DRDK robot pair fault is active")
+        cleared = robot_pair.ClearFault()
+        if args.strict_clear_fault and not all(bool(value) for value in cleared):
+            raise RuntimeError(f"DRDK failed to clear both robot faults: {cleared}")
+    nullspace_postures = move_robot_pair_to_initial_q(
+        args,
+        robot_pair=robot_pair,
+        flexivrdk=flexivrdk,
+        progress_callback=progress_callback,
+    )
+    return nullspace_postures
+
+
+def initialize_robot_pair(args: argparse.Namespace, *, flexivdrdk, flexivrdk, progress_callback=None):
+    robot_pair = _connect_robot_pair(args, flexivdrdk=flexivdrdk)
+    nullspace_postures = initialize_connected_robot_pair(
+        args,
+        robot_pair=robot_pair,
+        flexivrdk=flexivrdk,
+        progress_callback=progress_callback,
+    )
     return robot_pair, nullspace_postures
+
+
+def recover_connected_robot_pair_to_initial_q(
+    args: argparse.Namespace,
+    *,
+    robot_pair,
+    flexivrdk,
+    progress_callback=None,
+    phase_callback=None,
+):
+    """Stop, clear fault, enable, then recover a connected pair with NRT joint motion."""
+
+    if phase_callback is not None:
+        phase_callback("reset_stopping")
+    try:
+        robot_pair.Stop()
+    except Exception as exc:
+        print(
+            f"[DrdkTargetStreamer] Stop() reported {exc}; "
+            "continuing because the runtime may already be stopped",
+            flush=True,
+        )
+    if phase_callback is not None:
+        phase_callback("reset_clearing_fault")
+    if robot_pair.fault():
+        cleared = robot_pair.ClearFault()
+        if not all(bool(value) for value in cleared):
+            raise RuntimeError(f"DRDK failed to clear both robot faults: {cleared}")
+    # Stop() leaves a healthy simulated robot in a stopped/idle controller
+    # state while operational() may still report true.  Enable explicitly so
+    # the following NRT mode switch is applicable even without an active fault.
+    robot_pair.Enable()
+    _wait_until_operational(robot_pair, float(args.enable_timeout_sec))
+    return move_robot_pair_to_initial_q(
+        args,
+        robot_pair=robot_pair,
+        flexivrdk=flexivrdk,
+        progress_callback=progress_callback,
+    )
 
 
 def _status_packet(
@@ -349,6 +446,8 @@ def _status_packet(
     reference_pose: list[float] | None,
     current_pose: list[float] | None,
     current_q: list[float] | None = None,
+    reset_seq: int = 0,
+    error: str | None = None,
 ) -> dict:
     packet = {
         "schema": "flexiv_rdk_streamer_status.v1",
@@ -357,6 +456,7 @@ def _status_packet(
         "ready": bool(ready),
         "phase": str(phase),
         "monotonic_time": time.monotonic(),
+        "reset_seq": int(reset_seq),
     }
     if reference_pose is not None:
         packet["reference_pose_base_tcp"] = list(reference_pose)
@@ -364,6 +464,8 @@ def _status_packet(
         packet["current_pose_base_tcp"] = list(current_pose)
     if current_q is not None:
         packet["current_q"] = list(current_q)
+    if error:
+        packet["error"] = str(error)
     return packet
 
 
@@ -392,6 +494,11 @@ def main(argv: list[str] | None = None) -> int:
     last_sent_cycle = -1
     last_status_time = 0.0
     last_log_time = 0.0
+    pending_reset_seq = 0
+    handled_reset_seq = 0
+    recovery_required = False
+    recovery_phase = "fault"
+    status_error: str | None = None
 
     def publish_status(
         ready: bool,
@@ -399,6 +506,8 @@ def main(argv: list[str] | None = None) -> int:
         phase: str,
         current_poses: dict[str, list[float]] | None = None,
         current_qs: dict[str, list[float]] | None = None,
+        reset_seq: int | None = None,
+        error: str | None = None,
     ) -> None:
         poses = current_poses or {}
         joint_positions = current_qs or {}
@@ -410,42 +519,31 @@ def main(argv: list[str] | None = None) -> int:
                 reference_pose=reference_poses.get(side),
                 current_pose=poses.get(side),
                 current_q=joint_positions.get(side),
+                reset_seq=handled_reset_seq if reset_seq is None else int(reset_seq),
+                error=error,
             )
             status_socket.sendto(
                 json.dumps(packet, separators=(",", ":")).encode("utf-8"),
                 status_addresses[side],
             )
 
-    print(
-        "[DrdkTargetStreamer] listening "
-        f"left={args.host}:{args.left_port}/{args.left_serial_number} "
-        f"right={args.host}:{args.right_port}/{args.right_serial_number}",
-        flush=True,
-    )
-    try:
-        def publish_joint_initialization(states) -> None:
-            publish_status(
-                True,
-                phase="joint_initializing",
-                current_poses={
-                    "left": [float(value) for value in states[0].tcp_pose],
-                    "right": [float(value) for value in states[1].tcp_pose],
-                },
-                current_qs={
-                    "left": [float(value) for value in states[0].q],
-                    "right": [float(value) for value in states[1].q],
-                },
-            )
-
-        # Use the runtime's official NRT joint trajectory generator to reach
-        # task initq first. Only then enter Cartesian mode, reinstall initq as
-        # its null-space reference, latch TCP, and announce task readiness.
-        robot_pair, nullspace_postures = initialize_robot_pair(
-            args,
-            flexivdrdk=flexivdrdk,
-            flexivrdk=flexivrdk,
-            progress_callback=publish_joint_initialization,
+    def publish_joint_initialization(states, *, reset_seq: int = 0) -> None:
+        publish_status(
+            False,
+            phase="joint_initializing",
+            current_poses={
+                "left": [float(value) for value in states[0].tcp_pose],
+                "right": [float(value) for value in states[1].tcp_pose],
+            },
+            current_qs={
+                "left": [float(value) for value in states[0].q],
+                "right": [float(value) for value in states[1].q],
+            },
+            reset_seq=reset_seq,
         )
+
+    def latch_cartesian_references() -> None:
+        nonlocal reference_poses
         states = robot_pair.states()
         reference_poses = {
             "left": [float(value) for value in states[0].tcp_pose],
@@ -457,12 +555,22 @@ def main(argv: list[str] | None = None) -> int:
             f"right={format_pose_xyz_quat(reference_poses['right'])}",
             flush=True,
         )
-        print(
-            "[DrdkTargetStreamer] null-space posture initialized "
-            f"left={[round(value, 6) for value in nullspace_postures[0]]} "
-            f"right={[round(value, 6) for value in nullspace_postures[1]]}",
-            flush=True,
+
+    def recover_to_initial_q(reset_seq: int) -> None:
+        nonlocal robot_pair, last_sent_cycle, recovery_required, recovery_phase, status_error
+        print(f"[DrdkTargetStreamer] reset seq={reset_seq}: stopping both robots", flush=True)
+        publish_status(False, phase="reset_stopping", reset_seq=reset_seq)
+        if robot_pair is None or not robot_pair.connected():
+            robot_pair = _connect_robot_pair(args, flexivdrdk=flexivdrdk)
+        recover_connected_robot_pair_to_initial_q(
+            args,
+            robot_pair=robot_pair,
+            flexivrdk=flexivrdk,
+            progress_callback=lambda states: publish_joint_initialization(states, reset_seq=reset_seq),
+            phase_callback=lambda phase: publish_status(False, phase=phase, reset_seq=reset_seq),
         )
+        latch_cartesian_references()
+        states = robot_pair.states()
         publish_status(
             True,
             phase="ready",
@@ -471,7 +579,58 @@ def main(argv: list[str] | None = None) -> int:
                 "left": [float(value) for value in states[0].q],
                 "right": [float(value) for value in states[1].q],
             },
+            reset_seq=reset_seq,
         )
+        for buffer in command_buffers.values():
+            buffer.clear()
+        last_sent_cycle = -1
+        recovery_required = False
+        recovery_phase = "fault"
+        status_error = None
+        print(f"[DrdkTargetStreamer] reset seq={reset_seq}: READY at initial_q", flush=True)
+
+    print(
+        "[DrdkTargetStreamer] listening "
+        f"left={args.host}:{args.left_port}/{args.left_serial_number} "
+        f"right={args.host}:{args.right_port}/{args.right_serial_number}",
+        flush=True,
+    )
+    try:
+        robot_pair = _connect_robot_pair(args, flexivdrdk=flexivdrdk)
+        try:
+            nullspace_postures = initialize_connected_robot_pair(
+                args,
+                robot_pair=robot_pair,
+                flexivrdk=flexivrdk,
+                progress_callback=publish_joint_initialization,
+            )
+            latch_cartesian_references()
+            states = robot_pair.states()
+            print(
+                "[DrdkTargetStreamer] null-space posture initialized "
+                f"left={[round(value, 6) for value in nullspace_postures[0]]} "
+                f"right={[round(value, 6) for value in nullspace_postures[1]]}",
+                flush=True,
+            )
+            publish_status(
+                True,
+                phase="ready",
+                current_poses=reference_poses,
+                current_qs={
+                    "left": [float(value) for value in states[0].q],
+                    "right": [float(value) for value in states[1].q],
+                },
+            )
+        except Exception as exc:
+            recovery_required = True
+            recovery_phase = "fault"
+            status_error = str(exc)
+            print(
+                f"[DrdkTargetStreamer] startup initialization not ready: {status_error}; "
+                "waiting for coordinated reset",
+                flush=True,
+            )
+            publish_status(False, phase=recovery_phase, error=status_error)
         last_status_time = time.monotonic()
 
         while True:
@@ -487,6 +646,13 @@ def main(argv: list[str] | None = None) -> int:
                         packet = json.loads(data.decode("utf-8"))
                     except (UnicodeDecodeError, json.JSONDecodeError):
                         continue
+                    reset_seq = parse_reset_request_seq(
+                        packet,
+                        serial_number=serials[side],
+                        joint_group=args.joint_group,
+                    )
+                    if reset_seq is not None:
+                        pending_reset_seq = max(pending_reset_seq, reset_seq)
                     command = parse_target_command_packet(
                         packet,
                         serial_number=serials[side],
@@ -496,8 +662,44 @@ def main(argv: list[str] | None = None) -> int:
                     if command is not None:
                         buffer_target_command(command_buffers[side], command)
 
-            if not robot_pair.connected() or robot_pair.fault() or not robot_pair.operational():
-                raise RuntimeError("DRDK robot pair is disconnected, faulted, or not operational")
+            if pending_reset_seq > handled_reset_seq:
+                handled_reset_seq = pending_reset_seq
+                try:
+                    recover_to_initial_q(handled_reset_seq)
+                except Exception as exc:
+                    recovery_required = True
+                    recovery_phase = "reset_failed"
+                    status_error = str(exc)
+                    print(
+                        f"[DrdkTargetStreamer] reset seq={handled_reset_seq} failed: {status_error}",
+                        flush=True,
+                    )
+                    publish_status(
+                        False,
+                        phase=recovery_phase,
+                        reset_seq=handled_reset_seq,
+                        error=status_error,
+                    )
+                last_status_time = time.monotonic()
+                continue
+
+            healthy = bool(
+                robot_pair is not None
+                and robot_pair.connected()
+                and not robot_pair.fault()
+                and robot_pair.operational()
+            )
+            if recovery_required or not healthy:
+                recovery_required = True
+                now = time.monotonic()
+                if now - last_status_time >= 0.1:
+                    publish_status(
+                        False,
+                        phase=recovery_phase,
+                        error=status_error or "robot pair requires coordinated reset",
+                    )
+                    last_status_time = now
+                continue
 
             synchronized = pop_synchronized_target_pair(command_buffers, after_cycle=last_sent_cycle)
             command_poses = None
@@ -545,8 +747,8 @@ def main(argv: list[str] | None = None) -> int:
         publish_status(False, phase="stopped")
         return 130
     except Exception as exc:
-        print(f"[DrdkTargetStreamer] fault latched: {exc}", flush=True)
-        publish_status(False, phase="fault")
+        print(f"[DrdkTargetStreamer] startup failed: {exc}", flush=True)
+        publish_status(False, phase="fault", error=str(exc))
         return 1
     finally:
         for target_socket in target_sockets:

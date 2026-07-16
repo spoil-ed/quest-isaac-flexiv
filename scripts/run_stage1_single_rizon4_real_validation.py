@@ -249,7 +249,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--render-hz", type=float)
     parser.add_argument("--quest-position-scale", type=float)
     parser.add_argument("--quest-position-deadband-m", type=float)
-    parser.add_argument("--quest-relative-orientation-mode", choices=("packet", "reference", "current"))
+    parser.add_argument(
+        "--quest-relative-orientation-mode",
+        choices=("packet", "relative", "reference", "current"),
+    )
     parser.add_argument("--max-linear-speed-m-s", type=float)
     parser.add_argument("--max-angular-speed-rad-s", type=float)
     parser.add_argument("--max-joint-speed-rad-s", type=float)
@@ -415,7 +418,7 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
         first_defined(args.quest_position_deadband_m, cfg_get(pipeline_config, "control", "quest_position_deadband_m"), 0.01)
     )
     args.quest_relative_orientation_mode = str(
-        first_defined(args.quest_relative_orientation_mode, cfg_get(pipeline_config, "control", "quest_relative_orientation_mode"), "packet")
+        first_defined(args.quest_relative_orientation_mode, cfg_get(pipeline_config, "control", "quest_relative_orientation_mode"), "relative")
     )
     args.max_linear_speed_m_s = float(
         first_defined(args.max_linear_speed_m_s, cfg_get(pipeline_config, "control", "max_linear_speed_m_s"), 0.10)

@@ -342,6 +342,18 @@ class FlexivStudioTeleopTests(unittest.TestCase):
         for actual, expected in zip(rotated[3:], [half_sqrt, 0.0, 0.0, half_sqrt]):
             self.assertAlmostEqual(actual, expected)
 
+        mapper.reset()
+        reengaged_tcp = [0.31, -0.02, 0.42, half_sqrt, half_sqrt, 0.0, 0.0]
+        reengaged = mapper.update(
+            packet._replace(
+                seq=3,
+                pose_base_tcp_des=[0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5],
+            ),
+            reengaged_tcp,
+        )
+
+        self.assertEqual(reengaged, reengaged_tcp)
+
     def test_relative_mapper_can_disable_workspace_clipping_for_wall_mount(self):
         mod = load_follow_ball()
         mapper = mod.QuestRelativeTargetMapper(
@@ -531,13 +543,14 @@ class FlexivStudioTeleopTests(unittest.TestCase):
             )
         )
 
-    def test_follow_ball_relative_mapper_anchors_position_and_uses_absolute_orientation(self):
+    def test_follow_ball_packet_orientation_mode_remains_available(self):
         mod = load_follow_ball()
         mapper = mod.QuestRelativeTargetMapper(
             axis_map=mod.parse_quest_axis_map("-z,-x,y"),
             scale=0.5,
             workspace_min=(0.0, -1.0, 0.2),
             workspace_max=(1.0, 1.0, 1.4),
+            orientation_mode="packet",
         )
         first = mod.QuestTargetPacket(
             seq=1,
@@ -624,7 +637,9 @@ class FlexivStudioTeleopTests(unittest.TestCase):
 
         self.assertEqual(mapper.update(first, current_tcp), current_tcp)
         mapped = mapper.update(second, current_tcp)
-        for actual, expected in zip(mapped, [0.15, -0.10, 1.00, 0.0, 1.0, 0.0, 0.0]):
+        # The hand orientation did not change after engagement, so the new
+        # default relative-orientation policy keeps the press-time TCP angle.
+        for actual, expected in zip(mapped, [0.15, -0.10, 1.00, 1.0, 0.0, 0.0, 0.0]):
             self.assertAlmostEqual(actual, expected)
 
     def test_cartesian_target_limiter_enforces_translation_and_rotation_speed(self):

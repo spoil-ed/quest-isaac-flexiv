@@ -92,9 +92,9 @@
 | `--initial-joint-speed-tolerance-rad-s` | `0.03` | 初始化完成的最大关节速度。 |
 | `--initial-joint-max-vel-rad-s` | `0.5` | `SendJointPosition()` 初始化轨迹的各关节最大速度。 |
 | `--initial-joint-max-acc-rad-s2` | `1.0` | 初始化轨迹的各关节最大加速度。 |
-| `--clear-fault/--no-clear-fault` | 不清故障 | 默认保留故障现场。 |
+| `--clear-fault/--no-clear-fault` | 不清故障 | 仅控制首次启动是否清故障；显式协调 reset 始终尝试清除双臂 fault。 |
 
-该脚本启动时短暂使用 `NRT_JOINT_POSITION + SendJointPosition()` 平滑到 scene config 的左右 `initial_q`；到位后固定使用 `NRT_CARTESIAN_MOTION_FORCE`，并重新把 `initial_q` 设置为零空间参考。关节轨迹、IK、动力学和力矩仍由 runtime 处理；任一侧故障会使 RobotPair 两侧同时 not-ready 并退出。
+该脚本启动时短暂使用 `NRT_JOINT_POSITION + SendJointPosition()` 平滑到 scene config 的左右 `initial_q`；到位后固定使用 `NRT_CARTESIAN_MOTION_FORCE`，并重新把 `initial_q` 设置为零空间参考。关节轨迹、IK、动力学和力矩仍由 runtime 处理。任一侧故障会使 RobotPair 两侧同时 not-ready；streamer 保持存活并等待带有更高 `reset_seq` 的显式协调 reset，不会自动清故障。
 
 ## Isaac 控制入口
 
@@ -128,6 +128,7 @@ Quest 输入参数：
 | `--quest-target-udp-port` | app 默认 `45679` | Quest UDP 端口；README 使用 `55679`。 |
 | `--quest-target-max-age-sec` | app 默认 | Quest 包最大年龄。 |
 | `--quest-target-mode` | `relative` | `relative` 按压时锚定当前 TCP；`absolute` 直接使用包内位姿。 |
+| `--quest-relative-orientation-mode` | `relative` | `relative` 在 squeeze 按下时锁存手柄和 TCP 姿态，随后只应用手柄旋转增量；`packet` 是旧的绝对姿态兼容模式。 |
 | `--quest-axis-map` | app 默认 | OpenXR 到机器人基座轴映射，例如 `-z,-x,y`。 |
 | `--quest-position-scale` | `1.0` | Quest 位移缩放。 |
 | `--quest-position-deadband-m` | app 默认 | Isaac 端平移死区，单位米。 |
@@ -151,7 +152,7 @@ Quest 输入参数：
 | `--camera-config` | scene config | 旧相机配置兼容入口；新流程使用 `--scene-config`。 |
 | `--coordinated-reset/--no-coordinated-reset` | 开启 | 是否接收 recorder/gateway reset 并复用启动初始化。 |
 | `--reset-settle-sec` | `2.0` | TCP 落入容差后必须连续稳定的时间。 |
-| `--reset-timeout-sec` | `20.0` | RDK 未能在该时间内落位则 reset 失败。 |
+| `--reset-timeout-sec` | 单臂 `20.0`；双臂 `90.0` | 等待 RDK/DRDK reset 落位并重新 ready 的最长时间。 |
 | `--reset-position-tolerance-m` | `0.01` | reset 完成的 TCP 位置误差阈值。 |
 | `--reset-angular-tolerance-rad` | `0.10` | reset 完成的 TCP 姿态误差阈值。 |
 | `--reset-joint-speed-tolerance-rad-s` | `0.05` | reset 完成的最大关节速度阈值。 |
@@ -244,7 +245,7 @@ Stage2 双臂 Isaac 启动入口，参数语义与单臂入口一致，差异如
 | `--max-frames` | `0` | 单个 episode 最大帧数；0 表示不限制。达到上限自动保存。 |
 | `--reset-on-save` | 关闭 | 保存、丢弃或自动结束后请求协调 reset。 |
 | `--reset-key-cooldown-sec` | `2.5` | reset 快捷键防连发时间，避免终端按键自动重复导致连续初始化。 |
-| `--reset-timeout-sec` | `25.0` | recorder 等待 Isaac/RDK reset 落位的最长时间；失败时停止录制并返回错误。 |
+| `--reset-timeout-sec` | `90.0` | recorder 等待 Isaac/RDK reset 落位的最长时间；失败时暂停当前 episode 并保持进程存活，允许再次按 reset 键重试。 |
 | `--start-key` | `s` | 开始/继续快捷键。 |
 | `--stop-key` | `e` | 第一次暂停、第二次保存。 |
 | `--discard-key` | `d` | 丢弃当前 episode。 |

@@ -338,11 +338,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--quest-relative-orientation-mode",
-        choices=("packet", "reference", "current"),
-        default="packet",
+        choices=("packet", "relative", "reference", "current"),
+        default="relative",
         help=(
-            "Relative mode orientation source. packet preserves legacy Quest packet behavior; "
-            "reference keeps the press-time TCP orientation; current keeps the live TCP orientation."
+            "Relative mode orientation source. relative applies the hand rotation delta since squeeze press "
+            "to the press-time TCP; packet preserves legacy absolute Quest orientation; reference keeps the "
+            "press-time TCP orientation; current keeps the live TCP orientation."
         ),
     )
     parser.add_argument(

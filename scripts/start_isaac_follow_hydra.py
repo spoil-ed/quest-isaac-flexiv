@@ -81,6 +81,8 @@ def build_command(cfg: DictConfig) -> list[str]:
         str(float(cfg.quest.packet_max_age_sec)),
         "--quest-target-mode",
         str(cfg.quest.target_mode),
+        "--quest-relative-orientation-mode",
+        str(cfg.quest.relative_orientation_mode),
         "--quest-axis-map",
         str(cfg.quest.axis_map),
         "--quest-position-scale",

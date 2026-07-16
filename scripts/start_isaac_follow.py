@@ -37,7 +37,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--quest-target-udp-port", type=int, default=None)
     parser.add_argument("--quest-target-max-age-sec", type=float, default=None)
     parser.add_argument("--quest-target-mode", choices=("absolute", "relative"), default="relative")
-    parser.add_argument("--quest-relative-orientation-mode", choices=("packet", "reference", "current"), default="packet")
+    parser.add_argument(
+        "--quest-relative-orientation-mode",
+        choices=("packet", "relative", "reference", "current"),
+        default="relative",
+    )
     parser.add_argument("--quest-axis-map", default=None)
     parser.add_argument("--quest-position-scale", type=float, default=1.0)
     parser.add_argument("--quest-position-deadband-m", type=float, default=None)

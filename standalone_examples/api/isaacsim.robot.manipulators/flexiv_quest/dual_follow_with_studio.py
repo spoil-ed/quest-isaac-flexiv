@@ -190,7 +190,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--quest-relative-orientation-mode",
         choices=("packet", "relative", "reference", "current"),
-        default="packet",
+        default="relative",
     )
     parser.add_argument("--quest-axis-map", default=DEFAULT_QUEST_AXIS_MAP)
     parser.add_argument("--quest-position-scale", type=float, default=0.5)
@@ -225,6 +225,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gateway-jpeg-quality", type=int, default=DEFAULT_STAGE1_GATEWAY_JPEG_QUALITY)
     parser.add_argument("--coordinated-reset", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--reset-settle-sec", type=float, default=2.0)
+    parser.add_argument("--reset-timeout-sec", type=float, default=90.0)
     parser.add_argument("--startup-joint-tolerance-rad", type=float, default=0.03)
     args = parser.parse_args(argv)
     args.scene_data = {}
@@ -234,6 +235,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.joint_group = args.joint_group or DEFAULT_JOINT_GROUP
     if args.smoke_test:
         args.headless = True
+    if float(args.reset_timeout_sec) <= 0.0:
+        parser.error("--reset-timeout-sec must be positive")
     return args
 
 
@@ -412,6 +415,7 @@ class ArmRuntime:
     rdk_current_pose_base_tcp: list[float] | None = None
     rdk_current_q: list[float] | None = None
     rdk_phase: str = "disconnected"
+    rdk_reset_seq: int = 0
     rdk_world_calibration: RdkWorldFrameCalibration | None = None
     rdk_reference_world_pose: list[float] | None = None
     startup_trajectory_complete: bool = False
@@ -715,6 +719,13 @@ def run(args: argparse.Namespace) -> int:
     gateway_last_publish = 0.0
     pending_reset_control = None
     last_reset_seq = 0
+    reset_state = "idle"
+    reset_error = None
+    reset_started_time = 0.0
+    reset_assets_restore_time = 0.0
+    reset_reason = None
+    reset_scene_collision_states: dict[str, bool] = {}
+    reset_scene_kinematic_states: dict[str, bool] = {}
     control_loop_enabled = False
     dual_task_ready_announced = False
 
@@ -787,6 +798,7 @@ def run(args: argparse.Namespace) -> int:
         arm.rdk_current_pose_base_tcp = None
         arm.rdk_current_q = None
         arm.rdk_phase = "disconnected"
+        arm.rdk_reset_seq = 0
         arm.rdk_world_calibration = None
         arm.rdk_reference_world_pose = None
         arm.startup_trajectory_complete = False
@@ -811,6 +823,143 @@ def run(args: argparse.Namespace) -> int:
             flush=True,
         )
 
+    def set_reset_scene_collisions_suppressed(suppressed: bool) -> None:
+        """Temporarily remove task-object contacts so joint recovery can leave a collision."""
+
+        from pxr import UsdPhysics
+
+        if suppressed:
+            if reset_scene_collision_states:
+                return
+            for item in scene_object_summary:
+                has_collision = bool(item.get("collision"))
+                is_rigid = bool(item.get("rigid_body"))
+                if not has_collision and not is_rigid:
+                    continue
+                path = str(item.get("prim_path") or "")
+                prim = world.stage.GetPrimAtPath(path)
+                if not prim.IsValid():
+                    raise RuntimeError(f"missing scene physics prim during reset: {path}")
+                if is_rigid:
+                    rigid_api = UsdPhysics.RigidBodyAPI(prim)
+                    kinematic_attr = rigid_api.GetKinematicEnabledAttr()
+                    if not kinematic_attr or not kinematic_attr.IsValid():
+                        kinematic_attr = rigid_api.CreateKinematicEnabledAttr(False)
+                    previous_kinematic = kinematic_attr.Get()
+                    reset_scene_kinematic_states[path] = (
+                        False if previous_kinematic is None else bool(previous_kinematic)
+                    )
+                    kinematic_attr.Set(True)
+                if has_collision:
+                    collision_api = UsdPhysics.CollisionAPI(prim)
+                    collision_attr = collision_api.GetCollisionEnabledAttr()
+                    if not collision_attr or not collision_attr.IsValid():
+                        collision_attr = collision_api.CreateCollisionEnabledAttr(True)
+                    previous_collision = collision_attr.Get()
+                    reset_scene_collision_states[path] = (
+                        True if previous_collision is None else bool(previous_collision)
+                    )
+                    collision_attr.Set(False)
+            if not reset_scene_collision_states and not reset_scene_kinematic_states:
+                raise RuntimeError("no physical scene objects found for coordinated reset")
+            print(
+                "[FlexivDualTargetFrame] coordinated reset temporarily disabled collisions for "
+                f"{len(reset_scene_collision_states)} scene objects and froze "
+                f"{len(reset_scene_kinematic_states)} rigid bodies",
+                flush=True,
+            )
+            return
+
+        for path, enabled in reset_scene_collision_states.items():
+            prim = world.stage.GetPrimAtPath(path)
+            if not prim.IsValid():
+                raise RuntimeError(f"scene collision prim disappeared during reset: {path}")
+            collision_api = UsdPhysics.CollisionAPI(prim)
+            attr = collision_api.GetCollisionEnabledAttr()
+            if not attr or not attr.IsValid():
+                attr = collision_api.CreateCollisionEnabledAttr(bool(enabled))
+            attr.Set(bool(enabled))
+        for path, enabled in reset_scene_kinematic_states.items():
+            prim = world.stage.GetPrimAtPath(path)
+            if not prim.IsValid():
+                raise RuntimeError(f"scene rigid-body prim disappeared during reset: {path}")
+            rigid_api = UsdPhysics.RigidBodyAPI(prim)
+            attr = rigid_api.GetKinematicEnabledAttr()
+            if not attr or not attr.IsValid():
+                attr = rigid_api.CreateKinematicEnabledAttr(bool(enabled))
+            attr.Set(bool(enabled))
+        restored = len(reset_scene_collision_states)
+        reset_scene_collision_states.clear()
+        reset_scene_kinematic_states.clear()
+        print(
+            f"[FlexivDualTargetFrame] coordinated reset restored collisions for {restored} scene objects",
+            flush=True,
+        )
+
+    def reset_configured_scene_assets() -> None:
+        """Return all configured task assets to their scene-config initial state."""
+
+        from flexiv_sim_scenes.isaac import reset_scene_objects
+
+        results = reset_scene_objects(
+            world,
+            args.scene_data,
+            config_path=args.scene_config,
+        )
+        rigid_count = sum(bool(item.get("rigid_body")) for item in results)
+        print(
+            "[FlexivDualTargetFrame] coordinated reset restored configured state for "
+            f"{len(results)} scene assets ({rigid_count} rigid bodies)",
+            flush=True,
+        )
+
+    def begin_coordinated_reset(control: dict[str, Any]) -> None:
+        """Disarm user targets and ask DRDK to recover both robots to init_q."""
+
+        nonlocal last_reset_seq, reset_state, reset_error, reset_started_time, reset_reason
+        nonlocal reset_assets_restore_time
+        nonlocal dual_task_ready_announced
+        last_reset_seq = int(control.get("seq", 0))
+        reset_state = "moving"
+        reset_error = None
+        reset_started_time = time.monotonic()
+        reset_assets_restore_time = 0.0
+        reset_reason = str(control.get("reason", "unspecified"))
+        dual_task_ready_announced = False
+        try:
+            set_reset_scene_collisions_suppressed(True)
+        except Exception as exc:
+            reset_state = "failed"
+            reset_error = f"failed to suppress scene collisions for reset: {exc}"
+            print(f"[FlexivDualTargetFrame] {reset_error}", flush=True)
+            return
+        if quest_target_receiver is not None:
+            quest_target_receiver.clear()
+        for arm in arms.values():
+            arm.latest_quest_target = None
+            arm.target_control_requested = False
+            arm.target_control_source = None
+            arm.quest_goal_pose_base_tcp = None
+            arm.latest_control_pose_base_tcp = None
+            arm.mapper.reset()
+            arm.limiter.reset()
+            arm.startup_trajectory_complete = False
+            arm.rdk_reference_pose_base_tcp = None
+            arm.rdk_reference_world_pose = None
+            arm.rdk_world_calibration = None
+            arm.idle_target_world_pose = None
+            arm.reset_hold_pose_base_tcp = None
+            arm.reset_hold_cycles_remaining = 0
+            if arm.robot.gripper is not None:
+                arm.robot.gripper.open()
+                arm.pending_gripper_closed = False
+                arm.applied_gripper_closed = False
+        print(
+            f"[FlexivDualTargetFrame] coordinated reset requested seq={last_reset_seq} "
+            f"reason={reset_reason}; waiting for DRDK Stop/ClearFault/SendJointPosition(init_q)",
+            flush=True,
+        )
+
     def _update_quest_targets() -> None:
         if quest_target_receiver is None:
             return
@@ -825,6 +974,8 @@ def run(args: argparse.Namespace) -> int:
                 arm.mapper.reset()
 
     def _apply_quest_gripper(arm: ArmRuntime) -> None:
+        if reset_state not in {"idle", "succeeded"}:
+            return
         closed = arm.pending_gripper_closed
         if closed is None or closed == arm.applied_gripper_closed:
             return
@@ -981,6 +1132,9 @@ def run(args: argparse.Namespace) -> int:
             # The streamer ignores the uncalibrated packet pose until it has
             # latched Studio's actual TCP and Isaac has entered effort mode.
             packet["control_active"] = user_target_active
+            if reset_state == "moving" and last_reset_seq > 0:
+                packet["reset_seq"] = int(last_reset_seq)
+                packet["reset_reason"] = str(reset_reason or "coordinated")
             arm.target_pose_publisher.publish(packet)
 
         if reset_hold_active:
@@ -1018,13 +1172,17 @@ def run(args: argparse.Namespace) -> int:
             )
 
     def _update_rdk_statuses() -> None:
-        nonlocal dual_task_ready_announced
+        nonlocal dual_task_ready_announced, reset_state, reset_error, reset_assets_restore_time
         readiness = rdk_status_receiver.poll()
         for side, ready in readiness.items():
             arm = arms[side]
             packet = rdk_status_receiver.latest_packet(side)
-            if ready and packet is not None:
+            if packet is not None:
                 phase = str(packet.get("phase") or "ready")
+                try:
+                    arm.rdk_reset_seq = max(arm.rdk_reset_seq, int(packet.get("reset_seq", 0)))
+                except (TypeError, ValueError):
+                    pass
                 reference_pose = _finite_status_pose(packet, "reference_pose_base_tcp")
                 current_pose = _finite_status_pose(packet, "current_pose_base_tcp")
                 current_q = _finite_status_pose(packet, "current_q")
@@ -1038,7 +1196,14 @@ def run(args: argparse.Namespace) -> int:
                     arm.rdk_current_q = current_q
                 if current_pose is not None:
                     arm.rdk_current_pose_base_tcp = current_pose
-                if reference_pose is not None:
+                if phase == "reset_failed" and arm.rdk_reset_seq >= last_reset_seq and reset_state == "moving":
+                    reset_state = "failed"
+                    reset_error = str(packet.get("error") or "DRDK coordinated reset failed")
+                    print(
+                        f"[FlexivDualTargetFrame] coordinated reset failed seq={last_reset_seq}: {reset_error}",
+                        flush=True,
+                    )
+                if ready and phase == "ready" and reference_pose is not None:
                     if arm.rdk_reference_pose_base_tcp is None:
                         print(
                             f"[FlexivDualTargetFrame] calibrated {side} RDK TCP reference "
@@ -1046,7 +1211,7 @@ def run(args: argparse.Namespace) -> int:
                             flush=True,
                         )
                     arm.rdk_reference_pose_base_tcp = reference_pose
-                    if phase == "ready" and not arm.startup_trajectory_complete:
+                    if not arm.startup_trajectory_complete:
                         tcp_position, tcp_orientation = arm.robot.end_effector.get_world_pose()
                         arm.rdk_reference_world_pose = [
                             *[float(value) for value in tcp_position],
@@ -1062,7 +1227,7 @@ def run(args: argparse.Namespace) -> int:
                             reference_world_pose=arm.rdk_reference_world_pose,
                             reference_pose_base_tcp=reference_pose,
                         )
-                    if phase == "ready" and not arm.startup_trajectory_complete:
+                    if not arm.startup_trajectory_complete:
                         isaac_joint_error = _max_wrapped_joint_error(arm.robot.q, arm.initial_q)
                         rdk_joint_error = (
                             math.inf
@@ -1085,7 +1250,6 @@ def run(args: argparse.Namespace) -> int:
                     f"[FlexivDualTargetFrame] RDK not ready {side} {arm.serial_number}; pausing user target handoff",
                     flush=True,
                 )
-                arm.rdk_phase = "not_ready"
             arm.rdk_ready = bool(ready)
         task_ready = all(
             arm.startup_trajectory_complete
@@ -1100,6 +1264,47 @@ def run(args: argparse.Namespace) -> int:
                 "[FlexivDualTargetFrame] READY: both task initial poses reached; user control enabled",
                 flush=True,
             )
+        if reset_state == "moving":
+            reset_acknowledged = all(arm.rdk_reset_seq >= last_reset_seq for arm in arms.values())
+            if task_ready and reset_acknowledged:
+                try:
+                    reset_configured_scene_assets()
+                except Exception as exc:
+                    reset_state = "failed"
+                    reset_error = f"failed to restore configured scene assets after reset: {exc}"
+                    print(f"[FlexivDualTargetFrame] {reset_error}", flush=True)
+                else:
+                    reset_state = "restoring_assets"
+                    reset_assets_restore_time = time.monotonic()
+                    print(
+                        f"[FlexivDualTargetFrame] coordinated reset seq={last_reset_seq} "
+                        "scene assets restored; waiting one target cycle before re-enabling physics",
+                        flush=True,
+                    )
+            elif time.monotonic() - reset_started_time >= float(args.reset_timeout_sec):
+                reset_state = "failed"
+                reset_error = (
+                    f"coordinated reset seq={last_reset_seq} timed out after "
+                    f"{float(args.reset_timeout_sec):.3f}s"
+                )
+                print(f"[FlexivDualTargetFrame] {reset_error}", flush=True)
+        elif reset_state == "restoring_assets":
+            asset_settle_sec = max(1.0 / max(float(args.target_pose_publish_hz), 1.0), 2.0 / physics_hz)
+            if time.monotonic() - reset_assets_restore_time >= asset_settle_sec:
+                try:
+                    set_reset_scene_collisions_suppressed(False)
+                except Exception as exc:
+                    reset_state = "failed"
+                    reset_error = f"failed to restore scene physics after asset reset: {exc}"
+                    print(f"[FlexivDualTargetFrame] {reset_error}", flush=True)
+                else:
+                    reset_state = "succeeded"
+                    reset_error = None
+                    print(
+                        f"[FlexivDualTargetFrame] coordinated reset succeeded seq={last_reset_seq}; "
+                        "both arms are READY at init_q and scene assets are at configured initial state",
+                        flush=True,
+                    )
 
     def _apply_arm_studio_torque(arm: ArmRuntime) -> None:
         """Receive and apply Studio's unmodified torque command for one 2 kHz cycle."""
@@ -1315,28 +1520,20 @@ def run(args: argparse.Namespace) -> int:
                 "scene_objects": scene_object_summary,
                 "reset": {
                     "last_seq": int(last_reset_seq),
-                    "holding_start_pose": bool(
-                        left.reset_hold_cycles_remaining > 0
-                        or right.reset_hold_cycles_remaining > 0
+                    "state": str(reset_state),
+                    "ready": bool(
+                        reset_state in {"idle", "succeeded"}
+                        and left.startup_trajectory_complete
+                        and right.startup_trajectory_complete
+                        and left.rdk_ready
+                        and right.rdk_ready
                     ),
-                    "state": (
-                        "moving"
-                        if (
-                            left.reset_hold_cycles_remaining > 0
-                            or right.reset_hold_cycles_remaining > 0
-                            or not left.startup_trajectory_complete
-                            or not right.startup_trajectory_complete
-                        )
-                        else "succeeded"
-                        if last_reset_seq > 0
-                        else "idle"
-                    ),
-                    "ready": not bool(
-                        left.reset_hold_cycles_remaining > 0
-                        or right.reset_hold_cycles_remaining > 0
-                        or not left.startup_trajectory_complete
-                        or not right.startup_trajectory_complete
-                    ),
+                    "error": reset_error,
+                    "reason": reset_reason,
+                    "rdk_reset_seq": {
+                        "left": int(left.rdk_reset_seq),
+                        "right": int(right.rdk_reset_seq),
+                    },
                 },
             },
         }
@@ -1391,11 +1588,7 @@ def run(args: argparse.Namespace) -> int:
             if pending_reset_control is not None:
                 control = pending_reset_control
                 pending_reset_control = None
-                last_reset_seq = int(control.get("seq", 0))
-                initialize_like_startup(
-                    f"gateway:{control.get('reason', 'unspecified')} seq={last_reset_seq}",
-                    reset_world=True,
-                )
+                begin_coordinated_reset(control)
                 reset_needed = False
             if world.is_stopped() and not reset_needed:
                 reset_needed = True

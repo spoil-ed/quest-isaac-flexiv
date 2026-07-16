@@ -35,7 +35,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--quest-relative-orientation-mode",
         choices=("packet", "relative", "reference", "current"),
-        default="packet",
+        default="relative",
     )
     parser.add_argument("--quest-axis-map", default=None)
     parser.add_argument("--quest-position-scale", type=float, default=1.0)
@@ -63,6 +63,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gateway-jpeg-quality", type=int, default=None)
     parser.add_argument("--coordinated-reset", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--reset-settle-sec", type=float, default=2.0)
+    parser.add_argument("--reset-timeout-sec", type=float, default=90.0)
     args = parser.parse_args(argv)
     args.isaac_python = flexiv_runtime.python_executable_or_current(args.isaac_python)
     return args
@@ -134,6 +135,7 @@ def build_command(args: argparse.Namespace) -> list[str]:
         command.extend(["--gateway-endpoint", str(args.gateway_endpoint)])
     command.append("--coordinated-reset" if args.coordinated_reset else "--no-coordinated-reset")
     command.extend(["--reset-settle-sec", str(float(args.reset_settle_sec))])
+    command.extend(["--reset-timeout-sec", str(float(args.reset_timeout_sec))])
     return command
 
 

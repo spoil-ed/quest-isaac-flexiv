@@ -233,6 +233,26 @@ class Stage2RealValidationConfigTests(unittest.TestCase):
         self.assertNotIn("arm.rdk_ready", torque_loop)
         self.assertNotIn("reset_hold_cycles_remaining", torque_loop)
 
+    def test_coordinated_reset_is_forwarded_to_drdk_without_world_reset(self):
+        source = DUAL_APP.read_text(encoding="utf-8")
+        reset_handler = source.split(
+            "if pending_reset_control is not None:",
+            maxsplit=1,
+        )[1].split("if world.is_stopped()", maxsplit=1)[0]
+
+        self.assertIn("begin_coordinated_reset(control)", reset_handler)
+        self.assertNotIn("world.reset", reset_handler)
+        self.assertNotIn("initialize_like_startup", reset_handler)
+        self.assertIn('packet["reset_seq"]', source)
+        self.assertIn('reset_state = "succeeded"', source)
+        self.assertIn('reset_state = "restoring_assets"', source)
+        self.assertIn("reset_configured_scene_assets()", source)
+        self.assertIn("scene assets are at configured initial state", source)
+        self.assertIn("set_reset_scene_collisions_suppressed(True)", source)
+        self.assertIn("set_reset_scene_collisions_suppressed(False)", source)
+        self.assertIn("collision_attr.Set(False)", source)
+        self.assertIn("kinematic_attr.Set(True)", source)
+
     def test_quest_mode_does_not_author_usd_inside_the_target_update_branch(self):
         source = DUAL_APP.read_text(encoding="utf-8")
         quest_branch = source.split(

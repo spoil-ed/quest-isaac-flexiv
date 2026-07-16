@@ -448,7 +448,7 @@ def finalize_args(args: argparse.Namespace) -> argparse.Namespace:
         first_defined(args.quest_position_deadband_m, cfg_get(pipeline_config, "control", "quest_position_deadband_m"), 0.01)
     )
     args.quest_relative_orientation_mode = str(
-        first_defined(args.quest_relative_orientation_mode, cfg_get(pipeline_config, "control", "quest_relative_orientation_mode"), "packet")
+        first_defined(args.quest_relative_orientation_mode, cfg_get(pipeline_config, "control", "quest_relative_orientation_mode"), "relative")
     )
     args.max_linear_speed_m_s = float(
         first_defined(args.max_linear_speed_m_s, cfg_get(pipeline_config, "control", "max_linear_speed_m_s"), 0.10)

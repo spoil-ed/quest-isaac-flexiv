@@ -216,9 +216,9 @@ python scripts/start_drdk_target_streamer.py \
   --left-status-port 57682 --right-status-port 57683
 ```
 
-DRDK 在两个 runtime operational 后先进入 `NRT_JOINT_POSITION`，通过 `SendJointPosition()` 平滑到同一 scene config 的左右 `initial_q`。到位并稳定后再切换 `NRT_CARTESIAN_MOTION_FORCE`、调用 `SetNullSpacePosture((init_q_left, init_q_right))`，并锁存两臂当前 TCP。scene 的 `bootstrap_q` 必须匹配 Studio home；`joint_initializing` 阶段保持 2 kHz SimPlugin 力矩闭环，但不开放 Quest/Frame。任一侧 fault 会使双侧一起 not-ready 并退出；默认不清 fault、不重连。
+DRDK 在两个 runtime operational 后先进入 `NRT_JOINT_POSITION`，通过 `SendJointPosition()` 平滑到同一 scene config 的左右 `initial_q`。到位并稳定后再切换 `NRT_CARTESIAN_MOTION_FORCE`、调用 `SetNullSpacePosture((init_q_left, init_q_right))`，并锁存两臂当前 TCP。scene 的 `bootstrap_q` 必须匹配 Studio home；`joint_initializing` 阶段保持 2 kHz SimPlugin 力矩闭环，但不开放 Quest/Frame。任一侧 fault 会使双侧一起 not-ready；streamer 保持存活等待 recorder 的显式 reset。按 `r` 后，Isaac 临时关闭桌面和工件等场景碰撞并固定刚体工件，DRDK 执行 `Stop → ClearFault → Enable → SendJointPosition(init_q)`。双臂重新 ready 后，全部 `scene_objects` 恢复配置中的初始变换和关节状态，刚体速度清零；等待一个目标周期后再恢复场景碰撞和工件动力学。机械臂 articulation 的 collision shape 不会在运行中改动；流程也不会重置 Isaac world 或直接写 articulation。
 
-正常日志顺序是：两个 streamer 开始监听、两个 `SimPlugin connected`、TargetFrame 初始化到末端、两个 `latched current TCP reference`、两个 `calibrated ... RDK TCP reference`、RDK operational、两侧进入 effort。此时只保持当前 TCP；拖动某个 Frame 后才出现该侧 `target control armed` 并释放用户目标。若出现 `joint torque exceeds the limit`，streamer 会发出 not-ready 状态并锁存退出；不要循环清故障。异常退出后宿主机右臂可能残留 `/dev/shm/*I0LIRN*`；仅在确认宿主机 RobotControlApp 和 FlexivSimulation 已停止后删除这些临时共享内存，再冷启动右臂 runtime。重启 Docker 容器会自动清理左臂容器内的共享内存。
+正常日志顺序是：两个 streamer 开始监听、两个 `SimPlugin connected`、TargetFrame 初始化到末端、两个 `latched current TCP reference`、两个 `calibrated ... RDK TCP reference`、RDK operational、两侧进入 effort。Studio FlexivSimulation 需要 Isaac SimPlugin 状态流才能推进，因此 DRDK 可以先进入发现重试，但 Isaac 必须随后启动，不能等 DRDK ready 后才启动 Isaac。此时只保持当前 TCP；拖动某个 Frame 后才出现该侧 `target control armed` 并释放用户目标。若出现 `joint torque exceeds the limit`，streamer 会发出 not-ready 并等待操作员按 `r`；不要在脚本外循环清故障。reset 失败时 recorder 会暂停但不会退出；先确认没有持续的几何穿插，再按一次 `r` 重试。仅当显式 reset 也无法恢复、需要完整冷启动时，宿主机右臂才可能残留 `/dev/shm/*I0LIRN*`；确认宿主机 RobotControlApp 和 FlexivSimulation 已停止后再删除这些临时共享内存。
 
 确认两侧 External/Ethernet 配置相同后，如果宿主机 RDK 仍无法发现容器 simulator，再检查网络：
 

@@ -41,6 +41,7 @@ class HydraControlConfigTests(unittest.TestCase):
         self.assertEqual(command[command.index("--max-joint-speed-rad-s") + 1], "1.2")
         self.assertEqual(command[command.index("--max-target-drive-abs") + 1], "80.0")
         self.assertIn("--enable-quest-target-udp", command)
+        self.assertEqual(command[command.index("--quest-relative-orientation-mode") + 1], "relative")
         self.assertIn("--coordinated-reset", command)
         self.assertEqual(command[command.index("--reset-settle-sec") + 1], "2.0")
         self.assertEqual(command[command.index("--reset-timeout-sec") + 1], "20.0")

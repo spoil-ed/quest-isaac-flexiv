@@ -55,7 +55,7 @@ class ProtocolControlTests(unittest.TestCase):
         self.assertEqual(args.stop_key, "e")
         self.assertEqual(args.reset_key, "r")
         self.assertEqual(args.reset_key_cooldown_sec, 2.5)
-        self.assertEqual(args.reset_timeout_sec, 25.0)
+        self.assertEqual(args.reset_timeout_sec, 90.0)
 
     def test_recorder_extracts_bridge_reset_status(self):
         status = reset_status_from_sample(

@@ -41,6 +41,7 @@ class RepoLayoutTests(unittest.TestCase):
             "requirements.txt",
             "scripts",
             "spec",
+            "start.sh",
             "standalone_examples",
             "tests",
             "third_party",
@@ -48,6 +49,26 @@ class RepoLayoutTests(unittest.TestCase):
         actual = {path.name for path in ROOT.iterdir()}
 
         self.assertTrue(actual.issubset(allowed), sorted(actual - allowed))
+
+    def test_root_start_script_starts_dual_stack_without_recorder(self):
+        start_script = ROOT / "start.sh"
+        text = start_script.read_text(encoding="utf-8")
+
+        self.assertTrue(start_script.stat().st_mode & 0o111)
+        self.assertIn('REPO_ROOT="$(cd --', text)
+        self.assertIn("docker/flexiv-studio/compose.yaml", text)
+        self.assertIn("start_elements_studio_ui.py", text)
+        self.assertIn("start_robot_control_app.py", text)
+        self.assertIn("start_flexiv_simulation.py", text)
+        self.assertIn("start_data_gateway.py", text)
+        self.assertIn("start_drdk_target_streamer.py", text)
+        self.assertIn("start_dual_isaac_follow.py", text)
+        self.assertIn("rizon4_quest_target_publisher.py", text)
+        self.assertNotIn("record_unitree_json.py", text)
+        self.assertIn("stop_flexiv_stack.py", text)
+        self.assertIn("down --remove-orphans", text)
+        self.assertIn("clearing stale host shared memory", text)
+        self.assertNotIn("/home/", text)
 
     def test_root_repo_does_not_keep_environment_links_or_generated_dirs(self):
         for name in ("isaacsim", "exts", "recordings", ".venv-grpc"):
@@ -126,6 +147,7 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("studio-bridge", command)
         self.assertIn("--quest-target-mode", command)
         self.assertIn("relative", command)
+        self.assertEqual(command[command.index("--quest-relative-orientation-mode") + 1], "relative")
         self.assertIn("--quest-position-scale", command)
         self.assertIn("1.0", command)
         self.assertNotIn("rdk-cartesian", command)
@@ -160,6 +182,8 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("--right-serial-number", dual_command)
         self.assertIn("Rizon4-R", dual_command)
         self.assertIn("--gpu-dynamics", dual_command)
+        self.assertEqual(dual_command[dual_command.index("--quest-relative-orientation-mode") + 1], "relative")
+        self.assertEqual(dual_command[dual_command.index("--reset-timeout-sec") + 1], "90.0")
 
     def test_external_rdk_target_streamer_uses_compatible_rdk_client(self):
         streamer = load_script("start_rdk_target_streamer.py")
@@ -211,6 +235,8 @@ class RepoLayoutTests(unittest.TestCase):
     def test_stack_stop_covers_single_dual_and_quest_processes(self):
         stop = load_script("stop_flexiv_stack.py")
 
+        self.assertNotIn("record_unitree_json.py", stop.DEFAULT_NEEDLES)
+        self.assertIn("start_data_gateway.py", stop.DEFAULT_NEEDLES)
         self.assertIn("follow_ball_with_studio.py", stop.DEFAULT_NEEDLES)
         self.assertIn("dual_follow_with_studio.py", stop.DEFAULT_NEEDLES)
         self.assertIn("rizon4_quest_target_publisher.py", stop.DEFAULT_NEEDLES)

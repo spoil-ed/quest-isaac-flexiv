@@ -32,7 +32,7 @@ control:
   render_hz: 30
   quest_position_scale: 1.0
   quest_position_deadband_m: 0.0
-  quest_relative_orientation_mode: "packet"
+  quest_relative_orientation_mode: "relative"
   max_linear_speed_m_s: 0.08
   max_angular_speed_rad_s: 0.40
   max_joint_speed_rad_s: 4.0

@@ -38,6 +38,7 @@ reset:
 quest:
   enabled: true
   target_mode: relative
+  relative_orientation_mode: relative
   axis_map: -z,-x,y
   position_scale: 1.0
   position_deadband_m: 0.01
