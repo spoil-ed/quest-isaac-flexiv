@@ -40,7 +40,6 @@ class RepoLayoutTests(unittest.TestCase):
             "logs",
             "requirements.txt",
             "record.sh",
-            "print.sh",
             "scripts",
             "spec",
             "start.sh",
@@ -84,12 +83,13 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn('exec "${COMMAND[@]}"', text)
         self.assertNotIn("/home/", text)
 
-    def test_root_print_script_wraps_dual_arm_state_monitor(self):
-        print_script = ROOT / "print.sh"
+    def test_scripts_print_wrapper_wraps_dual_arm_state_monitor(self):
+        print_script = SCRIPTS / "print.sh"
         text = print_script.read_text(encoding="utf-8")
 
         self.assertTrue(print_script.stat().st_mode & 0o111)
         self.assertIn('REPO_ROOT="$(cd --', text)
+        self.assertIn('${BASH_SOURCE[0]}")/..', text)
         self.assertIn("scripts/print_dual_arm_state.py", text)
         self.assertIn('exec "$PYTHON"', text)
         self.assertNotIn("/home/", text)
