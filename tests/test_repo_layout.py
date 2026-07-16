@@ -181,13 +181,24 @@ class RepoLayoutTests(unittest.TestCase):
         streamer.RDK_COMPAT_PATH = compat_path
 
         env = streamer.build_env({"PYTHONPATH": "existing"})
-        command = streamer.build_command(streamer.parse_args([]))
+        command = streamer.build_command(
+            streamer.parse_args(
+                ["--scene-config", str(ROOT / "configs/scenes/pick_place_redblock_flexiv_dual.yaml")]
+            )
+        )
 
         self.assertEqual(env["PYTHONPATH"].split(":")[:2], [str(compat_path), "existing"])
         self.assertIn("drdk_target_streamer.py", command[1])
         self.assertIn("--left-serial-number", command)
         self.assertIn("--right-serial-number", command)
+        self.assertIn(
+            "--left-nullspace-posture=0.0,-0.6981317,0.0,1.57079632679,0.0,0.6981317,0.0",
+            command,
+        )
         self.assertIn("--nullspace-tracking-weight", command)
+        self.assertIn("--initial-joint-max-vel-rad-s", command)
+        self.assertIn("--initial-joint-max-acc-rad-s2", command)
+        self.assertIn("--initial-joint-handoff-sec", command)
         self.assertIn("--no-clear-fault", command)
 
     def test_isaac_follow_startup_does_not_embed_rdk_client(self):

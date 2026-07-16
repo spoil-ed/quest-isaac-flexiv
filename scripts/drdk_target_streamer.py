@@ -46,12 +46,6 @@ def parse_csv_floats(value: str, *, expected: int, name: str) -> list[float]:
     return values
 
 
-def parse_optional_posture(value: str, *, name: str) -> list[float] | None:
-    if not str(value).strip():
-        return None
-    return parse_csv_floats(value, expected=7, name=name)
-
-
 def parse_target_command_packet(
     packet: dict,
     *,
@@ -120,12 +114,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--right-status-port", type=int, default=57683)
     parser.add_argument("--left-translation-in-world", default="0,0,0")
     parser.add_argument("--right-translation-in-world", default="0,0,0")
-    parser.add_argument("--left-nullspace-posture", default="")
-    parser.add_argument("--right-nullspace-posture", default="")
+    parser.add_argument("--left-nullspace-posture", required=True)
+    parser.add_argument("--right-nullspace-posture", required=True)
     parser.add_argument("--nullspace-tracking-weight", type=float, default=0.5)
     parser.add_argument("--network-interface-whitelist", default="")
     parser.add_argument("--max-age-sec", type=float, default=0.5)
+    parser.add_argument("--connect-timeout-sec", type=float, default=30.0)
     parser.add_argument("--enable-timeout-sec", type=float, default=15.0)
+    parser.add_argument("--initial-joint-timeout-sec", type=float, default=45.0)
+    parser.add_argument("--initial-joint-handoff-sec", type=float, default=0.5)
+    parser.add_argument("--initial-joint-settle-sec", type=float, default=0.5)
+    parser.add_argument("--initial-joint-tolerance-rad", type=float, default=0.02)
+    parser.add_argument("--initial-joint-speed-tolerance-rad-s", type=float, default=0.03)
+    parser.add_argument("--initial-joint-max-vel-rad-s", type=float, default=0.5)
+    parser.add_argument("--initial-joint-max-acc-rad-s2", type=float, default=1.0)
     parser.add_argument("--max-linear-speed-m-s", type=float, default=0.5)
     parser.add_argument("--max-angular-speed-rad-s", type=float, default=0.75)
     parser.add_argument("--max-linear-acc-m-s2", type=float, default=2.0)
@@ -138,17 +140,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("left and right serial numbers must be different")
     if not 0.1 <= float(args.nullspace_tracking_weight) <= 1.0:
         parser.error("--nullspace-tracking-weight must be within [0.1, 1.0]")
+    for option in (
+        "initial_joint_timeout_sec",
+        "initial_joint_settle_sec",
+        "initial_joint_tolerance_rad",
+        "initial_joint_speed_tolerance_rad_s",
+        "initial_joint_max_vel_rad_s",
+        "initial_joint_max_acc_rad_s2",
+    ):
+        if float(getattr(args, option)) <= 0.0:
+            parser.error(f"--{option.replace('_', '-')} must be positive")
+    if float(args.initial_joint_handoff_sec) < 0.0:
+        parser.error("--initial-joint-handoff-sec must be non-negative")
     args.left_translation_in_world = parse_csv_floats(
         args.left_translation_in_world, expected=3, name="left translation"
     )
     args.right_translation_in_world = parse_csv_floats(
         args.right_translation_in_world, expected=3, name="right translation"
     )
-    args.left_nullspace_posture = parse_optional_posture(
-        args.left_nullspace_posture, name="left null-space posture"
+    args.left_nullspace_posture = parse_csv_floats(
+        args.left_nullspace_posture, expected=7, name="left null-space posture"
     )
-    args.right_nullspace_posture = parse_optional_posture(
-        args.right_nullspace_posture, name="right null-space posture"
+    args.right_nullspace_posture = parse_csv_floats(
+        args.right_nullspace_posture, expected=7, name="right null-space posture"
     )
     return args
 
@@ -164,13 +178,36 @@ def _wait_until_operational(robot_pair, timeout_sec: float) -> None:
         raise TimeoutError(f"DRDK robot pair did not become operational within {float(timeout_sec):.3f}s")
 
 
-def initialize_robot_pair(args: argparse.Namespace, *, flexivdrdk, flexivrdk):
+def _connect_robot_pair(args: argparse.Namespace, *, flexivdrdk):
     whitelist = [item.strip() for item in str(args.network_interface_whitelist).split(",") if item.strip()]
-    robot_pair = flexivdrdk.RobotPair(
-        (str(args.left_serial_number), str(args.right_serial_number)),
-        (list(args.left_translation_in_world), list(args.right_translation_in_world)),
-        whitelist,
-    )
+    deadline = time.monotonic() + max(0.0, float(args.connect_timeout_sec))
+    last_error: Exception | None = None
+    while True:
+        try:
+            return flexivdrdk.RobotPair(
+                (str(args.left_serial_number), str(args.right_serial_number)),
+                (list(args.left_translation_in_world), list(args.right_translation_in_world)),
+                whitelist,
+            )
+        except Exception as exc:
+            last_error = exc
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "DRDK robot pair was not discoverable during initial startup "
+                    f"within {float(args.connect_timeout_sec):.3f}s"
+                ) from last_error
+            time.sleep(0.1)
+
+
+def _joint_errors(current_q, target_q) -> list[float]:
+    return [
+        math.atan2(math.sin(float(actual) - float(target)), math.cos(float(actual) - float(target)))
+        for actual, target in zip(current_q, target_q)
+    ]
+
+
+def initialize_robot_pair(args: argparse.Namespace, *, flexivdrdk, flexivrdk, progress_callback=None):
+    robot_pair = _connect_robot_pair(args, flexivdrdk=flexivdrdk)
     if robot_pair.fault():
         if not args.clear_fault:
             raise RuntimeError("DRDK robot pair fault is active")
@@ -179,19 +216,121 @@ def initialize_robot_pair(args: argparse.Namespace, *, flexivdrdk, flexivrdk):
             raise RuntimeError(f"DRDK failed to clear both robot faults: {cleared}")
     _wait_until_operational(robot_pair, float(args.enable_timeout_sec))
 
-    mode = flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE
-    current_modes = robot_pair.mode()
-    if any(current_mode != mode for current_mode in current_modes):
-        robot_pair.SwitchMode(mode)
-
     states = robot_pair.states()
     current_q = ([float(value) for value in states[0].q], [float(value) for value in states[1].q])
     nullspace_postures = (
-        list(args.left_nullspace_posture or current_q[0]),
-        list(args.right_nullspace_posture or current_q[1]),
+        list(args.left_nullspace_posture),
+        list(args.right_nullspace_posture),
     )
     if len(nullspace_postures[0]) != len(current_q[0]) or len(nullspace_postures[1]) != len(current_q[1]):
         raise ValueError("configured null-space posture length must match each robot DoF")
+
+    joint_mode = flexivrdk.Mode.NRT_JOINT_POSITION
+    if any(current_mode != joint_mode for current_mode in robot_pair.mode()):
+        robot_pair.SwitchMode(joint_mode)
+    # Follow the official NRT joint-position example: establish the first
+    # command from state sampled *after* the mode switch.  Sending a distant
+    # task posture as the first command leaves the controller handoff
+    # discontinuous and can trip the simulated torque protection.
+    states = robot_pair.states()
+    current_q = ([float(value) for value in states[0].q], [float(value) for value in states[1].q])
+    dofs = (len(nullspace_postures[0]), len(nullspace_postures[1]))
+    zero_velocities = ([0.0] * dofs[0], [0.0] * dofs[1])
+    max_velocities = (
+        [float(args.initial_joint_max_vel_rad_s)] * dofs[0],
+        [float(args.initial_joint_max_vel_rad_s)] * dofs[1],
+    )
+    max_accelerations = (
+        [float(args.initial_joint_max_acc_rad_s2)] * dofs[0],
+        [float(args.initial_joint_max_acc_rad_s2)] * dofs[1],
+    )
+    robot_pair.SendJointPosition(
+        current_q,
+        zero_velocities,
+        max_velocities,
+        max_accelerations,
+    )
+    print(
+        "[DrdkTargetStreamer] NRT joint mode handoff seeded from current q "
+        f"left={[round(value, 6) for value in current_q[0]]} "
+        f"right={[round(value, 6) for value in current_q[1]]}",
+        flush=True,
+    )
+    handoff_deadline = time.monotonic() + float(args.initial_joint_handoff_sec)
+    while time.monotonic() < handoff_deadline:
+        if not robot_pair.connected() or robot_pair.fault() or not robot_pair.operational():
+            raise RuntimeError("DRDK robot pair failed during NRT joint-mode handoff")
+        states = robot_pair.states()
+        if progress_callback is not None:
+            progress_callback(states)
+        time.sleep(0.02)
+
+    robot_pair.SendJointPosition(
+        nullspace_postures,
+        zero_velocities,
+        max_velocities,
+        max_accelerations,
+    )
+    print(
+        "[DrdkTargetStreamer] initial NRT joint trajectory started "
+        f"left={[round(value, 6) for value in nullspace_postures[0]]} "
+        f"right={[round(value, 6) for value in nullspace_postures[1]]} "
+        f"max_vel={float(args.initial_joint_max_vel_rad_s):.3f}rad/s "
+        f"max_acc={float(args.initial_joint_max_acc_rad_s2):.3f}rad/s^2",
+        flush=True,
+    )
+    deadline = time.monotonic() + float(args.initial_joint_timeout_sec)
+    settled_since = None
+    last_progress_log = 0.0
+    while True:
+        if not robot_pair.connected() or robot_pair.fault() or not robot_pair.operational():
+            raise RuntimeError("DRDK robot pair failed during initial joint-position motion")
+        states = robot_pair.states()
+        if progress_callback is not None:
+            progress_callback(states)
+        position_errors = (
+            _joint_errors(states[0].q, nullspace_postures[0]),
+            _joint_errors(states[1].q, nullspace_postures[1]),
+        )
+        max_position_error = max(abs(value) for errors in position_errors for value in errors)
+        max_joint_speed = max(abs(float(value)) for state in states for value in state.dq)
+        within_tolerance = bool(
+            max_position_error <= float(args.initial_joint_tolerance_rad)
+            and max_joint_speed <= float(args.initial_joint_speed_tolerance_rad_s)
+        )
+        now = time.monotonic()
+        if now - last_progress_log >= 1.0:
+            print(
+                "[DrdkTargetStreamer] initial joint trajectory progress "
+                f"max_position_error={max_position_error:.6f}rad "
+                f"max_joint_speed={max_joint_speed:.6f}rad/s",
+                flush=True,
+            )
+            last_progress_log = now
+        if within_tolerance:
+            settled_since = now if settled_since is None else settled_since
+            if now - settled_since >= float(args.initial_joint_settle_sec):
+                break
+        else:
+            settled_since = None
+        if now >= deadline:
+            raise TimeoutError(
+                "DRDK initial joint-position motion timed out: "
+                f"max_position_error={max_position_error:.6f}rad "
+                f"max_joint_speed={max_joint_speed:.6f}rad/s"
+            )
+        time.sleep(0.02)
+
+    print(
+        "[DrdkTargetStreamer] initial_q reached and settled; switching to Cartesian mode",
+        flush=True,
+    )
+
+    cartesian_mode = flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE
+    if any(current_mode != cartesian_mode for current_mode in robot_pair.mode()):
+        robot_pair.SwitchMode(cartesian_mode)
+    # The runtime resets the null-space reference whenever this mode is
+    # re-entered, so install the task initq only after the Cartesian switch.
     robot_pair.SetNullSpacePosture(nullspace_postures)
     weight = float(args.nullspace_tracking_weight)
     robot_pair.SetNullSpaceObjectives(
@@ -203,19 +342,28 @@ def initialize_robot_pair(args: argparse.Namespace, *, flexivdrdk, flexivrdk):
 
 
 def _status_packet(
-    *, serial: str, ready: bool, reference_pose: list[float] | None, current_pose: list[float] | None
+    *,
+    serial: str,
+    ready: bool,
+    phase: str,
+    reference_pose: list[float] | None,
+    current_pose: list[float] | None,
+    current_q: list[float] | None = None,
 ) -> dict:
     packet = {
         "schema": "flexiv_rdk_streamer_status.v1",
         "backend": "drdk",
         "serial": str(serial),
         "ready": bool(ready),
+        "phase": str(phase),
         "monotonic_time": time.monotonic(),
     }
     if reference_pose is not None:
         packet["reference_pose_base_tcp"] = list(reference_pose)
     if current_pose is not None:
         packet["current_pose_base_tcp"] = list(current_pose)
+    if current_q is not None:
+        packet["current_q"] = list(current_q)
     return packet
 
 
@@ -245,14 +393,23 @@ def main(argv: list[str] | None = None) -> int:
     last_status_time = 0.0
     last_log_time = 0.0
 
-    def publish_status(ready: bool, current_poses: dict[str, list[float]] | None = None) -> None:
+    def publish_status(
+        ready: bool,
+        *,
+        phase: str,
+        current_poses: dict[str, list[float]] | None = None,
+        current_qs: dict[str, list[float]] | None = None,
+    ) -> None:
         poses = current_poses or {}
+        joint_positions = current_qs or {}
         for side in ("left", "right"):
             packet = _status_packet(
                 serial=serials[side],
                 ready=ready,
+                phase=phase,
                 reference_pose=reference_poses.get(side),
                 current_pose=poses.get(side),
+                current_q=joint_positions.get(side),
             )
             status_socket.sendto(
                 json.dumps(packet, separators=(",", ":")).encode("utf-8"),
@@ -266,6 +423,57 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
     try:
+        def publish_joint_initialization(states) -> None:
+            publish_status(
+                True,
+                phase="joint_initializing",
+                current_poses={
+                    "left": [float(value) for value in states[0].tcp_pose],
+                    "right": [float(value) for value in states[1].tcp_pose],
+                },
+                current_qs={
+                    "left": [float(value) for value in states[0].q],
+                    "right": [float(value) for value in states[1].q],
+                },
+            )
+
+        # Use the runtime's official NRT joint trajectory generator to reach
+        # task initq first. Only then enter Cartesian mode, reinstall initq as
+        # its null-space reference, latch TCP, and announce task readiness.
+        robot_pair, nullspace_postures = initialize_robot_pair(
+            args,
+            flexivdrdk=flexivdrdk,
+            flexivrdk=flexivrdk,
+            progress_callback=publish_joint_initialization,
+        )
+        states = robot_pair.states()
+        reference_poses = {
+            "left": [float(value) for value in states[0].tcp_pose],
+            "right": [float(value) for value in states[1].tcp_pose],
+        }
+        print(
+            "[DrdkTargetStreamer] RobotPair operational; latched TCP references "
+            f"left={format_pose_xyz_quat(reference_poses['left'])} "
+            f"right={format_pose_xyz_quat(reference_poses['right'])}",
+            flush=True,
+        )
+        print(
+            "[DrdkTargetStreamer] null-space posture initialized "
+            f"left={[round(value, 6) for value in nullspace_postures[0]]} "
+            f"right={[round(value, 6) for value in nullspace_postures[1]]}",
+            flush=True,
+        )
+        publish_status(
+            True,
+            phase="ready",
+            current_poses=reference_poses,
+            current_qs={
+                "left": [float(value) for value in states[0].q],
+                "right": [float(value) for value in states[1].q],
+            },
+        )
+        last_status_time = time.monotonic()
+
         while True:
             readable, _, _ = select.select(list(target_sockets), [], [], 0.05)
             for target_socket in readable:
@@ -288,35 +496,6 @@ def main(argv: list[str] | None = None) -> int:
                     if command is not None:
                         buffer_target_command(command_buffers[side], command)
 
-            if robot_pair is None and all(command_buffers[side] for side in ("left", "right")):
-                robot_pair, nullspace_postures = initialize_robot_pair(
-                    args, flexivdrdk=flexivdrdk, flexivrdk=flexivrdk
-                )
-                states = robot_pair.states()
-                reference_poses = {
-                    "left": [float(value) for value in states[0].tcp_pose],
-                    "right": [float(value) for value in states[1].tcp_pose],
-                }
-                print(
-                    "[DrdkTargetStreamer] RobotPair operational; latched TCP references "
-                    f"left={format_pose_xyz_quat(reference_poses['left'])} "
-                    f"right={format_pose_xyz_quat(reference_poses['right'])}",
-                    flush=True,
-                )
-                print(
-                    "[DrdkTargetStreamer] null-space posture initialized "
-                    f"left={[round(value, 6) for value in nullspace_postures[0]]} "
-                    f"right={[round(value, 6) for value in nullspace_postures[1]]}",
-                    flush=True,
-                )
-                for buffer in command_buffers.values():
-                    buffer.clear()
-                publish_status(True, reference_poses)
-                last_status_time = time.monotonic()
-                continue
-
-            if robot_pair is None:
-                continue
             if not robot_pair.connected() or robot_pair.fault() or not robot_pair.operational():
                 raise RuntimeError("DRDK robot pair is disconnected, faulted, or not operational")
 
@@ -344,7 +523,15 @@ def main(argv: list[str] | None = None) -> int:
                     "left": [float(value) for value in states[0].tcp_pose],
                     "right": [float(value) for value in states[1].tcp_pose],
                 }
-                publish_status(True, current_poses)
+                publish_status(
+                    True,
+                    phase="ready",
+                    current_poses=current_poses,
+                    current_qs={
+                        "left": [float(value) for value in states[0].q],
+                        "right": [float(value) for value in states[1].q],
+                    },
+                )
                 last_status_time = now
                 if command_poses is not None and args.log_hz > 0.0 and now - last_log_time >= 1.0 / args.log_hz:
                     print(
@@ -355,11 +542,11 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     last_log_time = now
     except KeyboardInterrupt:
-        publish_status(False)
+        publish_status(False, phase="stopped")
         return 130
     except Exception as exc:
         print(f"[DrdkTargetStreamer] fault latched: {exc}", flush=True)
-        publish_status(False)
+        publish_status(False, phase="fault")
         return 1
     finally:
         for target_socket in target_sockets:

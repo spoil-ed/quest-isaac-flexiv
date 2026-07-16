@@ -18,7 +18,10 @@ robots:
     examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
     position: {x: -0.06, y: 0.42, z: 1.08}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
-    initial_q: [0.0, -0.6981317, 0.0, 1.57079632679, 0.0, 0.6981317, 0.0]
+    # Safe Studio/SimPlugin handshake posture. initial_q is reached afterward
+    # through a rate-limited Cartesian target trajectory.
+    bootstrap_q: [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
+    initial_q: [-1.84, 1.839, 0.555, 2.03, 2.033, 1.777, 0]
     target:
       prim_path: "/World/TargetFrameLeft"
       name: "target_frame_left"
@@ -36,7 +39,8 @@ robots:
     examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
     position: {x: -0.06, y: -0.42, z: 1.08}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
-    initial_q: [0.0, -0.6981317, 0.0, 1.57079632679, 0.0, 0.6981317, 0.0]
+    bootstrap_q: [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
+    initial_q: [-1.301593, -1.71, -0.646, -1.835, -0.132, 1.924, 0]
     target:
       prim_path: "/World/TargetFrameRight"
       name: "target_frame_right"

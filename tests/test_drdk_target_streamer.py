@@ -63,10 +63,11 @@ class DrdkTargetStreamerTests(unittest.TestCase):
         self.assertEqual((pair[0].servo_cycle, pair[1].servo_cycle), (100, 100))
         self.assertIn(101, buffers["left"])
 
-    def test_initializes_nullspace_from_measured_joint_positions(self):
+    def test_initializes_nullspace_from_configured_initial_q(self):
         class State:
-            def __init__(self, q, tcp_pose):
+            def __init__(self, q, tcp_pose, dq=None):
                 self.q = q
+                self.dq = [0.0] * 7 if dq is None else dq
                 self.tcp_pose = tcp_pose
 
         class Pair:
@@ -74,6 +75,9 @@ class DrdkTargetStreamerTests(unittest.TestCase):
                 self.switches = []
                 self.postures = []
                 self.objectives = []
+                self.joint_commands = []
+                self.current_q = ([0.1] * 7, [0.2] * 7)
+                self.current_mode = ("IDLE", "IDLE")
 
             def fault(self):
                 return False
@@ -81,16 +85,24 @@ class DrdkTargetStreamerTests(unittest.TestCase):
             def operational(self):
                 return True
 
+            def connected(self):
+                return True
+
             def mode(self):
-                return ("IDLE", "IDLE")
+                return self.current_mode
 
             def SwitchMode(self, mode):
                 self.switches.append(mode)
+                self.current_mode = (mode, mode)
+
+            def SendJointPosition(self, positions, velocities, max_vel, max_acc):
+                self.joint_commands.append((positions, velocities, max_vel, max_acc))
+                self.current_q = (list(positions[0]), list(positions[1]))
 
             def states(self):
                 return (
-                    State([0.1] * 7, [0.3, 0.1, -0.6, 1.0, 0.0, 0.0, 0.0]),
-                    State([0.2] * 7, [0.3, -0.1, -0.6, 1.0, 0.0, 0.0, 0.0]),
+                    State(self.current_q[0], [0.3, 0.1, -0.6, 1.0, 0.0, 0.0, 0.0]),
+                    State(self.current_q[1], [0.3, -0.1, -0.6, 1.0, 0.0, 0.0, 0.0]),
                 )
 
             def SetNullSpacePosture(self, postures):
@@ -107,6 +119,7 @@ class DrdkTargetStreamerTests(unittest.TestCase):
                 return pair
 
         class Mode:
+            NRT_JOINT_POSITION = "NRT_JOINT_POSITION"
             NRT_CARTESIAN_MOTION_FORCE = "NRT_CARTESIAN_MOTION_FORCE"
 
         class Rdk:
@@ -114,16 +127,39 @@ class DrdkTargetStreamerTests(unittest.TestCase):
 
         Rdk.Mode = Mode
 
-        args = mod.parse_args(["--left-serial-number", "Rizon4-L", "--right-serial-number", "Rizon4-R"])
+        args = mod.parse_args(
+            [
+                "--left-serial-number",
+                "Rizon4-L",
+                "--right-serial-number",
+                "Rizon4-R",
+                "--left-nullspace-posture",
+                "0,1,2,3,4,5,6",
+                "--right-nullspace-posture",
+                "6,5,4,3,2,1,0",
+                "--initial-joint-settle-sec",
+                "0.001",
+                "--initial-joint-handoff-sec",
+                "0",
+            ]
+        )
 
         initialized, postures = mod.initialize_robot_pair(args, flexivdrdk=Drdk, flexivrdk=Rdk)
 
         self.assertIs(initialized, pair)
-        self.assertEqual(postures, ([0.1] * 7, [0.2] * 7))
-        self.assertEqual(pair.postures, [([0.1] * 7, [0.2] * 7)])
+        expected = ([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0])
+        self.assertEqual(postures, expected)
+        self.assertEqual(pair.switches, ["NRT_JOINT_POSITION", "NRT_CARTESIAN_MOTION_FORCE"])
+        self.assertEqual(pair.joint_commands[0][0], ([0.1] * 7, [0.2] * 7))
+        self.assertEqual(pair.joint_commands[1][0], expected)
+        self.assertEqual(pair.postures, [expected])
         self.assertEqual(pair.objectives[0]["ref_positions_tracking"], (0.5, 0.5))
 
-    def test_explicit_nullspace_posture_overrides_measured_q(self):
+    def test_nullspace_postures_are_required(self):
+        with self.assertRaises(SystemExit):
+            mod.parse_args([])
+
+    def test_parses_nullspace_postures(self):
         args = mod.parse_args(
             [
                 "--left-nullspace-posture",
@@ -135,6 +171,19 @@ class DrdkTargetStreamerTests(unittest.TestCase):
 
         self.assertEqual(args.left_nullspace_posture, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
         self.assertEqual(args.right_nullspace_posture, [6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0])
+
+    def test_status_packet_exposes_initialization_phase_and_joint_state(self):
+        packet = mod._status_packet(
+            serial="Rizon4-L",
+            ready=True,
+            phase="joint_initializing",
+            reference_pose=None,
+            current_pose=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            current_q=[0.1] * 7,
+        )
+
+        self.assertEqual(packet["phase"], "joint_initializing")
+        self.assertEqual(packet["current_q"], [0.1] * 7)
 
 
 if __name__ == "__main__":

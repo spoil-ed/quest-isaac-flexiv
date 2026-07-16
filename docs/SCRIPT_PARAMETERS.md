@@ -73,20 +73,28 @@
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--python` | `ISAAC_PYTHON` | 运行 DRDK streamer 的 Python。 |
+| `--scene-config` | 必填 | 与 Isaac 相同的双臂 scene YAML；左右 `robots[].initial_q` 是 `SetNullSpacePosture()` 的任务 initq。 |
 | `--left/right-serial-number` | Stage2 左右 alias | DRDK `RobotPair` 连接的两个不同 runtime alias。 |
 | `--left/right-port` | `57680/57681` | 接收 Isaac 左右目标的 UDP 端口。 |
 | `--left/right-status-port` | `57682/57683` | 向 Isaac 返回左右 ready、参考 TCP 和当前 TCP。 |
 | `--left/right-translation-in-world` | `0,0,0` | DRDK RobotPair 世界坐标中的 base 平移；当前 base-frame 目标链保持零值。 |
-| `--left/right-nullspace-posture` | 空 | 七轴零空间参考，弧度；为空时在切换 NRT 后读取该臂当前 `q`。 |
 | `--nullspace-tracking-weight` | `0.5` | 两臂参考关节姿态跟踪权重，范围 `[0.1, 1.0]`。 |
 | `--max-linear-speed-m-s` | `0.5` | NRT runtime 轨迹生成器的最大线速度。 |
 | `--max-angular-speed-rad-s` | `0.75` | NRT runtime 轨迹生成器的最大角速度。 |
 | `--max-linear-acc-m-s2` | `2.0` | 最大线加速度。 |
 | `--max-angular-acc-rad-s2` | `5.0` | 最大角加速度。 |
 | `--network-interface-whitelist` | 空 | DRDK 发现允许使用的本机 IPv4，逗号分隔。 |
+| `--connect-timeout-sec` | `30` | 仅启动阶段等待 SimPlugin 使两套 runtime 可发现；连接成功后不用于故障重连。 |
+| `--initial-joint-timeout-sec` | `45` | NRT joint-position 初始化总超时。 |
+| `--initial-joint-handoff-sec` | `0.5` | 切换 NRT joint mode 后，以切换后的当前 q 建立无跳变指令基准并保持的时间。 |
+| `--initial-joint-settle-sec` | `0.5` | 关节位置和速度进入容差后必须连续稳定的时间。 |
+| `--initial-joint-tolerance-rad` | `0.02` | DRDK 判断两臂到达 `initial_q` 的最大关节位置误差。 |
+| `--initial-joint-speed-tolerance-rad-s` | `0.03` | 初始化完成的最大关节速度。 |
+| `--initial-joint-max-vel-rad-s` | `0.5` | `SendJointPosition()` 初始化轨迹的各关节最大速度。 |
+| `--initial-joint-max-acc-rad-s2` | `1.0` | 初始化轨迹的各关节最大加速度。 |
 | `--clear-fault/--no-clear-fault` | 不清故障 | 默认保留故障现场。 |
 
-该脚本固定使用 `NRT_CARTESIAN_MOTION_FORCE`。它只同步转发目标并设置 runtime 的零空间参考，不执行 IK、动力学或力矩解算；任一侧故障会使 RobotPair 两侧同时 not-ready 并退出。
+该脚本启动时短暂使用 `NRT_JOINT_POSITION + SendJointPosition()` 平滑到 scene config 的左右 `initial_q`；到位后固定使用 `NRT_CARTESIAN_MOTION_FORCE`，并重新把 `initial_q` 设置为零空间参考。关节轨迹、IK、动力学和力矩仍由 runtime 处理；任一侧故障会使 RobotPair 两侧同时 not-ready 并退出。
 
 ## Isaac 控制入口
 
@@ -182,10 +190,11 @@ Stage2 双臂 Isaac 启动入口，参数语义与单臂入口一致，差异如
 | `--rdk-status-max-age-sec` | `1.0` | status 超过该时间即视为掉线并退回 position hold。 |
 | `--target-activation-position-tolerance-m` | `1e-3` | 手动 Frame 世界坐标平移超过此值后才请求启用对应 RDK 控制。 |
 | `--target-activation-orientation-tolerance-rad` | `0.00873` | 手动 Frame 世界坐标旋转超过约 `0.5°` 后才请求启用对应 RDK 控制。 |
+| `--startup-joint-tolerance-rad` | `0.03` | DRDK 报告到位后，Isaac 对自身与 RDK 实测 `q` 的二次 READY 校验阈值。 |
 | `--quest-target-udp-port` | `57679` | 一个 Quest/fake UDP endpoint，通过 packet `side` 字段分流左右臂。 |
 | `--gateway-endpoint` | 空 | 非空时发布 Stage2 dual gateway sample。 |
 
-双臂入口固定采用多速率执行：`--physics-hz 2000` 是 Studio/SimPlugin 状态—力矩闭环，`--render-hz 30` 和 `--target-pose-publish-hz 30` 是 GUI/目标更新。Isaac 在每个渲染步内部批量执行物理子步；Studio 返回的 `target_drives` 每个物理子步原样施加，因此双臂入口不提供 target-drive 缩放、抽帧或阈值参数。启动时 streamer 锁存 Studio/RDK 当前 TCP，并与 Isaac 末端世界位姿标定坐标变换；operational 后进入与 Stage1 相同的 effort 闭环，TargetFrame/Quest 首次变化后才释放用户目标。
+双臂入口固定采用多速率执行：`--physics-hz 2000` 是 Studio/SimPlugin 状态—力矩闭环，`--render-hz 30` 和 `--target-pose-publish-hz 30` 是 GUI/目标更新。每侧 scene 用 `bootstrap_q` 对齐 Studio home，用 `initial_q` 定义任务初始关节姿态。DRDK 的 `joint_initializing` 阶段允许 Studio 力矩闭环驱动 NRT 关节轨迹，但禁止 Quest/Frame 接管；切换 Cartesian 并锁存 initq TCP 后才进入任务 `ready`。
 
 ## Quest publisher
 

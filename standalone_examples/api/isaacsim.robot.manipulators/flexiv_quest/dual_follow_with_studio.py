@@ -225,6 +225,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gateway-jpeg-quality", type=int, default=DEFAULT_STAGE1_GATEWAY_JPEG_QUALITY)
     parser.add_argument("--coordinated-reset", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--reset-settle-sec", type=float, default=2.0)
+    parser.add_argument("--startup-joint-tolerance-rad", type=float, default=0.03)
     args = parser.parse_args(argv)
     args.scene_data = {}
     apply_scene_config(args)
@@ -391,6 +392,7 @@ class ArmRuntime:
     target_pose_gate: TargetPosePublishGate
     configured_initial_pose: TargetPose
     initial_q: list[float]
+    bootstrap_q: list[float]
     base_position: tuple[float, float, float]
     base_orientation: tuple[float, float, float, float]
     latest_quest_target: QuestTargetPacket | None = None
@@ -408,7 +410,11 @@ class ArmRuntime:
     rdk_ready: bool = False
     rdk_reference_pose_base_tcp: list[float] | None = None
     rdk_current_pose_base_tcp: list[float] | None = None
+    rdk_current_q: list[float] | None = None
+    rdk_phase: str = "disconnected"
     rdk_world_calibration: RdkWorldFrameCalibration | None = None
+    rdk_reference_world_pose: list[float] | None = None
+    startup_trajectory_complete: bool = False
     quest_goal_pose_base_tcp: list[float] | None = None
     pending_gripper_closed: bool | None = None
     applied_gripper_closed: bool | None = None
@@ -439,6 +445,36 @@ def _initial_q_config(robot_cfg: dict[str, Any]) -> list[float]:
     if len(values) != 7:
         raise ValueError("robot initial_q must contain 7 values")
     return values
+
+
+def _bootstrap_q_config(robot_cfg: dict[str, Any], *, initial_q: list[float]) -> list[float]:
+    """Return the safe SimPlugin/Studio handshake posture.
+
+    Existing scenes keep their former behavior when ``bootstrap_q`` is absent.
+    A task with a non-home ``initial_q`` can explicitly bootstrap from Studio's
+    safe home and reach the task pose later through Cartesian target control.
+    """
+
+    raw = robot_cfg.get("bootstrap_q")
+    if raw is None:
+        return list(initial_q)
+    values = [float(value) for value in raw]
+    if len(values) != 7:
+        raise ValueError("robot bootstrap_q must contain 7 values")
+    return values
+
+
+def _max_wrapped_joint_error(current_q, target_q) -> float:
+    current = [float(value) for value in current_q]
+    target = [float(value) for value in target_q]
+    if len(current) != len(target):
+        raise ValueError("current_q and target_q must have equal length")
+    if not current:
+        return 0.0
+    return max(
+        abs(math.atan2(math.sin(actual - desired), math.cos(actual - desired)))
+        for actual, desired in zip(current, target)
+    )
 
 
 def _set_robot_base_pose(robot, position, orientation) -> None:
@@ -606,6 +642,7 @@ def run(args: argparse.Namespace) -> int:
             getattr(args, f"{side}_target_pose_udp_host"),
             getattr(args, f"{side}_target_pose_udp_port"),
         )
+        initial_q = _initial_q_config(robot_cfg)
         arms[side] = ArmRuntime(
             side=side,
             serial_number=serials[side],
@@ -633,7 +670,8 @@ def run(args: argparse.Namespace) -> int:
             ),
             target_pose_gate=TargetPosePublishGate.from_hz(float(args.target_pose_publish_hz), physics_freq=physics_hz),
             configured_initial_pose=initial_pose,
-            initial_q=_initial_q_config(robot_cfg),
+            initial_q=initial_q,
+            bootstrap_q=_bootstrap_q_config(robot_cfg, initial_q=initial_q),
             base_position=base_position,
             base_orientation=base_orientation,
             latest_target_drives=[0.0] * 7,
@@ -678,6 +716,7 @@ def run(args: argparse.Namespace) -> int:
     pending_reset_control = None
     last_reset_seq = 0
     control_loop_enabled = False
+    dual_task_ready_announced = False
 
     def _current_pose_base_tcp(arm: ArmRuntime) -> list[float]:
         base_position, base_orientation = arm.robot.get_world_pose()
@@ -701,13 +740,16 @@ def run(args: argparse.Namespace) -> int:
         if reset_world:
             world.reset()
         _set_robot_base_pose(arm.robot, arm.base_position, arm.base_orientation)
-        _hold_arm_position(arm, arm.initial_q)
+        # SimPlugin and both runtimes must first agree on Studio's safe home.
+        # DRDK moves from this posture to task initial_q using the runtime's
+        # official NRT joint-position trajectory generator.
+        _hold_arm_position(arm, arm.bootstrap_q)
         if arm.robot.gripper is not None:
             arm.robot.gripper.open()
             arm.pending_gripper_closed = False
             arm.applied_gripper_closed = False
         print(
-            f"[FlexivDualTargetFrame] {arm.side} initial joint hold applied "
+            f"[FlexivDualTargetFrame] {arm.side} bootstrap joint hold applied "
             f"q={[round(float(value), 6) for value in arm.robot.q]}",
             flush=True,
         )
@@ -743,11 +785,15 @@ def run(args: argparse.Namespace) -> int:
         arm.rdk_ready = False
         arm.rdk_reference_pose_base_tcp = None
         arm.rdk_current_pose_base_tcp = None
+        arm.rdk_current_q = None
+        arm.rdk_phase = "disconnected"
         arm.rdk_world_calibration = None
+        arm.rdk_reference_world_pose = None
+        arm.startup_trajectory_complete = False
         arm.quest_goal_pose_base_tcp = None
 
     def initialize_like_startup(reason: str, *, reset_world: bool) -> None:
-        nonlocal control_loop_enabled
+        nonlocal control_loop_enabled, dual_task_ready_announced
         # world.reset() can invoke physics callbacks before articulation views
         # and configured joint positions are ready. Never expose those
         # transient states to an already-operational Studio controller.
@@ -757,6 +803,7 @@ def run(args: argparse.Namespace) -> int:
         if quest_target_receiver is not None:
             quest_target_receiver.clear()
         rdk_status_receiver.clear()
+        dual_task_ready_announced = False
         control_loop_enabled = True
         print(
             f"[FlexivDualTargetFrame] startup initialization applied reason={reason}; "
@@ -839,25 +886,26 @@ def run(args: argparse.Namespace) -> int:
             arm.mapper.reset()
             arm.limiter.reset(control_pose_base_tcp)
         elif arm.latest_quest_target is not None:
-            # Quest deltas are commands in Flexiv's RDK base frame. The
-            # wall-mounted Isaac articulation has a different base-axis
-            # convention, so use the TCP measured by the RDK streamer as the
-            # position anchor instead of deriving it from the USD root.
-            rdk_anchor_pose = arm.rdk_current_pose_base_tcp or arm.rdk_reference_pose_base_tcp
-            if rdk_anchor_pose is not None:
-                current_pose_base_tcp = list(rdk_anchor_pose)
-                if args.quest_target_mode == "relative":
-                    control_pose_base_tcp = arm.mapper.update(
-                        arm.latest_quest_target,
-                        current_pose_base_tcp,
-                    )
-                arm.quest_goal_pose_base_tcp = [float(value) for value in control_pose_base_tcp]
-            else:
-                arm.mapper.reset()
+            if arm.startup_trajectory_complete:
+                # Quest deltas are commands in Flexiv's RDK base frame. The
+                # wall-mounted Isaac articulation has a different base-axis
+                # convention, so use the TCP measured by the RDK streamer as
+                # the position anchor instead of deriving it from the USD root.
+                rdk_anchor_pose = arm.rdk_current_pose_base_tcp or arm.rdk_reference_pose_base_tcp
+                if rdk_anchor_pose is not None:
+                    current_pose_base_tcp = list(rdk_anchor_pose)
+                    if args.quest_target_mode == "relative":
+                        control_pose_base_tcp = arm.mapper.update(
+                            arm.latest_quest_target,
+                            current_pose_base_tcp,
+                        )
+                    arm.quest_goal_pose_base_tcp = [float(value) for value in control_pose_base_tcp]
+                else:
+                    arm.mapper.reset()
 
         if not reset_hold_active and not arm.target_control_requested:
             activation_source = None
-            if arm.latest_quest_target is not None:
+            if arm.latest_quest_target is not None and arm.startup_trajectory_complete:
                 activation_source = "quest"
             current_target_world_pose = [
                 *[float(value) for value in target_position],
@@ -865,13 +913,14 @@ def run(args: argparse.Namespace) -> int:
             ]
             if (
                 activation_source is None
+                and arm.startup_trajectory_complete
                 and not args.enable_quest_target_udp
                 and arm.idle_target_world_pose is not None
                 and cartesian_pose_changed(
-                arm.idle_target_world_pose,
-                current_target_world_pose,
-                position_tolerance_m=float(args.target_activation_position_tolerance_m),
-                orientation_tolerance_rad=float(args.target_activation_orientation_tolerance_rad),
+                    arm.idle_target_world_pose,
+                    current_target_world_pose,
+                    position_tolerance_m=float(args.target_activation_position_tolerance_m),
+                    orientation_tolerance_rad=float(args.target_activation_orientation_tolerance_rad),
                 )
             ):
                 activation_source = "target-frame"
@@ -880,8 +929,7 @@ def run(args: argparse.Namespace) -> int:
                 arm.target_control_source = activation_source
                 print(
                     f"[FlexivDualTargetFrame] {arm.side} target control armed by {activation_source}; "
-                    "waiting for RDK operational acknowledgement "
-                    f"target_world={[round(value, 6) for value in current_target_world_pose]}",
+                    "startup hold released",
                     flush=True,
                 )
 
@@ -911,6 +959,7 @@ def run(args: argparse.Namespace) -> int:
         if not reset_hold_active:
             user_target_active = bool(
                 arm.target_control_requested
+                and arm.startup_trajectory_complete
                 and arm.rdk_ready
                 and arm.effort_control_enabled
                 and arm.rdk_reference_pose_base_tcp is not None
@@ -969,13 +1018,26 @@ def run(args: argparse.Namespace) -> int:
             )
 
     def _update_rdk_statuses() -> None:
+        nonlocal dual_task_ready_announced
         readiness = rdk_status_receiver.poll()
         for side, ready in readiness.items():
             arm = arms[side]
             packet = rdk_status_receiver.latest_packet(side)
             if ready and packet is not None:
+                phase = str(packet.get("phase") or "ready")
                 reference_pose = _finite_status_pose(packet, "reference_pose_base_tcp")
                 current_pose = _finite_status_pose(packet, "current_pose_base_tcp")
+                current_q = _finite_status_pose(packet, "current_q")
+                if phase != arm.rdk_phase:
+                    print(
+                        f"[FlexivDualTargetFrame] RDK phase {side} {arm.rdk_phase} -> {phase}",
+                        flush=True,
+                    )
+                arm.rdk_phase = phase
+                if current_q is not None:
+                    arm.rdk_current_q = current_q
+                if current_pose is not None:
+                    arm.rdk_current_pose_base_tcp = current_pose
                 if reference_pose is not None:
                     if arm.rdk_reference_pose_base_tcp is None:
                         print(
@@ -984,21 +1046,60 @@ def run(args: argparse.Namespace) -> int:
                             flush=True,
                         )
                     arm.rdk_reference_pose_base_tcp = reference_pose
-                    if arm.idle_target_world_pose is not None:
+                    if phase == "ready" and not arm.startup_trajectory_complete:
+                        tcp_position, tcp_orientation = arm.robot.end_effector.get_world_pose()
+                        arm.rdk_reference_world_pose = [
+                            *[float(value) for value in tcp_position],
+                            *[float(value) for value in tcp_orientation],
+                        ]
+                        arm.target_frame.set_world_pose(
+                            position=np.array(tcp_position),
+                            orientation=np.array(tcp_orientation),
+                        )
+                        arm.idle_target_world_pose = list(arm.rdk_reference_world_pose)
+                    if arm.rdk_reference_world_pose is not None:
                         arm.rdk_world_calibration = RdkWorldFrameCalibration.from_reference_pair(
-                            reference_world_pose=arm.idle_target_world_pose,
+                            reference_world_pose=arm.rdk_reference_world_pose,
                             reference_pose_base_tcp=reference_pose,
                         )
-                if current_pose is not None:
-                    arm.rdk_current_pose_base_tcp = current_pose
+                    if phase == "ready" and not arm.startup_trajectory_complete:
+                        isaac_joint_error = _max_wrapped_joint_error(arm.robot.q, arm.initial_q)
+                        rdk_joint_error = (
+                            math.inf
+                            if arm.rdk_current_q is None
+                            else _max_wrapped_joint_error(arm.rdk_current_q, arm.initial_q)
+                        )
+                        if max(isaac_joint_error, rdk_joint_error) <= float(args.startup_joint_tolerance_rad):
+                            arm.startup_trajectory_complete = True
+                            arm.limiter.reset(reference_pose)
+                            print(
+                                f"[FlexivDualTargetFrame] {side} task initial_q reached "
+                                f"isaac_max_error_rad={isaac_joint_error:.6f} "
+                                f"rdk_max_error_rad={rdk_joint_error:.6f}",
+                                flush=True,
+                            )
             if ready and not arm.rdk_ready:
-                print(f"[FlexivDualTargetFrame] RDK operational {side} {arm.serial_number}", flush=True)
+                print(f"[FlexivDualTargetFrame] RDK transport operational {side} {arm.serial_number}", flush=True)
             elif not ready and arm.rdk_ready:
                 print(
                     f"[FlexivDualTargetFrame] RDK not ready {side} {arm.serial_number}; pausing user target handoff",
                     flush=True,
                 )
+                arm.rdk_phase = "not_ready"
             arm.rdk_ready = bool(ready)
+        task_ready = all(
+            arm.startup_trajectory_complete
+            and arm.rdk_ready
+            and arm.rdk_phase == "ready"
+            and arm.effort_control_enabled
+            for arm in arms.values()
+        )
+        if task_ready and not dual_task_ready_announced:
+            dual_task_ready_announced = True
+            print(
+                "[FlexivDualTargetFrame] READY: both task initial poses reached; user control enabled",
+                flush=True,
+            )
 
     def _apply_arm_studio_torque(arm: ArmRuntime) -> None:
         """Receive and apply Studio's unmodified torque command for one 2 kHz cycle."""
@@ -1009,7 +1110,13 @@ def run(args: argparse.Namespace) -> int:
                 f"[FlexivDualTargetFrame] SimPlugin connected {arm.side} {arm.serial_number}",
                 flush=True,
             )
-            arm.effort_control_enabled = False
+            # Match the official multi-robot bridge: SimPlugin connectivity is
+            # sufficient to close the 2 kHz Studio torque loop.  Waiting for
+            # RDK/DRDK readiness here creates a dependency cycle: the runtime
+            # needs its torque applied to remain healthy while DRDK is still
+            # discovering the pair.
+            arm.robot.switch_control_mode("effort")
+            arm.effort_control_enabled = True
         if not connected:
             if arm.last_connected:
                 print(f"[FlexivDualTargetFrame] SimPlugin disconnected {arm.side} {arm.serial_number}", flush=True)
@@ -1023,20 +1130,10 @@ def run(args: argparse.Namespace) -> int:
             arm.articulation_ready = _is_robot_ready(arm.robot)
             if not arm.articulation_ready:
                 return
-        # Stage1 manual mode establishes a Cartesian hold at the measured TCP
-        # before effort control begins.  TargetFrame movement only releases
-        # the calibrated user target; it does not gate this safe handoff.
-        if not arm.rdk_ready or arm.rdk_reference_pose_base_tcp is None:
-            if arm.effort_control_enabled:
-                _hold_arm_position(arm)
-                arm.effort_control_enabled = False
-            return
         if not arm.sim_node.WaitForRobotCommands(max(0, int(args.command_timeout_ms))):
             return
         target_drives = arm.sim_node.robot_commands().target_drives
         arm.latest_target_drives = list(target_drives[:7])
-        if arm.reset_hold_pose_base_tcp is not None and arm.reset_hold_cycles_remaining > 0:
-            return
         if not arm.effort_control_enabled:
             arm.robot.switch_control_mode("effort")
             arm.effort_control_enabled = True
@@ -1193,12 +1290,24 @@ def run(args: argparse.Namespace) -> int:
                         "target_control_source": left.target_control_source,
                         "rdk_ready": bool(left.rdk_ready),
                         "effort_control_enabled": bool(left.effort_control_enabled),
+                        "startup_trajectory_complete": bool(left.startup_trajectory_complete),
+                        "task_ready": bool(
+                            left.startup_trajectory_complete
+                            and left.rdk_ready
+                            and left.effort_control_enabled
+                        ),
                     },
                     "right": {
                         "target_control_requested": bool(right.target_control_requested),
                         "target_control_source": right.target_control_source,
                         "rdk_ready": bool(right.rdk_ready),
                         "effort_control_enabled": bool(right.effort_control_enabled),
+                        "startup_trajectory_complete": bool(right.startup_trajectory_complete),
+                        "task_ready": bool(
+                            right.startup_trajectory_complete
+                            and right.rdk_ready
+                            and right.effort_control_enabled
+                        ),
                     },
                 },
                 "stage3_task": stage3_task,
@@ -1206,16 +1315,27 @@ def run(args: argparse.Namespace) -> int:
                 "scene_objects": scene_object_summary,
                 "reset": {
                     "last_seq": int(last_reset_seq),
-                    "holding_start_pose": bool(left.reset_hold_cycles_remaining > 0 or right.reset_hold_cycles_remaining > 0),
+                    "holding_start_pose": bool(
+                        left.reset_hold_cycles_remaining > 0
+                        or right.reset_hold_cycles_remaining > 0
+                    ),
                     "state": (
                         "moving"
-                        if left.reset_hold_cycles_remaining > 0 or right.reset_hold_cycles_remaining > 0
+                        if (
+                            left.reset_hold_cycles_remaining > 0
+                            or right.reset_hold_cycles_remaining > 0
+                            or not left.startup_trajectory_complete
+                            or not right.startup_trajectory_complete
+                        )
                         else "succeeded"
                         if last_reset_seq > 0
                         else "idle"
                     ),
                     "ready": not bool(
-                        left.reset_hold_cycles_remaining > 0 or right.reset_hold_cycles_remaining > 0
+                        left.reset_hold_cycles_remaining > 0
+                        or right.reset_hold_cycles_remaining > 0
+                        or not left.startup_trajectory_complete
+                        or not right.startup_trajectory_complete
                     ),
                 },
             },
@@ -1248,7 +1368,8 @@ def run(args: argparse.Namespace) -> int:
         omni.timeline.get_timeline_interface().play()
 
     print(
-        f"[FlexivDualTargetFrame] Ready. control_source=studio-bridge. physics_hz={physics_hz:g}. "
+        f"[FlexivDualTargetFrame] Started; waiting for task-pose READY. "
+        f"control_source=studio-bridge. physics_hz={physics_hz:g}. "
         f"target_pose_hz={physics_hz / max(1, arms['left'].target_pose_gate.period_cycles):.3f}. "
         f"left={args.left_serial_number} right={args.right_serial_number}. "
         f"Drag {arms['left'].target_prim_path}; select {arms['right'].target_prim_path} for the right arm.",

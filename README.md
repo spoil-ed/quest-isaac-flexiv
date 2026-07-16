@@ -329,6 +329,7 @@ DRDK 与两个独立 RDK streamer 是互斥 backend：两者会争用相同 UDP 
 ```bash
 python scripts/start_drdk_target_streamer.py \
   --python "$ISAAC_PYTHON" \
+  --scene-config configs/scenes/pick_place_redblock_flexiv_dual.yaml \
   --left-serial-number "$LEFT_ROBOT_SERIAL" \
   --right-serial-number "$RIGHT_ROBOT_SERIAL" \
   --left-port 57680 \
@@ -341,9 +342,11 @@ python scripts/start_drdk_target_streamer.py \
 
 DRDK backend 固定使用 `NRT_CARTESIAN_MOTION_FORCE`。它只在收到同一 `servo_cycle` 的左右目标后调用一次 `RobotPair.SendCartesianMotionForce()`；目标的轨迹生成、Cartesian/关节控制和力矩解算仍由两套 Flexiv runtime 完成。
 
-切换 NRT 模式后，streamer 默认读取两臂当前关节位置并调用 `SetNullSpacePosture((q_left, q_right))`，避免进入 Cartesian 控制时零空间参考发生跳变。任务确有固定零空间姿态时可传 `--left-nullspace-posture` 和 `--right-nullspace-posture`，格式均为七个逗号分隔的弧度值。
+streamer 从 `--scene-config` 读取左右 `robots[].initial_q`。两套 runtime 先以 scene 的 `bootstrap_q`（必须匹配 Studio home）完成 SimPlugin/DRDK 握手；随后 DRDK 进入 `NRT_JOINT_POSITION`，先用切换后的当前 q 建立无跳变指令基准，再调用 `SendJointPosition(init_q)`，由 runtime 内部运动生成器平滑移动到两侧 initq。关节位置和速度连续稳定后，DRDK 再切换 `NRT_CARTESIAN_MOTION_FORCE`，重新调用 `SetNullSpacePosture((init_q_left, init_q_right))` 并锁存当前 TCP。DRDK 与 Isaac 必须使用同一份 scene config；缺少任一侧七轴 `initial_q` 时拒绝启动。
 
 DRDK RobotPair 的 readiness 是成对的：任一 runtime 断连、fault 或不再 operational 时，streamer 会同时向 Isaac 发布两侧 not-ready 并锁存退出，不自动清 fault 或重连。其日志位于 `logs/drdk_target_streamer_dual*.stdout.log`。
+
+Isaac 与两套 runtime 的 2 kHz SimPlugin 力矩闭环从各侧 SimPlugin connected 起立即运行，不等待 DRDK ready；DRDK ready 只开放 Cartesian/Quest/TargetFrame 目标。否则 runtime 在 DRDK 仍进行成对发现时收不到自身力矩响应，可能把该瞬态误判为负载超限。
 
 ### 5. 启动当前验证过的 Isaac GUI 场景
 
@@ -378,11 +381,12 @@ tail -f logs/rdk_target_streamer*.stdout.log \
 
 1. 两个独立 RDK streamer 或一个 DRDK RobotPair streamer 监听目标端口并连接两侧 alias。
 2. 两个 `SimPlugin connected`。
-3. 左右 TargetFrame 初始化到各自机械臂末端。
+3. 左右 TargetFrame 初始化到各自机械臂在 `bootstrap_q` 的末端。
 4. 两个 streamer 输出 `latched current TCP reference`。
 5. Isaac 输出左右 `calibrated ... RDK TCP reference`。
 6. 两个 RDK 状态变为 `operational`，左右 Isaac articulation 进入 effort mode。
-7. 拖动某一侧 Frame 超过激活阈值后，该侧输出 `target control armed` 并开始跟随。
+7. DRDK 输出 `initial NRT joint trajectory started`、进度和 `initial_q reached and settled`；Isaac 在此阶段显示 `joint_initializing`，但不允许用户目标接管。
+8. 输出 `READY: both task initial poses reached` 后才能开始任务；拖动某一侧 Frame 超过激活阈值后，该侧输出 `startup hold released` 并开始跟随。
 
 在 Isaac Stage 窗口选择 `/World/TargetFrameLeft` 或 `/World/TargetFrameRight`，用移动/旋转工具拖动。不要移动机器人 articulation、墙面或 base prim。左、右 Frame 各自只控制对应机械臂。
 
@@ -458,7 +462,7 @@ T_base_tcp_target      = inverse(T_world_base_effective) * T_world_target
 | Docker Studio 没有 GUI | 先确认容器为 `healthy`，安装 VNC viewer 后连接 `127.0.0.1:5902`；同时检查 `docker compose ... logs -f studio-left`。 |
 | `robot not found` | 检查 alias 是否严格为 `qSaFLh`/`I0LIRN` 对应值、两侧 External Interface 是否启用、Docker bridge 是否在线，以及 RobotControlApp/FlexivSimulation 是否都在运行。 |
 | Frame 能拖但机械臂不跟随 | 手工模式不能传 `--enable-quest-target-udp`；检查是否依次出现 calibration、`operational`、effort 和 `target control armed`。还要确认没有旧 streamer/Isaac 占用端口。 |
-| 启动后机械臂自己动 | 立即停止，不要继续拖动。通常是旧目标、错误坐标变换或 Studio/Isaac 初始姿态不一致；冷启动两套 runtime，确认 `initial_q` 都是 Studio 的 `home`，并等待当前 TCP 标定完成。 |
+| 启动后机械臂瞬间跳动 | 立即停止，不要继续拖动。冷启动两套 runtime，确认 `bootstrap_q` 与 Studio home 一致，并检查 DRDK 是否先进入 `joint_initializing`。非 home `initial_q` 应由 `SendJointPosition()` 的 runtime 轨迹生成器连续到达，不能瞬时写 articulation。 |
 | `joint torque exceeds the limit` | 立即停止本轮；streamer 会锁存退出且不会循环清 fault。先检查坐标标定和启动顺序，再在 Studio 中人工确认状态后冷启动。以前的超限来自墙挂 root 坐标误当 RDK base 导致的大目标跳变，不是本项目新增的力矩限制。 |
 | `Estimated payload ... > 10 kg` | 通常表示 Studio 在缺少或收到陈旧 SimPlugin torque 时估计出异常负载。确认两侧 SimPlugin 都连接、两臂同时进入 effort，然后冷启动，不要只反复清 fault。 |
 | Isaac 很卡 | 保持 `physics_hz=2000`、`render_hz=30` 和 `--no-gpu-dynamics`；关闭多余 Isaac/Studio/streamer 进程，降低额外 viewport/相机负载。RTX 渲染使用 GPU，但 2000 Hz PhysX/SimPlugin 闭环仍会占用 CPU。 |
@@ -546,7 +550,7 @@ python scripts/validate_data_artifacts.py \
 
 Stage3 在 Stage2 双臂闭环上增加 config-driven scene kit，不改变原始平地双臂场景。原始平地配置仍是 `configs/scenes/dual_rizon4_cam_front.yaml`；墙挂桌面任务通过以下 scene/pipeline 显式启用：
 
-Stage3 两臂继续使用本仓库 Isaac extension 中的 `Rizon4_with_Grav.usd`。场景 `initial_q` 必须与两套 Studio 启动参数 `--group_state home` 一致，即 `[0, -0.6981317, 0, 1.57079632679, 0, 0.6981317, 0]`。两臂墙装 base pose 固定为左 `(-0.06, 0.42, 1.08)`、右 `(-0.06, -0.42, 1.08)`、共同绕 Y 轴 `+90°`，不得为了调整画面或避障修改；应调整相机或任务物体。启动时 bridge 会同步 Isaac 关节位置和 USD position-drive target；完成两侧 RDK 当前 TCP 标定且状态 operational 后，两臂同时切入 Studio effort 闭环。没有新 Quest/fake/Frame 目标时，streamer 保持各自锁存的当前 RDK TCP。
+Stage3 两臂继续使用本仓库 Isaac extension 中的 `Rizon4_with_Grav.usd`。`bootstrap_q` 必须与两套 Studio 启动参数 `--group_state home` 一致，推荐 `[0, -0.698132, 0, 1.5708, 0, 0.698132, 0]`；`initial_q` 定义任务初始关节姿态及进入 Cartesian 模式后的零空间参考。两臂墙装 base pose 固定为左 `(-0.06, 0.42, 1.08)`、右 `(-0.06, -0.42, 1.08)`、共同绕 Y 轴 `+90°`。启动时 bridge 先以 `bootstrap_q` 完成握手，DRDK 再通过 `NRT_JOINT_POSITION` 平滑到 `initial_q`；切换 Cartesian 后锁存到位 TCP，最后才允许 Quest/TargetFrame 接管。
 
 Flexiv SimPlugin 的物理闭环使用 2000 Hz，`render_hz`、TargetFrame/RDK 目标、gateway 和 recorder 仍为 30 Hz。Isaac `World` 会把 2000 Hz 物理子步批量放进 30 Hz 渲染步中，所以降频的是目标采样、GUI 和数据流，不是 Studio 力矩闭环。不要把 `physics_hz` 降到录像帧率；低频直接应用 Studio effort 会改变积分步长并造成关节振荡和超力矩。
 

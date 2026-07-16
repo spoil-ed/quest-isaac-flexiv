@@ -184,6 +184,39 @@ class Stage2RealValidationConfigTests(unittest.TestCase):
         self.assertEqual(manual_args.left_rdk_status_udp_port, 57682)
         self.assertEqual(manual_args.right_rdk_status_udp_port, 57683)
 
+    def test_dual_task_initialization_separates_studio_home_from_task_initq(self):
+        dual_app = load_dual_app()
+        task_q = [-1.0, 1.0, 0.2, 1.5, -0.2, 1.0, 0.0]
+        home_q = [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
+
+        self.assertEqual(
+            dual_app._bootstrap_q_config(
+                {"bootstrap_q": home_q, "initial_q": task_q},
+                initial_q=task_q,
+            ),
+            home_q,
+        )
+        self.assertEqual(
+            dual_app._bootstrap_q_config({"initial_q": task_q}, initial_q=task_q),
+            task_q,
+        )
+
+    def test_dual_task_ready_joint_error_wraps_at_two_pi(self):
+        dual_app = load_dual_app()
+
+        error = dual_app._max_wrapped_joint_error(
+            [2.0 * 3.141592653589793 - 0.01, 0.2],
+            [0.0, 0.21],
+        )
+
+        self.assertAlmostEqual(error, 0.01, places=9)
+
+    def test_dual_task_ready_checks_joint_tolerance(self):
+        dual_app = load_dual_app()
+        args = dual_app.parse_args([])
+
+        self.assertEqual(args.startup_joint_tolerance_rad, 0.03)
+
     def test_dual_app_batches_physics_substeps_and_keeps_raw_studio_torque(self):
         source = DUAL_APP.read_text(encoding="utf-8")
 
@@ -192,6 +225,13 @@ class Stage2RealValidationConfigTests(unittest.TestCase):
         self.assertNotIn("valid_target_drives_or_none", source)
         self.assertNotIn("target_drive_scale", source)
         self.assertIn("arm.robot.apply_torques(target_drives)", source)
+        torque_loop = source.split(
+            "def _apply_arm_studio_torque(arm: ArmRuntime) -> None:",
+            maxsplit=1,
+        )[1].split("target_update_gate =", maxsplit=1)[0]
+        self.assertNotIn("control_transport_ready", torque_loop)
+        self.assertNotIn("arm.rdk_ready", torque_loop)
+        self.assertNotIn("reset_hold_cycles_remaining", torque_loop)
 
     def test_quest_mode_does_not_author_usd_inside_the_target_update_branch(self):
         source = DUAL_APP.read_text(encoding="utf-8")
