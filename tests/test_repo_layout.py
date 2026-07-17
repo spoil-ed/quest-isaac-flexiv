@@ -334,7 +334,7 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("--initial-joint-handoff-sec", command)
         self.assertEqual(command[command.index("--reset-motion-method") + 1], "movej")
         self.assertIn("--no-clear-fault", command)
-        self.assertIn("--self-collision-monitor", command)
+        self.assertIn("--no-self-collision-monitor", command)
         self.assertIn("--left-translation-in-world=-0.06,0.2,1.08", command)
         self.assertIn("--right-translation-in-world=-0.06,-0.2,1.08", command)
         self.assertIn("--contact-wrench-control", command)

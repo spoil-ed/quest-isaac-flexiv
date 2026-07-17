@@ -72,17 +72,17 @@ control:
       password_env: "FLEXIV_SAFETY_PASSWORD"
     cartesian_impedance:
       enabled: true
-      # Responsive NRT profile with impact headroom. The full-stiffness test
-      # reached A3/A4 torque faults during small contacts.
-      left_stiffness: [8000.0, 8000.0, 8000.0, 1200.0, 1200.0, 1200.0]
-      right_stiffness: [8000.0, 8000.0, 8000.0, 1200.0, 1200.0, 1200.0]
+      # Match the impedance response to the 30 N / 5 Nm contact-wrench limits:
+      # 1 cm translation produces about 25 N and 1 degree about 4.36 Nm.
+      left_stiffness: [2500.0, 2500.0, 2500.0, 250.0, 250.0, 250.0]
+      right_stiffness: [2500.0, 2500.0, 2500.0, 250.0, 250.0, 250.0]
       left_damping_ratio: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
       right_damping_ratio: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
     self_collision_monitor:
-      enabled: true
-      # DRDK Stop() can take hundreds of milliseconds under load. Keep enough
-      # geometric headroom that the arms do not enter a torque fault while the
-      # coordinated stop is completing.
+      # Disabled: the official monitor can race a controller fault and issue a
+      # second RobotPair.Stop(), terminating the DRDK process. Studio torque
+      # protection and the guards below remain active.
+      enabled: false
       min_distance_m: 0.15
       loop_interval_ms: 10
       skipped_links: []

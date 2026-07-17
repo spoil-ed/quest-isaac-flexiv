@@ -102,7 +102,7 @@
 | `--left/right-port` | `57680/57681` | 接收 Isaac 左右目标的 UDP 端口。 |
 | `--left/right-status-port` | `57682/57683` | 向 Isaac 返回左右 ready、参考 TCP 和当前 TCP。 |
 | `--left/right-translation-in-world` | scene `robots[].position` | DRDK RobotPair 世界坐标中的 base 平移，供双臂几何碰撞计算；CLI 可显式覆盖。 |
-| `--self-collision-monitor/--no-self-collision-monitor` | pipeline：开启 | 启停官方 DRDK `SelfCollisionMonitor`；`start.sh` 可通过 `SELF_COLLISION_MONITOR=true/false` 临时覆盖。 |
+| `--self-collision-monitor/--no-self-collision-monitor` | pipeline：关闭 | 启停官方 DRDK `SelfCollisionMonitor`；`start.sh` 可通过 `SELF_COLLISION_MONITOR=true/false` 临时覆盖。 |
 | `--self-collision-min-distance-m` | `0.05` | 两臂任意受检几何点的最小允许距离；触发后 DRDK 停止双臂。 |
 | `--self-collision-loop-interval-ms` | `10` | 后台碰撞检测周期，默认 10 ms（100 Hz）。 |
 | `--self-collision-skip-link` | 空 | 排除检查的 link 名称，可重复传入；默认不排除。 |
