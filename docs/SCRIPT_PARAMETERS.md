@@ -119,7 +119,9 @@
 | `--contact-wrench-release-ratio` | pipeline：`0.55` | 六轴 wrench 全部降到该比例以下才进入恢复计时。 |
 | `--contact-wrench-trigger-samples` | pipeline：`1` | 连续触发样本数；当前单样本响应轻碰撞。 |
 | `--contact-wrench-release-dwell-sec` | pipeline：`0.12` | 低于恢复阈值后必须连续稳定的时间。 |
-| `--nullspace-tracking-weight` | `0.5` | 两臂参考关节姿态跟踪权重，范围 `[0.1, 1.0]`。 |
+| `--nullspace-linear-manipulability-weight` | pipeline：`0.2` | 两臂平移可操作度权重，范围 `[0, 1]`。 |
+| `--nullspace-angular-manipulability-weight` | pipeline：`0.2` | 两臂旋转可操作度权重，范围 `[0, 1]`。 |
+| `--nullspace-tracking-weight` | pipeline：`0.8` | 两臂参考关节姿态跟踪权重，范围 `[0.1, 1.0]`。 |
 | `--max-linear-speed-m-s` | 当前启动栈：`3.0` | 两套 Studio normal safety 的 TCP 线速度上限。 |
 | `--max-angular-speed-rad-s` | 当前启动栈：`12.0` | 两套 Studio normal safety 的 TCP 角速度上限。 |
 | `--max-linear-acc-m-s2` | 当前启动栈：`8.0` | 最大线加速度。 |
@@ -150,7 +152,7 @@
 | `--reset-retry-delay-sec` | `0.5` | 两次恢复尝试之间的等待时间。 |
 | `--clear-fault/--no-clear-fault` | 不清故障 | 仅控制首次启动是否清故障；显式协调 reset 始终尝试清除双臂 fault。 |
 
-唯一 pipeline 的 `control.drdk` 是上述安全参数的主配置源，`start.sh` 默认加载它，显式 CLI 或 `SELF_COLLISION_MONITOR` 仅作为临时覆盖。官方 `SelfCollisionMonitor` 默认开启，独立以 100 Hz 检查两臂几何距离；小于 0.05 m 时直接停止双臂并锁存 `self_collision_stopped`，但不检查机械臂与桌面或工件的碰撞。协调 reset 会临时停止监视器，让 NRT 关节轨迹把已接近的双臂分开并回到安全 `initial_q`，落位后重新创建并启动监视器。脚本短暂使用 `NRT_JOINT_POSITION + SendJointPosition()` 平滑到 scene config 的左右 `initial_q`；每次切入 `NRT_CARTESIAN_MOTION_FORCE` 后重设 `SetNullSpacePosture()`，并在 `contact_wrench.enabled: true` 时调用 `SetMaxContactWrench()`。streamer 以 `tcp_wrench` 对两侧独立做迟滞检测：单样本达到 90% 上限时把该侧目标冻结在当前 TCP，全部分量降到 55% 以下并稳定 0.12 s 后恢复。独立的关节力矩保护从 `RobotPair.info().tau_max` 取得每关节限制，以 `tau`、`tau_ext` 及 25 ms 短期预测的最大值判定风险；预测斜率逐关节选用 runtime `tau_dot` 和连续 `tau` 本地差分中更保守者。达到 72% 时回退至至少 0.05 s 前的最近 target，全部关节低于 55% 并稳定 0.15 s 后恢复。两种保护解除时都把最新输入重映射到安全输出，禁止追赶冻结期间累积目标。关节轨迹、IK、动力学和力矩仍由 runtime 处理。任一侧故障会使 RobotPair 两侧同时 not-ready。显式 reset 回程再次 fault 时，streamer 会从新的实际 q 低速重建 NRT 基准并有界重试；耗尽次数后保持存活，等待更高的 `reset_seq`。
+唯一 pipeline 的 `control.drdk` 是上述安全参数的主配置源，`start.sh` 默认加载它，显式 CLI 或 `SELF_COLLISION_MONITOR` 仅作为临时覆盖。脚本短暂使用 `NRT_JOINT_POSITION + SendJointPosition()` 平滑到 scene config 的左右 `initial_q`；每次切入 `NRT_CARTESIAN_MOTION_FORCE` 后重设 `SetNullSpacePosture()`，并在 `contact_wrench.enabled: true` 时调用 `SetMaxContactWrench()`。streamer 以 `tcp_wrench` 对两侧独立做迟滞检测，达到阈值时冻结在当前 TCP，解除后恢复最新目标。独立的关节力矩保护从 `RobotPair.info().tau_max` 取得限制，以 `tau`、`tau_ext` 及 5 ms 短期预测判定风险，连续 3 个危险样本才触发回退。两种保护解除后都通过 NRT 内部轨迹生成器平滑追上最新目标，不再重建永久输入/输出 offset。关节轨迹、IK、动力学和力矩仍由 runtime 处理。任一侧故障会使 RobotPair 两侧同时 not-ready。
 
 `control.joint_effort_limits_nm` 把 Isaac articulation 的 J1..J7 力矩上限设为 `[150,150,80,80,49,49,49] Nm`，与 Studio 模拟 Rizon4 已有的 safety-function 配置一致。它不替代更低的 TCP 接触保护和基于 `RobotInfo.tau_max` 的 72% 关节力矩回退。
 

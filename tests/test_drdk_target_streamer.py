@@ -229,7 +229,7 @@ class DrdkTargetStreamerTests(unittest.TestCase):
         self.assertAlmostEqual(velocity[0], 0.125)
         self.assertEqual(velocity[1:], [0.0] * 5)
 
-    def test_contact_guard_freezes_one_arm_and_rebases_after_release(self):
+    def test_contact_guard_freezes_one_arm_and_resumes_latest_target_after_release(self):
         class State:
             def __init__(self, pose, wrench):
                 self.tcp_pose = list(pose)
@@ -269,12 +269,11 @@ class DrdkTargetStreamerTests(unittest.TestCase):
             guard.update((State(left_pose, low), State(right_pose, low)), latest, now=0.5),
             [("left", "released")],
         )
-        self.assertEqual(guard.command_pose("left", latest["left"]), left_pose)
-        moved = guard.command_pose("left", [1.1, 0.1, 0.2, *identity])
-        self.assertAlmostEqual(moved[0], 0.6)
-        self.assertEqual(moved[1:], left_pose[1:])
+        self.assertEqual(guard.command_pose("left", latest["left"]), latest["left"])
+        moved = [1.1, 0.1, 0.2, *identity]
+        self.assertEqual(guard.command_pose("left", moved), moved)
 
-    def test_joint_torque_guard_rolls_back_and_rebases_after_release(self):
+    def test_joint_torque_guard_rolls_back_and_resumes_latest_target_after_release(self):
         class State:
             def __init__(self, pose, tau, tau_dot=None, tau_ext=None):
                 self.tcp_pose = list(pose)
@@ -319,11 +318,9 @@ class DrdkTargetStreamerTests(unittest.TestCase):
         low_states = (State(left_tcp, [60.0] + [0.0] * 6), State(right_tcp, [0.0] * 7))
         guard.update(low_states, latest, now=0.4)
         self.assertEqual(guard.update(low_states, latest, now=0.71), [("left", "released")])
-        rebased = guard.command_pose("left", latest["left"])
-        self.assertAlmostEqual(rebased[0], safe_left[0])
-        self.assertEqual(rebased[1:], safe_left[1:])
-        moved = guard.command_pose("left", [1.0, 0.1, 0.2, *identity])
-        self.assertAlmostEqual(moved[0], 0.85)
+        self.assertEqual(guard.command_pose("left", latest["left"]), latest["left"])
+        moved = [1.0, 0.1, 0.2, *identity]
+        self.assertEqual(guard.command_pose("left", moved), moved)
 
     def test_joint_torque_guard_uses_tau_dot_prediction_and_tau_ext(self):
         class State:
@@ -693,6 +690,8 @@ class DrdkTargetStreamerTests(unittest.TestCase):
         self.assertEqual(pair.joint_commands[1][0], ([1.0] * 7, [2.0] * 7))
         self.assertEqual(pair.joint_commands[2][0], expected)
         self.assertEqual(pair.postures, [expected])
+        self.assertEqual(pair.objectives[0]["linear_manipulability"], (0.0, 0.0))
+        self.assertEqual(pair.objectives[0]["angular_manipulability"], (0.0, 0.0))
         self.assertEqual(pair.objectives[0]["ref_positions_tracking"], (0.5, 0.5))
         self.assertEqual(pair.max_contact_wrenches, ([30.0] * 3 + [5.0] * 3,) * 2)
 

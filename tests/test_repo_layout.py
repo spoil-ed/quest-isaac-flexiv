@@ -328,7 +328,18 @@ class RepoLayoutTests(unittest.TestCase):
             "--right-startup-waypoint=-1.18,-1.7187,-0.6799,-1.7503,-0.1607,1.9371,-0.0858",
             command,
         )
-        self.assertIn("--nullspace-tracking-weight", command)
+        self.assertEqual(
+            command[command.index("--nullspace-linear-manipulability-weight") + 1],
+            "0.2",
+        )
+        self.assertEqual(
+            command[command.index("--nullspace-angular-manipulability-weight") + 1],
+            "0.2",
+        )
+        self.assertEqual(
+            command[command.index("--nullspace-tracking-weight") + 1],
+            "0.8",
+        )
         self.assertIn("--initial-joint-max-vel-rad-s", command)
         self.assertIn("--initial-joint-max-acc-rad-s2", command)
         self.assertIn("--initial-joint-handoff-sec", command)
@@ -360,10 +371,10 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("--joint-torque-control", command)
         self.assertEqual(command[command.index("--joint-torque-trigger-ratio") + 1], "0.72")
         self.assertEqual(command[command.index("--joint-torque-release-ratio") + 1], "0.55")
-        self.assertEqual(command[command.index("--joint-torque-trigger-samples") + 1], "1")
+        self.assertEqual(command[command.index("--joint-torque-trigger-samples") + 1], "3")
         self.assertEqual(
             command[command.index("--joint-torque-prediction-horizon-sec") + 1],
-            "0.025",
+            "0.005",
         )
         self.assertEqual(command[command.index("--joint-torque-rollback-sec") + 1], "0.05")
         self.assertIn("--target-resampling-control", command)

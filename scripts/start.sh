@@ -447,7 +447,6 @@ else
     --right-status-port 57683 \
     "${SELF_COLLISION_MONITOR_ARGS[@]}" \
     --connect-timeout-sec 120 \
-    --nullspace-tracking-weight 1.0 \
     --initial-joint-max-vel-rad-s "$FLEXIV_INITIAL_JOINT_MAX_VEL_RAD_S" \
     --initial-joint-max-acc-rad-s2 "$FLEXIV_INITIAL_JOINT_MAX_ACC_RAD_S2" \
     --reset-joint-max-vel-rad-s "$FLEXIV_RESET_JOINT_MAX_VEL_RAD_S" \

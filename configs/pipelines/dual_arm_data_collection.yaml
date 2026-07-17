@@ -61,6 +61,12 @@ control:
     reset_motion:
       # Avoid Studio's empty-target race when entering NRT_JOINT_POSITION.
       method: "movej"
+    nullspace_objectives:
+      # Keep the task posture preference while reserving some IK freedom for
+      # translational and rotational manipulability.
+      linear_manipulability: 0.2
+      angular_manipulability: 0.2
+      reference_tracking: 0.8
     output_torque_regulator:
       enabled: true
       # Keep the controller's output-torque saturation below RobotInfo.tau_max.
@@ -102,9 +108,11 @@ control:
       # consecutive tau samples so simulation contacts still trigger early.
       trigger_ratio: 0.72
       release_ratio: 0.55
-      trigger_samples: 1
+      trigger_samples: 3
       release_dwell_sec: 0.15
-      prediction_horizon_sec: 0.025
+      # Isaac torque derivatives contain single-cycle spikes. A 5 ms horizon
+      # retains useful warning without turning those spikes into false faults.
+      prediction_horizon_sec: 0.005
       # Roll back to the newest target at least this old when protection triggers.
       rollback_sec: 0.05
     target_resampling:

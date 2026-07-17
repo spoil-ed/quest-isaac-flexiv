@@ -93,7 +93,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
         help="Scene YAML whose left/right initial_q values define the DRDK null-space posture.",
     )
-    parser.add_argument("--nullspace-tracking-weight", type=float, default=1.0)
+    parser.add_argument("--nullspace-linear-manipulability-weight", type=float, default=None)
+    parser.add_argument("--nullspace-angular-manipulability-weight", type=float, default=None)
+    parser.add_argument("--nullspace-tracking-weight", type=float, default=None)
     parser.add_argument("--network-interface-whitelist", default="")
     parser.add_argument("--max-age-sec", type=float, default=0.5)
     parser.add_argument("--connect-timeout-sec", type=float, default=30.0)
@@ -134,6 +136,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     joint_torque = drdk_control.get("joint_torque") or {}
     target_resampling = drdk_control.get("target_resampling") or {}
     reset_motion = drdk_control.get("reset_motion") or {}
+    nullspace_objectives = drdk_control.get("nullspace_objectives") or {}
     args.reset_motion_method = str(
         _configured(
             args.reset_motion_method,
@@ -145,6 +148,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError(
             "reset motion method must be 'send_joint_position' or 'movej'"
         )
+    args.nullspace_linear_manipulability_weight = float(
+        _configured(
+            args.nullspace_linear_manipulability_weight,
+            nullspace_objectives.get("linear_manipulability"),
+            0.0,
+        )
+    )
+    args.nullspace_angular_manipulability_weight = float(
+        _configured(
+            args.nullspace_angular_manipulability_weight,
+            nullspace_objectives.get("angular_manipulability"),
+            0.0,
+        )
+    )
+    args.nullspace_tracking_weight = float(
+        _configured(
+            args.nullspace_tracking_weight,
+            nullspace_objectives.get("reference_tracking"),
+            0.5,
+        )
+    )
+    if not 0.0 <= args.nullspace_linear_manipulability_weight <= 1.0:
+        raise ValueError("nullspace linear_manipulability must be within [0, 1]")
+    if not 0.0 <= args.nullspace_angular_manipulability_weight <= 1.0:
+        raise ValueError("nullspace angular_manipulability must be within [0, 1]")
+    if not 0.1 <= args.nullspace_tracking_weight <= 1.0:
+        raise ValueError("nullspace reference_tracking must be within [0.1, 1]")
     args.output_torque_regulator = _configured(
         args.output_torque_regulator,
         output_torque_regulator.get("enabled"),
@@ -445,6 +475,7 @@ def load_drdk_control(pipeline_config: Path) -> dict:
         "joint_torque",
         "target_resampling",
         "reset_motion",
+        "nullspace_objectives",
     ):
         value = drdk.get(key)
         if value is not None and not isinstance(value, dict):
@@ -632,6 +663,10 @@ def build_command(args: argparse.Namespace) -> list[str]:
         str(args.target_angular_velocity_deadband_rad_s),
         f"--left-nullspace-posture={args.left_nullspace_posture}",
         f"--right-nullspace-posture={args.right_nullspace_posture}",
+        "--nullspace-linear-manipulability-weight",
+        str(args.nullspace_linear_manipulability_weight),
+        "--nullspace-angular-manipulability-weight",
+        str(args.nullspace_angular_manipulability_weight),
         "--nullspace-tracking-weight",
         str(args.nullspace_tracking_weight),
         "--max-age-sec",

@@ -281,8 +281,6 @@ class ContactWrenchGuard:
     def reset(self) -> None:
         self.frozen = {side: False for side in self.SIDES}
         self.held_poses: dict[str, list[float] | None] = {side: None for side in self.SIDES}
-        self.input_anchors: dict[str, list[float] | None] = {side: None for side in self.SIDES}
-        self.output_anchors: dict[str, list[float] | None] = {side: None for side in self.SIDES}
         self.over_limit_samples = {side: 0 for side in self.SIDES}
         self.clear_since: dict[str, float | None] = {side: None for side in self.SIDES}
         self.latest_wrenches = {side: [0.0] * 6 for side in self.SIDES}
@@ -318,8 +316,6 @@ class ContactWrenchGuard:
                 if self.over_limit_samples[side] >= self.trigger_samples:
                     self.frozen[side] = True
                     self.held_poses[side] = tcp_pose
-                    self.input_anchors[side] = None
-                    self.output_anchors[side] = None
                     self.clear_since[side] = None
                     events.append((side, "frozen"))
                 continue
@@ -339,8 +335,6 @@ class ContactWrenchGuard:
                     continue
                 self.frozen[side] = False
                 self.held_poses[side] = None
-                self.input_anchors[side] = list(incoming_pose)
-                self.output_anchors[side] = list(held_pose)
                 self.over_limit_samples[side] = 0
                 self.clear_since[side] = None
                 events.append((side, "released"))
@@ -350,12 +344,6 @@ class ContactWrenchGuard:
         incoming = [float(value) for value in incoming_pose]
         if self.frozen[side] and self.held_poses[side] is not None:
             return list(self.held_poses[side])
-        if self.input_anchors[side] is not None and self.output_anchors[side] is not None:
-            return rebase_relative_pose(
-                incoming,
-                self.input_anchors[side],
-                self.output_anchors[side],
-            )
         return incoming
 
 
@@ -397,8 +385,6 @@ class JointTorqueGuard:
     ) -> None:
         self.frozen = {side: False for side in self.SIDES}
         self.held_poses: dict[str, list[float] | None] = {side: None for side in self.SIDES}
-        self.input_anchors: dict[str, list[float] | None] = {side: None for side in self.SIDES}
-        self.output_anchors: dict[str, list[float] | None] = {side: None for side in self.SIDES}
         self.over_limit_samples = {side: 0 for side in self.SIDES}
         self.clear_since: dict[str, float | None] = {side: None for side in self.SIDES}
         self.latest_tau = {side: [0.0] * len(self.limits[side]) for side in self.SIDES}
@@ -529,8 +515,6 @@ class JointTorqueGuard:
                 if self.over_limit_samples[side] >= self.trigger_samples:
                     self.frozen[side] = True
                     self.held_poses[side] = self._rollback_pose(side, tcp_pose, now=now)
-                    self.input_anchors[side] = None
-                    self.output_anchors[side] = None
                     self.clear_since[side] = None
                     self.trigger_joints[side] = peak_joint
                     events.append((side, "frozen"))
@@ -551,8 +535,6 @@ class JointTorqueGuard:
                     continue
                 self.frozen[side] = False
                 self.held_poses[side] = None
-                self.input_anchors[side] = list(incoming_pose)
-                self.output_anchors[side] = list(held_pose)
                 self.over_limit_samples[side] = 0
                 self.clear_since[side] = None
                 self.trigger_joints[side] = None
@@ -565,12 +547,6 @@ class JointTorqueGuard:
         incoming = [float(value) for value in incoming_pose]
         if self.frozen[side] and self.held_poses[side] is not None:
             return list(self.held_poses[side])
-        if self.input_anchors[side] is not None and self.output_anchors[side] is not None:
-            return rebase_relative_pose(
-                incoming,
-                self.input_anchors[side],
-                self.output_anchors[side],
-            )
         return incoming
 
     def motion_scale(
@@ -856,6 +832,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         help="Optional 7-DoF NRT joint waypoint used only during initial startup; repeat with the left option.",
     )
+    parser.add_argument("--nullspace-linear-manipulability-weight", type=float, default=0.0)
+    parser.add_argument("--nullspace-angular-manipulability-weight", type=float, default=0.0)
     parser.add_argument("--nullspace-tracking-weight", type=float, default=0.5)
     parser.add_argument("--network-interface-whitelist", default="")
     parser.add_argument("--max-age-sec", type=float, default=0.5)
@@ -935,6 +913,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--safety-password-env must name a non-empty environment variable")
     if not 0.1 <= float(args.nullspace_tracking_weight) <= 1.0:
         parser.error("--nullspace-tracking-weight must be within [0.1, 1.0]")
+    if not 0.0 <= float(args.nullspace_linear_manipulability_weight) <= 1.0:
+        parser.error("--nullspace-linear-manipulability-weight must be within [0.0, 1.0]")
+    if not 0.0 <= float(args.nullspace_angular_manipulability_weight) <= 1.0:
+        parser.error("--nullspace-angular-manipulability-weight must be within [0.0, 1.0]")
     for option in (
         "initial_joint_timeout_sec",
         "initial_joint_settle_sec",
@@ -1347,11 +1329,19 @@ def _enter_cartesian_mode_after_initial_q(
             flush=True,
         )
     robot_pair.SetNullSpacePosture(nullspace_postures)
-    weight = float(args.nullspace_tracking_weight)
+    linear_weight = float(args.nullspace_linear_manipulability_weight)
+    angular_weight = float(args.nullspace_angular_manipulability_weight)
+    tracking_weight = float(args.nullspace_tracking_weight)
     robot_pair.SetNullSpaceObjectives(
-        linear_manipulability=(0.0, 0.0),
-        angular_manipulability=(0.0, 0.0),
-        ref_positions_tracking=(weight, weight),
+        linear_manipulability=(linear_weight, linear_weight),
+        angular_manipulability=(angular_weight, angular_weight),
+        ref_positions_tracking=(tracking_weight, tracking_weight),
+    )
+    print(
+        "[DrdkTargetStreamer] null-space objectives configured "
+        f"linear={linear_weight:.3f} angular={angular_weight:.3f} "
+        f"reference_tracking={tracking_weight:.3f}",
+        flush=True,
     )
     max_contact_wrenches = (
         list(args.left_max_contact_wrench),
