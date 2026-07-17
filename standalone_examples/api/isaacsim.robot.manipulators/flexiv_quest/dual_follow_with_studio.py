@@ -90,6 +90,8 @@ DEFAULT_LEFT_RDK_STATUS_UDP_PORT = 57682
 DEFAULT_RIGHT_RDK_STATUS_UDP_PORT = 57683
 DEFAULT_QUEST_TARGET_UDP_PORT = 57679
 DEFAULT_STATE_MONITOR_UDP_PORT = 57684
+DEFAULT_QUEST_CALIBRATION_RESET_UDP_PORT = 57686
+DEFAULT_JOINT_EFFORT_LIMITS_NM = (150.0, 150.0, 80.0, 80.0, 49.0, 49.0, 49.0)
 
 
 def _read_structured_config(path: Path) -> dict[str, Any] | list[Any]:
@@ -183,10 +185,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gpu-dynamics", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--physics-hz", type=float, default=PHYSICS_FREQ)
     parser.add_argument("--render-hz", type=float, default=RENDER_FREQ)
+    parser.add_argument(
+        "--joint-effort-limits-nm",
+        default=",".join(str(value) for value in DEFAULT_JOINT_EFFORT_LIMITS_NM),
+        help="Seven Isaac articulation joint effort limits in Nm, ordered J1..J7.",
+    )
     parser.add_argument("--enable-quest-target-udp", action="store_true")
     parser.add_argument("--quest-target-udp-host", default=DEFAULT_QUEST_TARGET_UDP_HOST)
     parser.add_argument("--quest-target-udp-port", type=int, default=DEFAULT_QUEST_TARGET_UDP_PORT)
     parser.add_argument("--quest-target-max-age-sec", type=float, default=0.5)
+    parser.add_argument("--quest-calibration-reset-udp-host", default="127.0.0.1")
+    parser.add_argument(
+        "--quest-calibration-reset-udp-port",
+        type=int,
+        default=DEFAULT_QUEST_CALIBRATION_RESET_UDP_PORT,
+    )
     parser.add_argument("--quest-target-mode", choices=("absolute", "relative"), default="relative")
     parser.add_argument(
         "--quest-relative-orientation-mode",
@@ -255,8 +268,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--reset-timeout-sec must be positive")
     if not 0 <= int(args.state_monitor_udp_port) <= 65535:
         parser.error("--state-monitor-udp-port must be between 0 and 65535; use 0 to disable")
+    if not 0 <= int(args.quest_calibration_reset_udp_port) <= 65535:
+        parser.error("--quest-calibration-reset-udp-port must be between 0 and 65535; use 0 to disable")
     if float(args.state_monitor_hz) <= 0.0:
         parser.error("--state-monitor-hz must be positive")
+    args.joint_effort_limits_nm = parse_float_list(
+        args.joint_effort_limits_nm,
+        expected=7,
+        name="joint_effort_limits_nm",
+    )
+    if not all(math.isfinite(value) and value > 0.0 for value in args.joint_effort_limits_nm):
+        parser.error("--joint-effort-limits-nm must contain seven positive finite values")
     return args
 
 
@@ -787,6 +809,14 @@ def run(args: argparse.Namespace) -> int:
         if int(args.state_monitor_udp_port) > 0
         else None
     )
+    quest_calibration_reset_publisher = (
+        TargetPoseUdpPublisher(
+            args.quest_calibration_reset_udp_host,
+            args.quest_calibration_reset_udp_port,
+        )
+        if int(args.quest_calibration_reset_udp_port) > 0
+        else None
+    )
     state_monitor_last_publish = 0.0
     pending_reset_control = None
     last_reset_seq = 0
@@ -821,6 +851,23 @@ def run(args: argparse.Namespace) -> int:
     def _reset_arm_to_start_pose(arm: ArmRuntime, *, reset_world: bool) -> None:
         if reset_world:
             world.reset()
+        effort_limits = np.asarray(args.joint_effort_limits_nm, dtype=float)
+        articulation_controller = arm.robot.get_articulation_controller()
+        articulation_controller.set_max_efforts(
+            effort_limits,
+            joint_indices=np.arange(0, 7),
+        )
+        applied_limits = articulation_controller.get_max_efforts()
+        if applied_limits is None or not np.allclose(
+            np.asarray(applied_limits[:7], dtype=float),
+            effort_limits,
+            rtol=0.0,
+            atol=1e-4,
+        ):
+            raise RuntimeError(
+                f"Isaac refused {arm.side} joint effort limits {effort_limits.tolist()} Nm; "
+                f"reported={None if applied_limits is None else applied_limits[:7].tolist()}"
+            )
         _set_robot_base_pose(arm.robot, arm.base_position, arm.base_orientation)
         # SimPlugin and both runtimes must first agree on Studio's safe home.
         # DRDK moves from this posture to task initial_q using the runtime's
@@ -832,7 +879,8 @@ def run(args: argparse.Namespace) -> int:
             arm.applied_gripper_closed = False
         print(
             f"[FlexivDualTargetFrame] {arm.side} bootstrap joint hold applied "
-            f"q={[round(float(value), 6) for value in arm.robot.q]}",
+            f"q={[round(float(value), 6) for value in arm.robot.q]} "
+            f"effort_limits_nm={effort_limits.tolist()}",
             flush=True,
         )
         arm.reset_hold_pose_base_tcp = _current_pose_base_tcp(arm)
@@ -1029,6 +1077,21 @@ def run(args: argparse.Namespace) -> int:
             f"[FlexivDualTargetFrame] coordinated reset requested seq={last_reset_seq} "
             f"reason={reset_reason}; waiting for DRDK Stop/ClearFault/SendJointPosition(init_q)",
             flush=True,
+        )
+
+    def publish_quest_calibration_reset() -> None:
+        if (
+            quest_calibration_reset_publisher is None
+            or last_reset_seq <= 0
+            or reset_state not in {"moving", "restoring_assets"}
+        ):
+            return
+        quest_calibration_reset_publisher.publish(
+            {
+                "schema": "flexiv_quest_calibration_reset.v1",
+                "reset_seq": int(last_reset_seq),
+                "monotonic_time": time.monotonic(),
+            }
         )
 
     def _update_quest_targets() -> None:
@@ -1639,6 +1702,15 @@ def run(args: argparse.Namespace) -> int:
 
         arm_states = {}
         for side, arm in arms.items():
+            rdk_status = rdk_status_receiver.latest_packet(side) or {}
+
+            def _rdk_joint_vector(key: str) -> list[float] | None:
+                try:
+                    values = [float(value) for value in rdk_status[key]]
+                except (KeyError, TypeError, ValueError):
+                    return None
+                return values if len(values) == 7 and all(math.isfinite(value) for value in values) else None
+
             tcp_position, tcp_orientation = arm.robot.end_effector.get_world_pose()
             tcp_pose_base = arm.rdk_current_pose_base_tcp
             if tcp_pose_base is None:
@@ -1665,6 +1737,14 @@ def run(args: argparse.Namespace) -> int:
                     and arm.rdk_phase == "ready"
                     and arm.effort_control_enabled
                 ),
+                "torque": {
+                    "tau": _rdk_joint_vector("joint_tau"),
+                    "tau_dot": _rdk_joint_vector("joint_tau_dot"),
+                    "tau_ext": _rdk_joint_vector("joint_tau_ext"),
+                    "tau_max": _rdk_joint_vector("joint_tau_max"),
+                    "ratio": _rdk_joint_vector("joint_torque_ratio"),
+                    "frozen": bool(rdk_status.get("joint_torque_frozen", False)),
+                },
                 "quest": {
                     "available": quest_input is not None,
                     "seq": None if quest_input is None else int(quest_input["seq"]),
@@ -1859,6 +1939,7 @@ def run(args: argparse.Namespace) -> int:
                 pending_reset_control = None
                 begin_coordinated_reset(control)
                 reset_needed = False
+            publish_quest_calibration_reset()
             if world.is_stopped() and not reset_needed:
                 reset_needed = True
             if world.is_playing() and reset_needed:
@@ -1878,6 +1959,8 @@ def run(args: argparse.Namespace) -> int:
         rdk_status_receiver.close()
         if state_monitor_publisher is not None:
             state_monitor_publisher.close()
+        if quest_calibration_reset_publisher is not None:
+            quest_calibration_reset_publisher.close()
         if gateway_client is not None:
             gateway_client.close()
         if args.smoke_test:

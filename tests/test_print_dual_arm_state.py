@@ -20,6 +20,13 @@ def state_packet() -> dict:
         "serial": "Rizon4-test",
         "q": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
         "dq": [0.0] * 7,
+        "torque": {
+            "tau": [1.0] * 7,
+            "tau_ext": [0.2] * 7,
+            "tau_max": [100.0] * 7,
+            "ratio": [0.01] * 7,
+            "frozen": False,
+        },
         "tcp_pose_base": [0.4, 0.0, 0.5, *forward_x_quat],
         "tcp_pose_world": [1.4, 0.0, 0.5, *forward_x_quat],
         "ready": True,
@@ -80,6 +87,10 @@ class DualArmStatePrinterTests(unittest.TestCase):
         self.assertIn("RIGHT", output)
         self.assertIn("q rad", output)
         self.assertIn("q deg", output)
+        self.assertIn("dq rad/s", output)
+        self.assertIn("tau Nm", output)
+        self.assertIn("torque ratio", output)
+        self.assertIn("torque guard frozen=False", output)
         self.assertIn("TCP base", output)
         self.assertIn("TCP world", output)
         self.assertIn("Quest", output)

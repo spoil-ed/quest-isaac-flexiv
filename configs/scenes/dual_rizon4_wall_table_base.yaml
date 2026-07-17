@@ -74,6 +74,11 @@ scene_objects:
     color: [0.18, 0.18, 0.17]
     collision: true
     rigid_body: false
+    physics_material:
+      static_friction: 0.6
+      dynamic_friction: 0.5
+      restitution: 0.0
+      compliant_contact: {stiffness: 20000.0, damping: 250.0, acceleration_spring: false}
 
   - name: "work_table_front_leg"
     type: "cuboid"

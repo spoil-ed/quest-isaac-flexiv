@@ -32,6 +32,9 @@ control:
   physics_hz: 2000
   render_hz: 30
   gpu_dynamics: false
+  # Isaac articulation limits [Nm], matching the existing Studio simulated
+  # Rizon4 safety-function limits. The 85% guard below remains more conservative.
+  joint_effort_limits_nm: [150.0, 150.0, 80.0, 80.0, 49.0, 49.0, 49.0]
   quest_position_scale: 1.0
   quest_position_deadband_m: 0.0
   quest_relative_orientation_mode: "relative"
@@ -43,6 +46,40 @@ control:
   target_axis_radius: 0.010
   rdk_clear_fault: false
   rdk_strict_clear_fault: true
+  drdk:
+    cartesian_impedance:
+      enabled: true
+      # 10% of the Rizon4 nominal [10000 N/m, 1500 Nm/rad]. Lower values
+      # approach free-floating behavior and no longer track Quest reliably.
+      left_stiffness: [1000.0, 1000.0, 1000.0, 150.0, 150.0, 150.0]
+      right_stiffness: [1000.0, 1000.0, 1000.0, 150.0, 150.0, 150.0]
+      left_damping_ratio: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
+      right_damping_ratio: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
+    self_collision_monitor:
+      enabled: false
+      min_distance_m: 0.05
+      loop_interval_ms: 10
+      skipped_links: []
+    contact_wrench:
+      enabled: true
+      # [Fx, Fy, Fz, Mx, My, Mz], units [N, Nm].
+      left_limit: [20.0, 20.0, 20.0, 3.0, 3.0, 3.0]
+      right_limit: [20.0, 20.0, 20.0, 3.0, 3.0, 3.0]
+      freeze_trigger_ratio: 0.95
+      release_ratio: 0.70
+      trigger_samples: 3
+      release_dwell_sec: 0.30
+    joint_torque:
+      enabled: true
+      # Compare tau, tau_ext and tau + tau_dot * prediction_horizon_sec
+      # against RobotPair.info().tau_max for each joint independently.
+      trigger_ratio: 0.85
+      release_ratio: 0.70
+      trigger_samples: 1
+      release_dwell_sec: 0.30
+      prediction_horizon_sec: 0.02
+      # Roll back to the newest target at least this old when protection triggers.
+      rollback_sec: 0.10
 
 convert:
   repo_id: "qiming/isaacsim_flexiv_dual_arm"

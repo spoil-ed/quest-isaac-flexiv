@@ -73,11 +73,29 @@
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--python` | `ISAAC_PYTHON` | 运行 DRDK streamer 的 Python。 |
+| `--pipeline-config` | `start.sh` 默认传唯一 pipeline | 从 `control.drdk` 读取碰撞监视、接触 wrench 与关节力矩保护参数；显式 CLI 值优先。 |
 | `--scene-config` | 必填 | 与 Isaac 相同的双臂 scene YAML；左右 `robots[].initial_q` 是 `SetNullSpacePosture()` 的任务 initq。 |
 | `--left/right-serial-number` | Stage2 左右 alias | DRDK `RobotPair` 连接的两个不同 runtime alias。 |
 | `--left/right-port` | `57680/57681` | 接收 Isaac 左右目标的 UDP 端口。 |
 | `--left/right-status-port` | `57682/57683` | 向 Isaac 返回左右 ready、参考 TCP 和当前 TCP。 |
-| `--left/right-translation-in-world` | `0,0,0` | DRDK RobotPair 世界坐标中的 base 平移；当前 base-frame 目标链保持零值。 |
+| `--left/right-translation-in-world` | scene `robots[].position` | DRDK RobotPair 世界坐标中的 base 平移，供双臂几何碰撞计算；CLI 可显式覆盖。 |
+| `--self-collision-monitor/--no-self-collision-monitor` | pipeline：关闭 | 启停官方 DRDK `SelfCollisionMonitor`；`start.sh` 可通过 `SELF_COLLISION_MONITOR=true/false` 临时覆盖。 |
+| `--self-collision-min-distance-m` | `0.05` | 两臂任意受检几何点的最小允许距离；触发后 DRDK 停止双臂。 |
+| `--self-collision-loop-interval-ms` | `10` | 后台碰撞检测周期，默认 10 ms（100 Hz）。 |
+| `--self-collision-skip-link` | 空 | 排除检查的 link 名称，可重复传入；默认不排除。 |
+| `--contact-wrench-control/--no-contact-wrench-control` | pipeline：启用 | 同时控制 runtime `SetMaxContactWrench()` 和上层目标冻结器。 |
+| `--joint-torque-control/--no-joint-torque-control` | pipeline：启用 | 启停基于 `states().tau/tau_dot/tau_ext` 与 `info().tau_max` 的前置保护。 |
+| `--joint-torque-trigger-ratio` | `0.85` | 任一关节测量、外力或短期预测力矩达到 `tau_max` 的该比例时回退。 |
+| `--joint-torque-release-ratio` | `0.70` | 全部关节低于该比例后才开始释放计时。 |
+| `--joint-torque-trigger-samples` | `1` | 连续触发样本数。默认单样本响应，预测项负责提前量。 |
+| `--joint-torque-release-dwell-sec` | `0.30` | 解除前必须连续安全的时间。 |
+| `--joint-torque-prediction-horizon-sec` | `0.02` | 使用 `tau + tau_dot * horizon` 进行短期外推。 |
+| `--joint-torque-rollback-sec` | `0.10` | 触发时选择至少这么早以前发送的最近 target 作为回退点。 |
+| `--left/right-max-contact-wrench` | pipeline：`20,20,20,3,3,3` | 左右 TCP 最大接触 `[Fx,Fy,Fz,Mx,My,Mz]`，单位 `[N,Nm]`。 |
+| `--contact-wrench-freeze-trigger-ratio` | `0.95` | 实测 wrench 达到对应上限的比例后计入目标冻结触发。 |
+| `--contact-wrench-release-ratio` | `0.70` | 六轴 wrench 全部降到该比例以下才进入恢复计时。 |
+| `--contact-wrench-trigger-samples` | `3` | 连续超限样本数，避免单帧噪声触发。 |
+| `--contact-wrench-release-dwell-sec` | `0.30` | 低于恢复阈值后必须连续稳定的时间。 |
 | `--nullspace-tracking-weight` | `0.5` | 两臂参考关节姿态跟踪权重，范围 `[0.1, 1.0]`。 |
 | `--max-linear-speed-m-s` | `0.5` | NRT runtime 轨迹生成器的最大线速度。 |
 | `--max-angular-speed-rad-s` | `0.75` | NRT runtime 轨迹生成器的最大角速度。 |
@@ -98,7 +116,9 @@
 | `--reset-retry-delay-sec` | `0.5` | 两次恢复尝试之间的等待时间。 |
 | `--clear-fault/--no-clear-fault` | 不清故障 | 仅控制首次启动是否清故障；显式协调 reset 始终尝试清除双臂 fault。 |
 
-该脚本启动时短暂使用 `NRT_JOINT_POSITION + SendJointPosition()` 平滑到 scene config 的左右 `initial_q`；到位后固定使用 `NRT_CARTESIAN_MOTION_FORCE`，并重新把 `initial_q` 设置为零空间参考。关节轨迹、IK、动力学和力矩仍由 runtime 处理。任一侧故障会使 RobotPair 两侧同时 not-ready。显式 reset 回程再次 fault 时，streamer 会从新的实际 q 低速重建 NRT 基准并有界重试；耗尽次数后保持存活，等待更高的 `reset_seq`。
+唯一 pipeline 的 `control.drdk` 是上述安全参数的主配置源，`start.sh` 默认加载它，显式 CLI 或 `SELF_COLLISION_MONITOR` 仅作为临时覆盖。脚本可选启动官方 `SelfCollisionMonitor`。启用后，监视器独立以 100 Hz 检查两臂几何距离，达到阈值时直接停止双臂并锁存 `self_collision_stopped`，需要排除近距离条件后执行协调 reset；它不检查机械臂与桌面或工件的碰撞。当前 pipeline 默认关闭。脚本短暂使用 `NRT_JOINT_POSITION + SendJointPosition()` 平滑到 scene config 的左右 `initial_q`；每次切入 `NRT_CARTESIAN_MOTION_FORCE` 后重设 `SetNullSpacePosture()`，并在 `contact_wrench.enabled: true` 时调用 `SetMaxContactWrench()`。streamer 以 `tcp_wrench` 对两侧独立做迟滞检测：连续三帧达到 95% 上限时把该侧目标冻结在当前 TCP，全部分量降到 70% 以下并稳定 0.30 s 后恢复。独立的关节力矩保护从 `RobotPair.info().tau_max` 取得每关节限制，以 `max(abs(tau), abs(tau_ext), abs(tau + tau_dot * 0.02)) / tau_max` 判定风险；达到 85% 时回退至至少 0.10 s 前的最近 target，全部关节低于 70% 并稳定 0.30 s 后恢复。两种保护解除时都把最新输入重映射到安全输出，禁止追赶冻结期间累积目标。关节轨迹、IK、动力学和力矩仍由 runtime 处理。任一侧故障会使 RobotPair 两侧同时 not-ready。显式 reset 回程再次 fault 时，streamer 会从新的实际 q 低速重建 NRT 基准并有界重试；耗尽次数后保持存活，等待更高的 `reset_seq`。
+
+`control.joint_effort_limits_nm` 把 Isaac articulation 的 J1..J7 力矩上限设为 `[150,150,80,80,49,49,49] Nm`，与 Studio 模拟 Rizon4 已有的 safety-function 配置一致。它不替代更低的 TCP 接触保护和基于 `RobotInfo.tau_max` 的 85% 关节力矩回退。
 
 ## Isaac 控制入口
 
@@ -196,6 +216,7 @@ Stage2 双臂 Isaac 启动入口，参数语义与单臂入口一致，差异如
 | `--target-activation-position-tolerance-m` | `1e-3` | 手动 Frame 世界坐标平移超过此值后才请求启用对应 RDK 控制。 |
 | `--target-activation-orientation-tolerance-rad` | `0.00873` | 手动 Frame 世界坐标旋转超过约 `0.5°` 后才请求启用对应 RDK 控制。 |
 | `--startup-joint-tolerance-rad` | `0.03` | DRDK 报告到位后，Isaac 对自身与 RDK 实测 `q` 的二次 READY 校验阈值。 |
+| `--joint-effort-limits-nm` | `150,150,80,80,49,49,49` | Isaac J1..J7 articulation 力矩上限；`start.sh` 从唯一 pipeline 同步传入。 |
 | `--quest-target-udp-port` | `57679` | 一个 Quest/fake UDP endpoint，通过 packet `side` 字段分流左右臂。 |
 | `--gateway-endpoint` | 空 | 非空时发布 Stage2 dual gateway sample。 |
 

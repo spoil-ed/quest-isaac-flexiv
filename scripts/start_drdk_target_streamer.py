@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from pathlib import Path
@@ -32,8 +33,41 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--left-status-port", type=int, default=57682)
     parser.add_argument("--right-status-host", default="127.0.0.1")
     parser.add_argument("--right-status-port", type=int, default=57683)
-    parser.add_argument("--left-translation-in-world", default="0,0,0")
-    parser.add_argument("--right-translation-in-world", default="0,0,0")
+    parser.add_argument(
+        "--pipeline-config",
+        type=Path,
+        default=None,
+        help="Pipeline YAML whose control.drdk section supplies DRDK safety parameters.",
+    )
+    parser.add_argument("--left-translation-in-world", default=None)
+    parser.add_argument("--right-translation-in-world", default=None)
+    parser.add_argument("--cartesian-impedance-control", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--left-cartesian-stiffness", default=None)
+    parser.add_argument("--right-cartesian-stiffness", default=None)
+    parser.add_argument("--left-cartesian-damping-ratio", default=None)
+    parser.add_argument("--right-cartesian-damping-ratio", default=None)
+    parser.add_argument(
+        "--self-collision-monitor",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    parser.add_argument("--self-collision-min-distance-m", type=float, default=None)
+    parser.add_argument("--self-collision-loop-interval-ms", type=int, default=None)
+    parser.add_argument("--self-collision-skip-link", action="append", default=None)
+    parser.add_argument("--contact-wrench-control", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--left-max-contact-wrench", default=None)
+    parser.add_argument("--right-max-contact-wrench", default=None)
+    parser.add_argument("--contact-wrench-freeze-trigger-ratio", type=float, default=None)
+    parser.add_argument("--contact-wrench-release-ratio", type=float, default=None)
+    parser.add_argument("--contact-wrench-trigger-samples", type=int, default=None)
+    parser.add_argument("--contact-wrench-release-dwell-sec", type=float, default=None)
+    parser.add_argument("--joint-torque-control", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--joint-torque-trigger-ratio", type=float, default=None)
+    parser.add_argument("--joint-torque-release-ratio", type=float, default=None)
+    parser.add_argument("--joint-torque-trigger-samples", type=int, default=None)
+    parser.add_argument("--joint-torque-release-dwell-sec", type=float, default=None)
+    parser.add_argument("--joint-torque-prediction-horizon-sec", type=float, default=None)
+    parser.add_argument("--joint-torque-rollback-sec", type=float, default=None)
     parser.add_argument(
         "--scene-config",
         type=Path,
@@ -65,6 +99,113 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--log-hz", type=float, default=2.0)
     args = parser.parse_args(argv)
     args.python = flexiv_runtime.python_executable_or_current(args.python)
+    drdk_control = {}
+    if args.pipeline_config is not None:
+        args.pipeline_config = args.pipeline_config.expanduser().resolve()
+        drdk_control = load_drdk_control(args.pipeline_config)
+    self_collision = drdk_control.get("self_collision_monitor") or {}
+    cartesian_impedance = drdk_control.get("cartesian_impedance") or {}
+    contact_wrench = drdk_control.get("contact_wrench") or {}
+    joint_torque = drdk_control.get("joint_torque") or {}
+    args.cartesian_impedance_control = _configured(
+        args.cartesian_impedance_control, cartesian_impedance.get("enabled"), False
+    )
+    args.left_cartesian_stiffness = _vector6_csv(
+        _configured(
+            args.left_cartesian_stiffness,
+            cartesian_impedance.get("left_stiffness"),
+            [10000, 10000, 10000, 1500, 1500, 1500],
+        ),
+        name="left Cartesian stiffness",
+        minimum=0.0,
+    )
+    args.right_cartesian_stiffness = _vector6_csv(
+        _configured(
+            args.right_cartesian_stiffness,
+            cartesian_impedance.get("right_stiffness"),
+            [10000, 10000, 10000, 1500, 1500, 1500],
+        ),
+        name="right Cartesian stiffness",
+        minimum=0.0,
+    )
+    args.left_cartesian_damping_ratio = _vector6_csv(
+        _configured(
+            args.left_cartesian_damping_ratio,
+            cartesian_impedance.get("left_damping_ratio"),
+            [0.7] * 6,
+        ),
+        name="left Cartesian damping ratio",
+        minimum=0.3,
+        maximum=0.8,
+    )
+    args.right_cartesian_damping_ratio = _vector6_csv(
+        _configured(
+            args.right_cartesian_damping_ratio,
+            cartesian_impedance.get("right_damping_ratio"),
+            [0.7] * 6,
+        ),
+        name="right Cartesian damping ratio",
+        minimum=0.3,
+        maximum=0.8,
+    )
+    args.self_collision_monitor = _configured(
+        args.self_collision_monitor, self_collision.get("enabled"), False
+    )
+    args.self_collision_min_distance_m = _configured(
+        args.self_collision_min_distance_m, self_collision.get("min_distance_m"), 0.05
+    )
+    args.self_collision_loop_interval_ms = _configured(
+        args.self_collision_loop_interval_ms, self_collision.get("loop_interval_ms"), 10
+    )
+    args.self_collision_skip_link = _configured(
+        args.self_collision_skip_link, self_collision.get("skipped_links"), []
+    )
+    args.contact_wrench_control = _configured(
+        args.contact_wrench_control, contact_wrench.get("enabled"), True
+    )
+    args.left_max_contact_wrench = _wrench_csv(
+        _configured(args.left_max_contact_wrench, contact_wrench.get("left_limit"), [20, 20, 20, 3, 3, 3]),
+        name="left contact wrench limit",
+    )
+    args.right_max_contact_wrench = _wrench_csv(
+        _configured(args.right_max_contact_wrench, contact_wrench.get("right_limit"), [20, 20, 20, 3, 3, 3]),
+        name="right contact wrench limit",
+    )
+    args.contact_wrench_freeze_trigger_ratio = _configured(
+        args.contact_wrench_freeze_trigger_ratio, contact_wrench.get("freeze_trigger_ratio"), 0.95
+    )
+    args.contact_wrench_release_ratio = _configured(
+        args.contact_wrench_release_ratio, contact_wrench.get("release_ratio"), 0.70
+    )
+    args.contact_wrench_trigger_samples = _configured(
+        args.contact_wrench_trigger_samples, contact_wrench.get("trigger_samples"), 3
+    )
+    args.contact_wrench_release_dwell_sec = _configured(
+        args.contact_wrench_release_dwell_sec, contact_wrench.get("release_dwell_sec"), 0.30
+    )
+    args.joint_torque_control = _configured(
+        args.joint_torque_control, joint_torque.get("enabled"), True
+    )
+    args.joint_torque_trigger_ratio = _configured(
+        args.joint_torque_trigger_ratio, joint_torque.get("trigger_ratio"), 0.85
+    )
+    args.joint_torque_release_ratio = _configured(
+        args.joint_torque_release_ratio, joint_torque.get("release_ratio"), 0.70
+    )
+    args.joint_torque_trigger_samples = _configured(
+        args.joint_torque_trigger_samples, joint_torque.get("trigger_samples"), 1
+    )
+    args.joint_torque_release_dwell_sec = _configured(
+        args.joint_torque_release_dwell_sec, joint_torque.get("release_dwell_sec"), 0.30
+    )
+    args.joint_torque_prediction_horizon_sec = _configured(
+        args.joint_torque_prediction_horizon_sec,
+        joint_torque.get("prediction_horizon_sec"),
+        0.02,
+    )
+    args.joint_torque_rollback_sec = _configured(
+        args.joint_torque_rollback_sec, joint_torque.get("rollback_sec"), 0.10
+    )
     args.scene_config = args.scene_config.expanduser().resolve()
     (
         args.left_nullspace_posture,
@@ -72,7 +213,74 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.left_startup_waypoint,
         args.right_startup_waypoint,
     ) = load_initial_q(args.scene_config)
+    scene_translations = load_robot_translations(args.scene_config)
+    args.left_translation_in_world = (
+        args.left_translation_in_world or scene_translations["left"]
+    )
+    args.right_translation_in_world = (
+        args.right_translation_in_world or scene_translations["right"]
+    )
     return args
+
+
+def _configured(cli_value, config_value, fallback):
+    if cli_value is not None:
+        return cli_value
+    return fallback if config_value is None else config_value
+
+
+def _wrench_csv(value, *, name: str) -> str:
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",") if item.strip()]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        raise ValueError(f"{name} must contain six numeric values")
+    try:
+        numbers = [float(item) for item in items]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must contain six numeric values") from exc
+    if len(numbers) != 6 or not all(math.isfinite(item) and item > 0.0 for item in numbers):
+        raise ValueError(f"{name} must contain six positive finite values")
+    return ",".join(str(item) for item in numbers)
+
+
+def _vector6_csv(
+    value,
+    *,
+    name: str,
+    minimum: float,
+    maximum: float | None = None,
+) -> str:
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",") if item.strip()]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        raise ValueError(f"{name} must contain six numeric values")
+    try:
+        numbers = [float(item) for item in items]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must contain six numeric values") from exc
+    if len(numbers) != 6 or not all(math.isfinite(item) for item in numbers):
+        raise ValueError(f"{name} must contain six finite values")
+    if any(item < minimum or (maximum is not None and item > maximum) for item in numbers):
+        range_text = f"[{minimum}, {maximum}]" if maximum is not None else f"[{minimum}, inf)"
+        raise ValueError(f"{name} values must be within {range_text}")
+    return ",".join(str(item) for item in numbers)
+
+
+def load_drdk_control(pipeline_config: Path) -> dict:
+    data = yaml.safe_load(pipeline_config.read_text(encoding="utf-8")) or {}
+    control = data.get("control") or {}
+    drdk = control.get("drdk") or {}
+    if not isinstance(drdk, dict):
+        raise ValueError(f"{pipeline_config}: control.drdk must be a mapping")
+    for key in ("cartesian_impedance", "self_collision_monitor", "contact_wrench", "joint_torque"):
+        value = drdk.get(key)
+        if value is not None and not isinstance(value, dict):
+            raise ValueError(f"{pipeline_config}: control.drdk.{key} must be a mapping")
+    return drdk
 
 
 def load_initial_q(scene_config: Path) -> tuple[str, str, list[str], list[str]]:
@@ -116,6 +324,41 @@ def load_initial_q(scene_config: Path) -> tuple[str, str, list[str], list[str]]:
     return postures["left"], postures["right"], waypoints["left"], waypoints["right"]
 
 
+def load_robot_translations(scene_config: Path) -> dict[str, str]:
+    """Load the two robot base translations in their shared scene world."""
+
+    data = yaml.safe_load(scene_config.read_text(encoding="utf-8")) or {}
+    translations: dict[str, str] = {}
+    for robot in data.get("robots") or []:
+        side = str(robot.get("side", "")).strip().lower()
+        if side not in {"left", "right"}:
+            continue
+        position = robot.get("position")
+        if isinstance(position, dict):
+            raw_values = [position.get(axis) for axis in ("x", "y", "z")]
+        elif isinstance(position, (list, tuple)) and len(position) == 3:
+            raw_values = list(position)
+        else:
+            raise ValueError(
+                f"{scene_config}: robots[{side}].position must define finite x, y and z"
+            )
+        try:
+            values = [float(value) for value in raw_values]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{scene_config}: robots[{side}].position must define finite x, y and z"
+            ) from exc
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError(
+                f"{scene_config}: robots[{side}].position must define finite x, y and z"
+            )
+        translations[side] = ",".join(str(value) for value in values)
+    missing = [side for side in ("left", "right") if side not in translations]
+    if missing:
+        raise ValueError(f"{scene_config}: missing robot position for {', '.join(missing)}")
+    return translations
+
+
 def build_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(os.environ if base_env is None else base_env)
     if RDK_COMPAT_PATH.exists():
@@ -148,10 +391,44 @@ def build_command(args: argparse.Namespace) -> list[str]:
         str(args.right_status_host),
         "--right-status-port",
         str(args.right_status_port),
-        "--left-translation-in-world",
-        str(args.left_translation_in_world),
-        "--right-translation-in-world",
-        str(args.right_translation_in_world),
+        f"--left-translation-in-world={args.left_translation_in_world}",
+        f"--right-translation-in-world={args.right_translation_in_world}",
+        "--cartesian-impedance-control"
+        if args.cartesian_impedance_control
+        else "--no-cartesian-impedance-control",
+        f"--left-cartesian-stiffness={args.left_cartesian_stiffness}",
+        f"--right-cartesian-stiffness={args.right_cartesian_stiffness}",
+        f"--left-cartesian-damping-ratio={args.left_cartesian_damping_ratio}",
+        f"--right-cartesian-damping-ratio={args.right_cartesian_damping_ratio}",
+        "--self-collision-monitor" if args.self_collision_monitor else "--no-self-collision-monitor",
+        "--self-collision-min-distance-m",
+        str(args.self_collision_min_distance_m),
+        "--self-collision-loop-interval-ms",
+        str(args.self_collision_loop_interval_ms),
+        "--contact-wrench-control" if args.contact_wrench_control else "--no-contact-wrench-control",
+        f"--left-max-contact-wrench={args.left_max_contact_wrench}",
+        f"--right-max-contact-wrench={args.right_max_contact_wrench}",
+        "--contact-wrench-freeze-trigger-ratio",
+        str(args.contact_wrench_freeze_trigger_ratio),
+        "--contact-wrench-release-ratio",
+        str(args.contact_wrench_release_ratio),
+        "--contact-wrench-trigger-samples",
+        str(args.contact_wrench_trigger_samples),
+        "--contact-wrench-release-dwell-sec",
+        str(args.contact_wrench_release_dwell_sec),
+        "--joint-torque-control" if args.joint_torque_control else "--no-joint-torque-control",
+        "--joint-torque-trigger-ratio",
+        str(args.joint_torque_trigger_ratio),
+        "--joint-torque-release-ratio",
+        str(args.joint_torque_release_ratio),
+        "--joint-torque-trigger-samples",
+        str(args.joint_torque_trigger_samples),
+        "--joint-torque-release-dwell-sec",
+        str(args.joint_torque_release_dwell_sec),
+        "--joint-torque-prediction-horizon-sec",
+        str(args.joint_torque_prediction_horizon_sec),
+        "--joint-torque-rollback-sec",
+        str(args.joint_torque_rollback_sec),
         f"--left-nullspace-posture={args.left_nullspace_posture}",
         f"--right-nullspace-posture={args.right_nullspace_posture}",
         "--nullspace-tracking-weight",
@@ -209,6 +486,8 @@ def build_command(args: argparse.Namespace) -> list[str]:
     for option, value in (("--network-interface-whitelist", args.network_interface_whitelist),):
         if value:
             command.extend([option, str(value)])
+    for link_name in args.self_collision_skip_link:
+        command.extend(["--self-collision-skip-link", str(link_name)])
     return command
 
 

@@ -25,6 +25,28 @@ SUPPORTED_OBJECT_TYPES = {"usd", "articulation", "cuboid", "cylinder"}
 
 
 @dataclass(frozen=True)
+class PhysicsMaterialSpec:
+    static_friction: float = 0.6
+    dynamic_friction: float = 0.5
+    restitution: float = 0.0
+    compliant_contact_stiffness: float = 0.0
+    compliant_contact_damping: float = 0.0
+    compliant_contact_acceleration_spring: bool = False
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "static_friction": self.static_friction,
+            "dynamic_friction": self.dynamic_friction,
+            "restitution": self.restitution,
+            "compliant_contact": {
+                "stiffness": self.compliant_contact_stiffness,
+                "damping": self.compliant_contact_damping,
+                "acceleration_spring": self.compliant_contact_acceleration_spring,
+            },
+        }
+
+
+@dataclass(frozen=True)
 class SceneObjectSpec:
     name: str
     object_type: str
@@ -42,6 +64,7 @@ class SceneObjectSpec:
     rigid_body: bool = False
     kinematic: bool = False
     disable_gravity: bool = False
+    physics_material: PhysicsMaterialSpec | None = None
     joint_positions: dict[str, float] | None = None
     metadata: dict[str, Any] | None = None
 
@@ -74,6 +97,8 @@ class SceneObjectSpec:
         payload["rigid_body"] = self.rigid_body
         payload["kinematic"] = self.kinematic
         payload["disable_gravity"] = self.disable_gravity
+        if self.physics_material is not None:
+            payload["physics_material"] = self.physics_material.summary()
         return payload
 
 
@@ -162,6 +187,35 @@ def _joint_positions(raw: Any) -> dict[str, float] | None:
     return {str(key): float(value) for key, value in raw.items()}
 
 
+def _physics_material(raw: Any, *, name: str) -> PhysicsMaterialSpec | None:
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{name}.physics_material must be a mapping")
+    compliant = raw.get("compliant_contact") or {}
+    if not isinstance(compliant, dict):
+        raise ValueError(f"{name}.physics_material.compliant_contact must be a mapping")
+    spec = PhysicsMaterialSpec(
+        static_friction=float(raw.get("static_friction", 0.6)),
+        dynamic_friction=float(raw.get("dynamic_friction", 0.5)),
+        restitution=float(raw.get("restitution", 0.0)),
+        compliant_contact_stiffness=float(compliant.get("stiffness", 0.0)),
+        compliant_contact_damping=float(compliant.get("damping", 0.0)),
+        compliant_contact_acceleration_spring=bool(compliant.get("acceleration_spring", False)),
+    )
+    if spec.static_friction < 0.0 or spec.dynamic_friction < 0.0:
+        raise ValueError(f"{name}.physics_material friction values must be non-negative")
+    if spec.dynamic_friction > spec.static_friction:
+        raise ValueError(f"{name}.physics_material dynamic_friction must not exceed static_friction")
+    if not 0.0 <= spec.restitution <= 1.0:
+        raise ValueError(f"{name}.physics_material restitution must be in [0, 1]")
+    if spec.compliant_contact_stiffness < 0.0 or spec.compliant_contact_damping < 0.0:
+        raise ValueError(f"{name}.physics_material compliant stiffness/damping must be non-negative")
+    if spec.compliant_contact_stiffness == 0.0 and spec.compliant_contact_damping != 0.0:
+        raise ValueError(f"{name}.physics_material compliant damping requires positive stiffness")
+    return spec
+
+
 def parse_scene_objects(
     scene_config: dict[str, Any],
     *,
@@ -224,6 +278,7 @@ def parse_scene_objects(
                 rigid_body=bool(raw.get("rigid_body", object_type in {"cuboid", "cylinder"})),
                 kinematic=bool(raw.get("kinematic", False)),
                 disable_gravity=bool(raw.get("disable_gravity", False)),
+                physics_material=_physics_material(raw.get("physics_material"), name=name),
                 joint_positions=_joint_positions(raw.get("joint_positions")),
                 metadata=raw.get("metadata") if isinstance(raw.get("metadata"), dict) else None,
             )

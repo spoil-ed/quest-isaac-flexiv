@@ -39,10 +39,13 @@ Optional environment variables:
   LEFT_ROBOT_SERIAL        Docker/left alias (default: Rizon4-qSaFLh)
   RIGHT_ROBOT_SERIAL       Host/right alias (default: Rizon4-I0LIRN)
   SCENE_CONFIG             Scene YAML relative to the repository, or absolute.
+  PIPELINE_CONFIG          Pipeline YAML containing control.drdk parameters.
+                           Default: configs/pipelines/dual_arm_data_collection.yaml
   FLEXIV_CAPSH             Optional capsh executable for RobotControlApp.
   FLEXIV_SHM_ROOT          Host Studio shared-memory root (default: /dev/shm)
   STARTUP_TIMEOUT_SEC      Runtime readiness timeout (default: 120)
   FLEXIV_STUDIO_VNC_PORT   Docker Studio VNC port (default: 5902)
+  SELF_COLLISION_MONITOR   Optional true/false override of the pipeline setting.
 EOF
 }
 
@@ -179,6 +182,11 @@ STUDIO_ROOT="${STUDIO_ROOT:-$REPO_ROOT/../elements_studio/FlexivElementsStudio}"
 
 LEFT_ROBOT_SERIAL="${LEFT_ROBOT_SERIAL:-Rizon4-qSaFLh}"
 RIGHT_ROBOT_SERIAL="${RIGHT_ROBOT_SERIAL:-Rizon4-I0LIRN}"
+PIPELINE_CONFIG="$(resolve_from_repo "${PIPELINE_CONFIG:-configs/pipelines/dual_arm_data_collection.yaml}")"
+[[ -f "$PIPELINE_CONFIG" ]] || die "PIPELINE_CONFIG does not exist: $PIPELINE_CONFIG"
+FLEXIV_SIM_JOINT_EFFORT_LIMITS_NM="$("$ISAAC_PYTHON" \
+  -c 'import sys,yaml; values=(yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {})["control"]["joint_effort_limits_nm"]; print(",".join(str(float(value)) for value in values))' \
+  "$PIPELINE_CONFIG")"
 if [[ -n "$TASK_NAME" ]]; then
   [[ -z "${SCENE_CONFIG:-}" ]] \
     || die "--task and SCENE_CONFIG cannot be used together; choose one scene selector"
@@ -198,6 +206,20 @@ fi
 [[ -n "$HOST_IP" ]] || die "could not detect HOST_IP; export HOST_IP explicitly"
 
 FLEXIV_STUDIO_VNC_PORT="${FLEXIV_STUDIO_VNC_PORT:-5902}"
+SELF_COLLISION_MONITOR_ARGS=()
+if [[ -n "${SELF_COLLISION_MONITOR:-}" ]]; then
+  case "${SELF_COLLISION_MONITOR,,}" in
+    true|1|yes|on)
+      SELF_COLLISION_MONITOR_ARGS=(--self-collision-monitor)
+      ;;
+    false|0|no|off)
+      SELF_COLLISION_MONITOR_ARGS=(--no-self-collision-monitor)
+      ;;
+    *)
+      die "SELF_COLLISION_MONITOR must be true or false"
+      ;;
+  esac
+fi
 FLEXIV_ARM_SERIAL="${FLEXIV_ARM_SERIAL:-A02L-00-M6-${LEFT_ROBOT_SERIAL#Rizon4-}}"
 RIGHT_FLEXIV_ARM_SERIAL="${RIGHT_FLEXIV_ARM_SERIAL:-A02L-00-M6-${RIGHT_ROBOT_SERIAL#Rizon4-}}"
 FLEXIV_SHM_ROOT="${FLEXIV_SHM_ROOT:-/dev/shm}"
@@ -208,7 +230,14 @@ if [[ -n "$TASK_NAME" ]]; then
   info "task=$TASK_NAME"
 fi
 info "scene=$SCENE_CONFIG"
+info "pipeline=$PIPELINE_CONFIG"
+info "simulation joint effort limits=$FLEXIV_SIM_JOINT_EFFORT_LIMITS_NM Nm"
 info "left=$LEFT_ROBOT_SERIAL (Docker), right=$RIGHT_ROBOT_SERIAL (host)"
+if [[ ${#SELF_COLLISION_MONITOR_ARGS[@]} -gt 0 ]]; then
+  info "DRDK SelfCollisionMonitor override=${SELF_COLLISION_MONITOR_ARGS[0]}"
+else
+  info "DRDK safety parameters loaded from pipeline control.drdk"
+fi
 info "Quest host=https://$HOST_IP:8012"
 
 info "stopping previous host control stack; recorder is preserved"
@@ -296,8 +325,11 @@ else
     --no-gpu-dynamics \
     --physics-hz 2000 \
     --render-hz 30 \
+    --joint-effort-limits-nm "$FLEXIV_SIM_JOINT_EFFORT_LIMITS_NM" \
     --enable-quest-target-udp \
     --quest-target-udp-port 57679 \
+    --quest-calibration-reset-udp-host 127.0.0.1 \
+    --quest-calibration-reset-udp-port 57686 \
     --quest-relative-orientation-mode relative \
     --quest-position-scale 1.0 \
     --quest-position-deadband-m 0.0 \
@@ -340,6 +372,7 @@ if [[ -n "$(first_matching_pid '(^|[[:space:]/])scripts/drdk_target_streamer\.py
 else
   "$ISAAC_PYTHON" "$REPO_ROOT/scripts/start_drdk_target_streamer.py" \
     --python "$ISAAC_PYTHON" \
+    --pipeline-config "$PIPELINE_CONFIG" \
     --scene-config "$SCENE_CONFIG" \
     --left-serial-number "$LEFT_ROBOT_SERIAL" \
     --right-serial-number "$RIGHT_ROBOT_SERIAL" \
@@ -347,6 +380,7 @@ else
     --right-port 57681 \
     --left-status-port 57682 \
     --right-status-port 57683 \
+    "${SELF_COLLISION_MONITOR_ARGS[@]}" \
     --connect-timeout-sec 120 \
     --nullspace-tracking-weight 1.0 \
     --initial-joint-max-vel-rad-s 0.5 \
@@ -362,6 +396,8 @@ start_detached \
   --host-ip "$HOST_IP" \
   --udp-host 127.0.0.1 \
   --udp-port 57679 \
+  --reset-udp-host 127.0.0.1 \
+  --reset-udp-port 57686 \
   --side both \
   --left-serial-number "$LEFT_ROBOT_SERIAL" \
   --right-serial-number "$RIGHT_ROBOT_SERIAL" \

@@ -2,6 +2,7 @@
 
 from .config import (
     DEFAULT_UNITREE_ASSET_ROOT,
+    PhysicsMaterialSpec,
     SceneObjectSpec,
     load_scene_config,
     parse_scene_objects,
@@ -11,6 +12,7 @@ from .config import (
 
 __all__ = [
     "DEFAULT_UNITREE_ASSET_ROOT",
+    "PhysicsMaterialSpec",
     "SceneObjectSpec",
     "load_scene_config",
     "parse_scene_objects",

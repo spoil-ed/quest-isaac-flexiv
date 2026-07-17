@@ -71,6 +71,39 @@ def _apply_physics(stage: Any, spec: SceneObjectSpec) -> None:
             mass_api.CreateMassAttr(float(spec.mass))
 
 
+def _apply_physics_material(stage: Any, spec: SceneObjectSpec) -> None:
+    material_spec = spec.physics_material
+    if material_spec is None or not spec.collision:
+        return
+
+    from pxr import PhysxSchema, UsdPhysics, UsdShade
+
+    prim = stage.GetPrimAtPath(spec.prim_path)
+    if not prim.IsValid():
+        return
+    material_path = f"{spec.prim_path}_PhysicsMaterial"
+    material = UsdShade.Material.Define(stage, material_path)
+    material_prim = material.GetPrim()
+    physics_material = UsdPhysics.MaterialAPI.Apply(material_prim)
+    physics_material.CreateStaticFrictionAttr().Set(float(material_spec.static_friction))
+    physics_material.CreateDynamicFrictionAttr().Set(float(material_spec.dynamic_friction))
+    physics_material.CreateRestitutionAttr().Set(float(material_spec.restitution))
+
+    physx_material = PhysxSchema.PhysxMaterialAPI.Apply(material_prim)
+    physx_material.CreateCompliantContactStiffnessAttr().Set(
+        float(material_spec.compliant_contact_stiffness)
+    )
+    physx_material.CreateCompliantContactDampingAttr().Set(
+        float(material_spec.compliant_contact_damping)
+    )
+    physx_material.CreateCompliantContactAccelerationSpringAttr().Set(
+        bool(material_spec.compliant_contact_acceleration_spring)
+    )
+
+    binding = UsdShade.MaterialBindingAPI.Apply(prim)
+    binding.Bind(material, UsdShade.Tokens.weakerThanDescendants, "physics")
+
+
 def _define_cuboid(stage: Any, spec: SceneObjectSpec) -> None:
     from pxr import UsdGeom
 
@@ -79,6 +112,7 @@ def _define_cuboid(stage: Any, spec: SceneObjectSpec) -> None:
     _set_xform(stage, spec, scale=_configured_xform_scale(spec))
     _apply_display_color(stage, spec)
     _apply_physics(stage, spec)
+    _apply_physics_material(stage, spec)
 
 
 def _define_cylinder(stage: Any, spec: SceneObjectSpec) -> None:
@@ -91,6 +125,7 @@ def _define_cylinder(stage: Any, spec: SceneObjectSpec) -> None:
     _set_xform(stage, spec)
     _apply_display_color(stage, spec)
     _apply_physics(stage, spec)
+    _apply_physics_material(stage, spec)
 
 
 def _set_existing_attr(prim: Any, names: tuple[str, ...], value: float) -> bool:

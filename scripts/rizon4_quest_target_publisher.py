@@ -22,6 +22,7 @@ DEFAULT_KEY_FILE = REPO_ROOT / "configs" / "xr_teleoperate" / "key.pem"
 DEFAULT_HOST_IP = "192.168.32.10"
 DEFAULT_UDP_HOST = "127.0.0.1"
 DEFAULT_UDP_PORT = 45679
+DEFAULT_RESET_UDP_PORT = 57686
 DEFAULT_TCP_ROT_OFFSET_WXYZ = (0.0, 0.70710678, 0.0, 0.70710678)
 DEFAULT_AXIS_MAP = "-z,-x,y"
 DEFAULT_HAND_SEPARATION_M = 0.40
@@ -214,10 +215,18 @@ class QuestSharedFrameCalibration:
         self.direction_tolerance_deg = max(0.0, float(direction_tolerance_deg))
         self.rotation_calibrated_from_mapped: list[list[float]] | None = None
         self._pending_since: float | None = None
+        self._require_release = False
 
     @property
     def confirmed(self) -> bool:
         return self.rotation_calibrated_from_mapped is not None
+
+    def reset(self, *, require_release: bool = False) -> None:
+        """Invalidate the shared frame, optionally requiring release before reconfirmation."""
+
+        self.rotation_calibrated_from_mapped = None
+        self._pending_since = None
+        self._require_release = bool(require_release)
 
     def _mapped_position(self, pose: list[list[float]]) -> list[float]:
         return apply_axis_map(pose_matrix_position(pose), self.axis_map)
@@ -275,6 +284,12 @@ class QuestSharedFrameCalibration:
     ) -> bool:
         if self.confirmed:
             return True
+        if self._require_release:
+            if both_squeeze:
+                return False
+            self._require_release = False
+            self._pending_since = None
+            return False
         if not both_squeeze or left_pose is None or right_pose is None:
             self._pending_since = None
             return False
@@ -438,6 +453,11 @@ class QuestRelativeMapper:
         self._engage_time: float | None = None
         self._settled = False
 
+    def reset(self) -> None:
+        self._position_zero = None
+        self._engage_time = None
+        self._settled = False
+
     def update(
         self,
         pose_matrix: list[list[float]],
@@ -507,6 +527,38 @@ class UdpJsonPublisher:
         self._socket.close()
 
 
+class CalibrationResetUdpReceiver:
+    """Receive coordinated-reset notifications without joining the control data path."""
+
+    def __init__(self, host: str, port: int) -> None:
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._socket.bind((str(host), int(port)))
+        self._socket.setblocking(False)
+        self.last_seq = 0
+
+    def poll_new_seq(self) -> int | None:
+        newest = self.last_seq
+        while True:
+            try:
+                payload, _ = self._socket.recvfrom(65535)
+            except BlockingIOError:
+                break
+            try:
+                packet = json.loads(payload.decode("utf-8"))
+                if packet.get("schema") != "flexiv_quest_calibration_reset.v1":
+                    continue
+                newest = max(newest, int(packet.get("reset_seq", 0)))
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+                continue
+        if newest <= self.last_seq:
+            return None
+        self.last_seq = newest
+        return newest
+
+    def close(self) -> None:
+        self._socket.close()
+
+
 def import_televuer(televuer_root: Path):
     root = Path(televuer_root).expanduser()
     if str(root) not in sys.path:
@@ -534,6 +586,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host-ip", default=DEFAULT_HOST_IP)
     parser.add_argument("--udp-host", default=DEFAULT_UDP_HOST)
     parser.add_argument("--udp-port", type=int, default=DEFAULT_UDP_PORT)
+    parser.add_argument("--reset-udp-host", default=DEFAULT_UDP_HOST)
+    parser.add_argument("--reset-udp-port", type=int, default=DEFAULT_RESET_UDP_PORT)
     parser.add_argument("--serial-number", default=DEFAULT_SERIAL_NUMBER)
     parser.add_argument("--left-serial-number", default="Rizon4-qSaFLh")
     parser.add_argument("--right-serial-number", default=DEFAULT_SERIAL_NUMBER)
@@ -604,6 +658,7 @@ def main(argv: list[str] | None = None) -> int:
             settle_sec=args.engage_settle_sec,
         )
     publisher = UdpJsonPublisher(args.udp_host, args.udp_port)
+    reset_receiver = CalibrationResetUdpReceiver(args.reset_udp_host, args.reset_udp_port)
     url = f"https://{args.host_ip}:8012/?ws=wss://{args.host_ip}:8012"
     print("[Rizon4QuestTargetPublisher] Open this URL in the Quest browser:", flush=True)
     print(url, flush=True)
@@ -625,6 +680,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         while True:
             now = time.monotonic()
+            reset_seq = reset_receiver.poll_new_seq()
+            if reset_seq is not None:
+                if shared_calibration is not None:
+                    shared_calibration.reset(require_release=True)
+                for mapper in mappers.values():
+                    mapper.reset()
+                print(
+                    f"[Rizon4QuestTargetPublisher] reset seq={reset_seq}: shared frame cleared; "
+                    "release both squeeze buttons, then hold both again to recalibrate.",
+                    flush=True,
+                )
             ready = bool(tv.motion_data_ready)
             button_values = {
                 side: select_button_value(tv, side, args.enable_button) if ready else 0.0
@@ -807,6 +873,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 130
     finally:
+        reset_receiver.close()
         publisher.close()
         tv.close()
 

@@ -16,6 +16,244 @@ spec.loader.exec_module(mod)
 
 
 class DrdkTargetStreamerTests(unittest.TestCase):
+    def test_contact_guard_freezes_one_arm_and_rebases_after_release(self):
+        class State:
+            def __init__(self, pose, wrench):
+                self.tcp_pose = list(pose)
+                self.tcp_wrench = list(wrench)
+
+        identity = [1.0, 0.0, 0.0, 0.0]
+        left_pose = [0.5, 0.1, 0.2, *identity]
+        right_pose = [0.5, -0.1, 0.2, *identity]
+        high = [9.5, 0.0, 0.0, 0.0, 0.0, 0.0]
+        low = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        guard = mod.ContactWrenchGuard(
+            ([10.0] * 6, [10.0] * 6),
+            trigger_ratio=0.9,
+            release_ratio=0.5,
+            trigger_samples=2,
+            release_dwell_sec=0.3,
+        )
+        latest = {
+            "left": [0.8, 0.1, 0.2, *identity],
+            "right": [0.8, -0.1, 0.2, *identity],
+        }
+
+        self.assertEqual(
+            guard.update((State(left_pose, high), State(right_pose, low)), latest, now=0.0),
+            [],
+        )
+        self.assertEqual(
+            guard.update((State(left_pose, high), State(right_pose, low)), latest, now=0.1),
+            [("left", "frozen")],
+        )
+        self.assertEqual(guard.command_pose("left", latest["left"]), left_pose)
+        self.assertEqual(guard.command_pose("right", latest["right"]), latest["right"])
+
+        latest["left"] = [1.0, 0.1, 0.2, *identity]
+        guard.update((State(left_pose, low), State(right_pose, low)), latest, now=0.2)
+        self.assertEqual(
+            guard.update((State(left_pose, low), State(right_pose, low)), latest, now=0.5),
+            [("left", "released")],
+        )
+        self.assertEqual(guard.command_pose("left", latest["left"]), left_pose)
+        moved = guard.command_pose("left", [1.1, 0.1, 0.2, *identity])
+        self.assertAlmostEqual(moved[0], 0.6)
+        self.assertEqual(moved[1:], left_pose[1:])
+
+    def test_joint_torque_guard_rolls_back_and_rebases_after_release(self):
+        class State:
+            def __init__(self, pose, tau, tau_dot=None, tau_ext=None):
+                self.tcp_pose = list(pose)
+                self.tau = list(tau)
+                self.tau_dot = [0.0] * 7 if tau_dot is None else list(tau_dot)
+                self.tau_ext = [0.0] * 7 if tau_ext is None else list(tau_ext)
+
+        identity = [1.0, 0.0, 0.0, 0.0]
+        left_tcp = [0.7, 0.1, 0.2, *identity]
+        right_tcp = [0.7, -0.1, 0.2, *identity]
+        guard = mod.JointTorqueGuard(
+            ([100.0] * 7, [100.0] * 7),
+            trigger_ratio=0.85,
+            release_ratio=0.70,
+            trigger_samples=1,
+            release_dwell_sec=0.3,
+            prediction_horizon_sec=0.02,
+            rollback_sec=0.1,
+        )
+        initial = {"left": left_tcp, "right": right_tcp}
+        guard.reset(initial, now=0.0)
+        safe_left = [0.75, 0.1, 0.2, *identity]
+        guard.record_command("left", safe_left, now=0.1)
+        guard.record_command("left", [0.85, 0.1, 0.2, *identity], now=0.25)
+        latest = {
+            "left": [0.9, 0.1, 0.2, *identity],
+            "right": [0.9, -0.1, 0.2, *identity],
+        }
+
+        events = guard.update(
+            (State(left_tcp, [86.0] + [0.0] * 6), State(right_tcp, [0.0] * 7)),
+            latest,
+            now=0.3,
+        )
+
+        self.assertEqual(events, [("left", "frozen")])
+        rebased = guard.command_pose("left", latest["left"])
+        self.assertAlmostEqual(rebased[0], safe_left[0])
+        self.assertEqual(rebased[1:], safe_left[1:])
+        self.assertEqual(guard.command_pose("right", latest["right"]), latest["right"])
+
+        low_states = (State(left_tcp, [60.0] + [0.0] * 6), State(right_tcp, [0.0] * 7))
+        guard.update(low_states, latest, now=0.4)
+        self.assertEqual(guard.update(low_states, latest, now=0.71), [("left", "released")])
+        rebased = guard.command_pose("left", latest["left"])
+        self.assertAlmostEqual(rebased[0], safe_left[0])
+        self.assertEqual(rebased[1:], safe_left[1:])
+        moved = guard.command_pose("left", [1.0, 0.1, 0.2, *identity])
+        self.assertAlmostEqual(moved[0], 0.85)
+
+    def test_joint_torque_guard_uses_tau_dot_prediction_and_tau_ext(self):
+        class State:
+            tcp_pose = [0.7, 0.0, 0.2, 1.0, 0.0, 0.0, 0.0]
+
+            def __init__(self, tau, tau_dot, tau_ext):
+                self.tau = tau
+                self.tau_dot = tau_dot
+                self.tau_ext = tau_ext
+
+        guard = mod.JointTorqueGuard(
+            ([100.0] * 7, [100.0] * 7),
+            trigger_ratio=0.85,
+            release_ratio=0.70,
+            trigger_samples=1,
+            release_dwell_sec=0.3,
+            prediction_horizon_sec=0.02,
+            rollback_sec=0.1,
+        )
+        latest = {"left": list(State.tcp_pose), "right": list(State.tcp_pose)}
+        events = guard.update(
+            (
+                State([80.0] + [0.0] * 6, [300.0] + [0.0] * 6, [0.0] * 7),
+                State([0.0] * 7, [0.0] * 7, [90.0] + [0.0] * 6),
+            ),
+            latest,
+            now=1.0,
+        )
+
+        self.assertEqual(events, [("left", "frozen"), ("right", "frozen")])
+        self.assertAlmostEqual(guard.latest_ratios["left"][0], 0.86)
+        self.assertAlmostEqual(guard.latest_ratios["right"][0], 0.90)
+
+    def test_reads_joint_torque_limits_from_robot_pair_info(self):
+        class JointGroup:
+            ARM_1 = "arm-one"
+
+        class Rdk:
+            pass
+
+        Rdk.JointGroup = JointGroup
+
+        class Info:
+            def __init__(self, limit):
+                self.tau_max = {JointGroup.ARM_1: [limit] * 7}
+
+        class Pair:
+            @staticmethod
+            def info():
+                return Info(64.0), Info(72.0)
+
+        self.assertEqual(
+            mod.joint_torque_limits(Pair(), Rdk, "ARM_1"),
+            ([64.0] * 7, [72.0] * 7),
+        )
+
+    def test_reads_joint_torque_limits_from_rdk_1_9_list_layout(self):
+        class Rdk:
+            pass
+
+        class Info:
+            def __init__(self, limit):
+                self.tau_max = [limit] * 7
+
+        class Pair:
+            @staticmethod
+            def info():
+                return Info(64.0), Info(72.0)
+
+        self.assertEqual(
+            mod.joint_torque_limits(Pair(), Rdk, "ARM_1"),
+            ([64.0] * 7, [72.0] * 7),
+        )
+
+    def test_relative_pose_rebase_preserves_orientation_delta(self):
+        half = 2.0**-0.5
+        rebased = mod.rebase_relative_pose(
+            [0.0, 0.0, 0.0, half, 0.0, 0.0, half],
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            [0.5, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        )
+
+        self.assertAlmostEqual(rebased[0], 0.5)
+        self.assertAlmostEqual(abs(rebased[3]), half)
+        self.assertAlmostEqual(abs(rebased[6]), half)
+
+    def test_starts_official_self_collision_monitor_with_configured_safety_margin(self):
+        events = []
+
+        class Monitor:
+            def __init__(self, robot_pair, skipped_links):
+                events.append(("init", robot_pair, skipped_links))
+
+            def SetMinDistance(self, distance):
+                events.append(("distance", distance))
+
+            def Start(self, interval_ms):
+                events.append(("start", interval_ms))
+
+            def Stop(self):
+                events.append(("stop",))
+
+        class Drdk:
+            SelfCollisionMonitor = Monitor
+
+        pair = object()
+        args = mod.parse_args(
+            [
+                "--left-nullspace-posture", "0,0,0,0,0,0,0",
+                "--right-nullspace-posture", "0,0,0,0,0,0,0",
+                "--self-collision-monitor",
+                "--self-collision-min-distance-m", "0.08",
+                "--self-collision-loop-interval-ms", "20",
+                "--self-collision-skip-link", "left_base",
+                "--self-collision-skip-link", "right_base",
+            ]
+        )
+
+        monitor = mod.start_self_collision_monitor(args, robot_pair=pair, flexivdrdk=Drdk)
+        mod.stop_self_collision_monitor(monitor)
+
+        self.assertEqual(
+            events,
+            [
+                ("init", pair, ["left_base", "right_base"]),
+                ("distance", 0.08),
+                ("start", 20),
+                ("stop",),
+            ],
+        )
+
+    def test_self_collision_monitor_is_disabled_in_low_level_streamer_by_default(self):
+        args = mod.parse_args(
+            [
+                "--left-nullspace-posture", "0,0,0,0,0,0,0",
+                "--right-nullspace-posture", "0,0,0,0,0,0,0",
+            ]
+        )
+
+        self.assertIsNone(
+            mod.start_self_collision_monitor(args, robot_pair=object(), flexivdrdk=object())
+        )
+
     def test_parses_matching_reset_sequence_from_target_packet(self):
         packet = {
             "schema": "flexiv_target_pose.v1",
@@ -135,6 +373,9 @@ class DrdkTargetStreamerTests(unittest.TestCase):
             def SetNullSpaceObjectives(self, **objectives):
                 self.objectives.append(objectives)
 
+            def SetMaxContactWrench(self, wrenches):
+                self.max_contact_wrenches = wrenches
+
         pair = Pair()
 
         class Drdk:
@@ -183,6 +424,7 @@ class DrdkTargetStreamerTests(unittest.TestCase):
         self.assertEqual(pair.joint_commands[2][0], expected)
         self.assertEqual(pair.postures, [expected])
         self.assertEqual(pair.objectives[0]["ref_positions_tracking"], (0.5, 0.5))
+        self.assertEqual(pair.max_contact_wrenches, ([20.0] * 3 + [3.0] * 3,) * 2)
 
     def test_reset_stops_clears_fault_and_recovers_with_send_joint_position(self):
         class State:
@@ -239,6 +481,9 @@ class DrdkTargetStreamerTests(unittest.TestCase):
 
             def SetNullSpaceObjectives(self, **_objectives):
                 self.events.append("set_nullspace_objectives")
+
+            def SetMaxContactWrench(self, _wrenches):
+                self.events.append("set_max_contact_wrench")
 
         class Mode:
             NRT_JOINT_POSITION = "NRT_JOINT_POSITION"
@@ -330,6 +575,9 @@ class DrdkTargetStreamerTests(unittest.TestCase):
             def SetNullSpaceObjectives(self, **_kwargs):
                 return None
 
+            def SetMaxContactWrench(self, _wrenches):
+                return None
+
         class Mode:
             NRT_JOINT_POSITION = "NRT_JOINT_POSITION"
             NRT_CARTESIAN_MOTION_FORCE = "NRT_CARTESIAN_MOTION_FORCE"
@@ -419,6 +667,9 @@ class DrdkTargetStreamerTests(unittest.TestCase):
             def SetNullSpaceObjectives(self, **_objectives):
                 return None
 
+            def SetMaxContactWrench(self, _wrenches):
+                return None
+
         class Mode:
             NRT_JOINT_POSITION = "NRT_JOINT_POSITION"
             NRT_CARTESIAN_MOTION_FORCE = "NRT_CARTESIAN_MOTION_FORCE"
@@ -489,11 +740,27 @@ class DrdkTargetStreamerTests(unittest.TestCase):
             reference_pose=None,
             current_pose=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
             current_q=[0.1] * 7,
+            tcp_wrench=[1.0, 2.0, 3.0, 0.1, 0.2, 0.3],
+            contact_frozen=True,
+            joint_tau=[10.0] * 7,
+            joint_tau_dot=[1.0] * 7,
+            joint_tau_ext=[2.0] * 7,
+            joint_tau_max=[64.0] * 7,
+            joint_torque_ratio=[0.5] * 7,
+            joint_torque_frozen=True,
         )
 
         self.assertEqual(packet["phase"], "joint_initializing")
         self.assertEqual(packet["current_q"], [0.1] * 7)
         self.assertEqual(packet["reset_seq"], 0)
+        self.assertTrue(packet["contact_frozen"])
+        self.assertEqual(packet["tcp_wrench"], [1.0, 2.0, 3.0, 0.1, 0.2, 0.3])
+        self.assertTrue(packet["joint_torque_frozen"])
+        self.assertEqual(packet["joint_tau"], [10.0] * 7)
+        self.assertEqual(packet["joint_tau_dot"], [1.0] * 7)
+        self.assertEqual(packet["joint_tau_ext"], [2.0] * 7)
+        self.assertEqual(packet["joint_tau_max"], [64.0] * 7)
+        self.assertEqual(packet["joint_torque_ratio"], [0.5] * 7)
 
 
 if __name__ == "__main__":

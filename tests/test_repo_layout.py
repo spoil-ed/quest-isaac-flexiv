@@ -65,6 +65,8 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("start_dual_isaac_follow.py", text)
         self.assertIn("rizon4_quest_target_publisher.py", text)
         self.assertIn("resolve_scene_task.py", text)
+        self.assertIn("configs/pipelines/dual_arm_data_collection.yaml", text)
+        self.assertIn('--pipeline-config "$PIPELINE_CONFIG"', text)
         self.assertIn("Usage: ./scripts/start.sh [--task TASK_NAME]", text)
         self.assertIn('TASK_NAME="$2"', text)
         self.assertIn('QUEST_PYTHON="$ISAAC_PYTHON"', text)
@@ -117,7 +119,9 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn('REPO_ROOT="$(cd --', text)
         self.assertIn('${BASH_SOURCE[0]}")/..', text)
         self.assertIn("scripts/print_dual_arm_state.py", text)
-        self.assertIn('exec "$PYTHON"', text)
+        self.assertIn("scripts/plot_dual_arm_torque.py", text)
+        self.assertIn("--forward-port", text)
+        self.assertIn("trap cleanup EXIT INT TERM", text)
         self.assertNotIn("/home/", text)
 
     def test_root_repo_does_not_keep_environment_links_or_generated_dirs(self):
@@ -171,6 +175,7 @@ class RepoLayoutTests(unittest.TestCase):
             "record_unitree_json.py",
             "resolve_scene_task.py",
             "print_dual_arm_state.py",
+            "plot_dual_arm_torque.py",
             "rizon4_quest_target_publisher.py",
             "run_stage1_data_collection_smoke.py",
             "run_stage1_single_rizon4_real_validation.py",
@@ -275,7 +280,12 @@ class RepoLayoutTests(unittest.TestCase):
         env = streamer.build_env({"PYTHONPATH": "existing"})
         command = streamer.build_command(
             streamer.parse_args(
-                ["--scene-config", str(ROOT / "configs/scenes/pick_place_redblock_flexiv_dual.yaml")]
+                [
+                    "--pipeline-config",
+                    str(ROOT / "configs/pipelines/dual_arm_data_collection.yaml"),
+                    "--scene-config",
+                    str(ROOT / "configs/scenes/pick_place_redblock_flexiv_dual.yaml"),
+                ]
             )
         )
 
@@ -304,6 +314,25 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("--initial-joint-max-acc-rad-s2", command)
         self.assertIn("--initial-joint-handoff-sec", command)
         self.assertIn("--no-clear-fault", command)
+        self.assertIn("--no-self-collision-monitor", command)
+        self.assertIn("--left-translation-in-world=-0.06,0.2,1.08", command)
+        self.assertIn("--right-translation-in-world=-0.06,-0.2,1.08", command)
+        self.assertIn("--contact-wrench-control", command)
+        self.assertIn("--left-max-contact-wrench=20.0,20.0,20.0,3.0,3.0,3.0", command)
+        self.assertIn("--right-max-contact-wrench=20.0,20.0,20.0,3.0,3.0,3.0", command)
+        self.assertEqual(
+            command[command.index("--contact-wrench-trigger-samples") + 1],
+            "3",
+        )
+        self.assertIn("--joint-torque-control", command)
+        self.assertEqual(command[command.index("--joint-torque-trigger-ratio") + 1], "0.85")
+        self.assertEqual(command[command.index("--joint-torque-release-ratio") + 1], "0.7")
+        self.assertEqual(command[command.index("--joint-torque-trigger-samples") + 1], "1")
+        self.assertEqual(
+            command[command.index("--joint-torque-prediction-horizon-sec") + 1],
+            "0.02",
+        )
+        self.assertEqual(command[command.index("--joint-torque-rollback-sec") + 1], "0.1")
 
     def test_isaac_follow_startup_does_not_embed_rdk_client(self):
         follow = load_script("start_isaac_follow.py")

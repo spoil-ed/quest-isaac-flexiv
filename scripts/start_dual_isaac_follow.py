@@ -27,10 +27,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gpu-dynamics", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--physics-hz", type=float, default=None)
     parser.add_argument("--render-hz", type=float, default=None)
+    parser.add_argument("--joint-effort-limits-nm", default=None)
     parser.add_argument("--enable-quest-target-udp", action="store_true")
     parser.add_argument("--quest-target-udp-host", default=None)
     parser.add_argument("--quest-target-udp-port", type=int, default=None)
     parser.add_argument("--quest-target-max-age-sec", type=float, default=None)
+    parser.add_argument("--quest-calibration-reset-udp-host", default=None)
+    parser.add_argument("--quest-calibration-reset-udp-port", type=int, default=None)
     parser.add_argument("--quest-target-mode", choices=("absolute", "relative"), default="relative")
     parser.add_argument(
         "--quest-relative-orientation-mode",
@@ -105,9 +108,12 @@ def build_command(args: argparse.Namespace) -> list[str]:
     for option, value in (
         ("--physics-hz", args.physics_hz),
         ("--render-hz", args.render_hz),
+        ("--joint-effort-limits-nm", args.joint_effort_limits_nm),
         ("--quest-target-udp-host", args.quest_target_udp_host),
         ("--quest-target-udp-port", args.quest_target_udp_port),
         ("--quest-target-max-age-sec", args.quest_target_max_age_sec),
+        ("--quest-calibration-reset-udp-host", args.quest_calibration_reset_udp_host),
+        ("--quest-calibration-reset-udp-port", args.quest_calibration_reset_udp_port),
         ("--quest-axis-map", args.quest_axis_map),
         ("--quest-position-deadband-m", args.quest_position_deadband_m),
         ("--quest-workspace-min", args.quest_workspace_min),

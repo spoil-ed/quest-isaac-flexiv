@@ -15,6 +15,7 @@ from typing import Any
 SCHEMA = "flexiv_dual_arm_state.v1"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 57684
+DEFAULT_FORWARD_HOST = "127.0.0.1"
 TCP_FORWARD_LOCAL = [0.0, 0.0, 1.0]
 DEFAULT_TCP_FORWARD_BASE = [1.0, 0.0, 0.0]
 HAND_SEPARATION_M = 0.40
@@ -32,6 +33,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="UDP port to bind")
     parser.add_argument("--rate-hz", type=float, default=5.0, help="maximum terminal refresh rate")
     parser.add_argument("--timeout-sec", type=float, default=3.0, help="warning interval while no packets arrive")
+    parser.add_argument(
+        "--forward-host",
+        default=DEFAULT_FORWARD_HOST,
+        help="UDP address used to forward valid packets; active only when --forward-port is nonzero",
+    )
+    parser.add_argument(
+        "--forward-port",
+        type=int,
+        default=0,
+        help="forward every valid state packet to this UDP port (0 disables forwarding)",
+    )
     parser.add_argument("--once", action="store_true", help="print one valid packet and exit")
     parser.add_argument(
         "--verbose",
@@ -47,6 +59,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if not 0 <= args.port <= 65535:
         parser.error("--port must be between 0 and 65535")
+    if not 0 <= args.forward_port <= 65535:
+        parser.error("--forward-port must be between 0 and 65535")
     if args.rate_hz <= 0:
         parser.error("--rate-hz must be positive")
     if args.timeout_sec <= 0:
@@ -574,6 +588,18 @@ def format_state(
                 f"  TCP world   xyz(m)={_numbers(world[:3])}  quat={_numbers(world[3:])}",
             ]
         )
+        torque = arm.get("torque")
+        if isinstance(torque, dict):
+            for key, label in (
+                ("tau", "tau Nm"),
+                ("tau_ext", "tau_ext Nm"),
+                ("tau_max", "tau_max Nm"),
+                ("ratio", "torque ratio"),
+            ):
+                values = torque.get(key)
+                if isinstance(values, (list, tuple)) and len(values) == 7:
+                    lines.append(f"  {label:12s}{_numbers([float(value) for value in values])}")
+            lines.append(f"  torque guard frozen={bool(torque.get('frozen', False))}")
         if not isinstance(quest, dict) or not quest.get("available", False):
             lines.append("  Quest       unavailable")
             continue
@@ -658,6 +684,8 @@ def main(argv: list[str] | None = None) -> int:
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind((args.host, args.port))
     listener.settimeout(min(args.timeout_sec, 0.5))
+    forwarder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if args.forward_port else None
+    forward_address = (args.forward_host, args.forward_port)
     min_period = 1.0 / args.rate_hz
     last_print = -math.inf
     last_packet = time.monotonic()
@@ -684,6 +712,11 @@ def main(argv: list[str] | None = None) -> int:
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
                 print(f"[arm-state] ignored invalid packet: {exc}", file=sys.stderr, flush=True)
                 continue
+            if forwarder is not None:
+                try:
+                    forwarder.sendto(data, forward_address)
+                except OSError as exc:
+                    print(f"[arm-state] state forwarding failed: {exc}", file=sys.stderr, flush=True)
             current = time.monotonic()
             last_packet = current
             if not args.once and current - last_print < min_period:
@@ -702,6 +735,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     finally:
         listener.close()
+        if forwarder is not None:
+            forwarder.close()
 
 
 if __name__ == "__main__":

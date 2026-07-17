@@ -93,6 +93,20 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertTrue(calibration.confirmed)
         self.assertEqual(calibration.rotation_calibrated_from_mapped, frozen)
 
+    def test_reset_requires_release_then_both_squeeze_to_recalibrate(self):
+        calibration = mod.QuestSharedFrameCalibration(settle_sec=0.0)
+        left = _pose(-0.2, 1.2, -0.3)
+        right = _pose(0.2, 1.2, -0.3)
+        self.assertTrue(calibration.update(left, right, both_squeeze=True, now=1.0))
+
+        calibration.reset(require_release=True)
+
+        self.assertFalse(calibration.confirmed)
+        self.assertFalse(calibration.update(left, right, both_squeeze=True, now=1.1))
+        self.assertFalse(calibration.update(left, right, both_squeeze=False, now=1.2))
+        self.assertTrue(calibration.update(left, right, both_squeeze=True, now=1.3))
+        self.assertTrue(calibration.confirmed)
+
     def test_shared_frame_removes_confirmation_yaw_from_translation(self):
         angle = math.radians(30.0)
         forward = [math.cos(angle), math.sin(angle)]

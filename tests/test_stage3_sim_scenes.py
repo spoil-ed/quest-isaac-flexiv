@@ -98,6 +98,11 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
                 table = next(spec for spec in specs if spec.name == "work_table_top")
                 self.assertAlmostEqual(table.position[2] + table.size[2] / 2.0, 0.16)
                 self.assertGreaterEqual(table.size[1] / table.size[0], 2.5)
+                self.assertIsNotNone(table.physics_material)
+                self.assertEqual(table.physics_material.restitution, 0.0)
+                self.assertEqual(table.physics_material.compliant_contact_stiffness, 20000.0)
+                self.assertEqual(table.physics_material.compliant_contact_damping, 250.0)
+                self.assertFalse(table.physics_material.compliant_contact_acceleration_spring)
                 self.assertEqual(
                     _configured_xform_scale(table),
                     tuple(size * scale for size, scale in zip(table.size, table.scale)),
@@ -134,6 +139,23 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
 
             with self.assertRaisesRegex(FileNotFoundError, "broken_asset"):
                 parse_scene_objects(data, config_path=scene_path, validate_assets=True)
+
+    def test_scene_rejects_damping_without_compliant_contact_stiffness(self):
+        data = {
+            "scene_objects": [
+                {
+                    "name": "invalid_table",
+                    "type": "cuboid",
+                    "prim_path": "/World/InvalidTable",
+                    "physics_material": {
+                        "compliant_contact": {"stiffness": 0.0, "damping": 250.0}
+                    },
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(ValueError, "damping requires positive stiffness"):
+            parse_scene_objects(data, validate_assets=False)
 
     def test_unified_pipeline_config_supplies_task_profile_and_scene_objects(self):
         runner = load_stage2_runner()
