@@ -47,6 +47,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--left-cartesian-damping-ratio", default=None)
     parser.add_argument("--right-cartesian-damping-ratio", default=None)
     parser.add_argument(
+        "--output-torque-regulator",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    parser.add_argument("--output-torque-limiting-factor", type=float, default=None)
+    parser.add_argument("--output-torque-error-threshold", type=int, default=None)
+    parser.add_argument("--safety-password-env", default=None)
+    parser.add_argument(
         "--self-collision-monitor",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -68,6 +76,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--joint-torque-release-dwell-sec", type=float, default=None)
     parser.add_argument("--joint-torque-prediction-horizon-sec", type=float, default=None)
     parser.add_argument("--joint-torque-rollback-sec", type=float, default=None)
+    parser.add_argument("--target-resampling-control", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--target-resample-rate-hz", type=float, default=None)
+    parser.add_argument("--target-prediction-horizon-sec", type=float, default=None)
+    parser.add_argument("--target-velocity-filter-alpha", type=float, default=None)
+    parser.add_argument("--target-feedforward-scale", type=float, default=None)
+    parser.add_argument("--target-max-linear-feedforward-m-s", type=float, default=None)
+    parser.add_argument("--target-max-angular-feedforward-rad-s", type=float, default=None)
+    parser.add_argument("--target-torque-soft-ratio", type=float, default=None)
+    parser.add_argument("--target-min-motion-scale", type=float, default=None)
+    parser.add_argument("--target-linear-velocity-deadband-m-s", type=float, default=None)
+    parser.add_argument("--target-angular-velocity-deadband-rad-s", type=float, default=None)
     parser.add_argument(
         "--scene-config",
         type=Path,
@@ -90,6 +109,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--reset-joint-max-acc-rad-s2", type=float, default=0.4)
     parser.add_argument("--reset-max-attempts", type=int, default=3)
     parser.add_argument("--reset-retry-delay-sec", type=float, default=0.5)
+    parser.add_argument(
+        "--reset-motion-method",
+        choices=("send_joint_position", "movej"),
+        default=None,
+    )
     parser.add_argument("--max-linear-speed-m-s", type=float, default=0.5)
     parser.add_argument("--max-angular-speed-rad-s", type=float, default=0.75)
     parser.add_argument("--max-linear-acc-m-s2", type=float, default=2.0)
@@ -103,10 +127,56 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.pipeline_config is not None:
         args.pipeline_config = args.pipeline_config.expanduser().resolve()
         drdk_control = load_drdk_control(args.pipeline_config)
+    output_torque_regulator = drdk_control.get("output_torque_regulator") or {}
     self_collision = drdk_control.get("self_collision_monitor") or {}
     cartesian_impedance = drdk_control.get("cartesian_impedance") or {}
     contact_wrench = drdk_control.get("contact_wrench") or {}
     joint_torque = drdk_control.get("joint_torque") or {}
+    target_resampling = drdk_control.get("target_resampling") or {}
+    reset_motion = drdk_control.get("reset_motion") or {}
+    args.reset_motion_method = str(
+        _configured(
+            args.reset_motion_method,
+            reset_motion.get("method"),
+            "send_joint_position",
+        )
+    )
+    if args.reset_motion_method not in {"send_joint_position", "movej"}:
+        raise ValueError(
+            "reset motion method must be 'send_joint_position' or 'movej'"
+        )
+    args.output_torque_regulator = _configured(
+        args.output_torque_regulator,
+        output_torque_regulator.get("enabled"),
+        False,
+    )
+    args.output_torque_limiting_factor = float(
+        _configured(
+            args.output_torque_limiting_factor,
+            output_torque_regulator.get("limiting_factor"),
+            0.85,
+        )
+    )
+    args.output_torque_error_threshold = int(
+        _configured(
+            args.output_torque_error_threshold,
+            output_torque_regulator.get("error_threshold"),
+            50,
+        )
+    )
+    args.safety_password_env = str(
+        _configured(
+            args.safety_password_env,
+            output_torque_regulator.get("password_env"),
+            "FLEXIV_SAFETY_PASSWORD",
+        )
+    ).strip()
+    if not 0.0 < args.output_torque_limiting_factor <= 1.0:
+        raise ValueError("output torque limiting_factor must be within (0, 1]")
+    if args.output_torque_error_threshold < 1:
+        raise ValueError("output torque error_threshold must be at least 1")
+    if args.output_torque_regulator and not args.safety_password_env:
+        raise ValueError("output torque regulator requires a non-empty password_env name")
     args.cartesian_impedance_control = _configured(
         args.cartesian_impedance_control, cartesian_impedance.get("enabled"), False
     )
@@ -164,48 +234,139 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.contact_wrench_control, contact_wrench.get("enabled"), True
     )
     args.left_max_contact_wrench = _wrench_csv(
-        _configured(args.left_max_contact_wrench, contact_wrench.get("left_limit"), [20, 20, 20, 3, 3, 3]),
+        _configured(args.left_max_contact_wrench, contact_wrench.get("left_limit"), [30, 30, 30, 5, 5, 5]),
         name="left contact wrench limit",
     )
     args.right_max_contact_wrench = _wrench_csv(
-        _configured(args.right_max_contact_wrench, contact_wrench.get("right_limit"), [20, 20, 20, 3, 3, 3]),
+        _configured(args.right_max_contact_wrench, contact_wrench.get("right_limit"), [30, 30, 30, 5, 5, 5]),
         name="right contact wrench limit",
     )
     args.contact_wrench_freeze_trigger_ratio = _configured(
-        args.contact_wrench_freeze_trigger_ratio, contact_wrench.get("freeze_trigger_ratio"), 0.95
+        args.contact_wrench_freeze_trigger_ratio, contact_wrench.get("freeze_trigger_ratio"), 0.90
     )
     args.contact_wrench_release_ratio = _configured(
-        args.contact_wrench_release_ratio, contact_wrench.get("release_ratio"), 0.70
+        args.contact_wrench_release_ratio, contact_wrench.get("release_ratio"), 0.55
     )
     args.contact_wrench_trigger_samples = _configured(
-        args.contact_wrench_trigger_samples, contact_wrench.get("trigger_samples"), 3
+        args.contact_wrench_trigger_samples, contact_wrench.get("trigger_samples"), 1
     )
     args.contact_wrench_release_dwell_sec = _configured(
-        args.contact_wrench_release_dwell_sec, contact_wrench.get("release_dwell_sec"), 0.30
+        args.contact_wrench_release_dwell_sec, contact_wrench.get("release_dwell_sec"), 0.12
     )
     args.joint_torque_control = _configured(
         args.joint_torque_control, joint_torque.get("enabled"), True
     )
     args.joint_torque_trigger_ratio = _configured(
-        args.joint_torque_trigger_ratio, joint_torque.get("trigger_ratio"), 0.85
+        args.joint_torque_trigger_ratio, joint_torque.get("trigger_ratio"), 0.72
     )
     args.joint_torque_release_ratio = _configured(
-        args.joint_torque_release_ratio, joint_torque.get("release_ratio"), 0.70
+        args.joint_torque_release_ratio, joint_torque.get("release_ratio"), 0.55
     )
     args.joint_torque_trigger_samples = _configured(
         args.joint_torque_trigger_samples, joint_torque.get("trigger_samples"), 1
     )
     args.joint_torque_release_dwell_sec = _configured(
-        args.joint_torque_release_dwell_sec, joint_torque.get("release_dwell_sec"), 0.30
+        args.joint_torque_release_dwell_sec, joint_torque.get("release_dwell_sec"), 0.15
     )
     args.joint_torque_prediction_horizon_sec = _configured(
         args.joint_torque_prediction_horizon_sec,
         joint_torque.get("prediction_horizon_sec"),
-        0.02,
+        0.025,
     )
     args.joint_torque_rollback_sec = _configured(
-        args.joint_torque_rollback_sec, joint_torque.get("rollback_sec"), 0.10
+        args.joint_torque_rollback_sec, joint_torque.get("rollback_sec"), 0.05
     )
+    args.target_resampling_control = _configured(
+        args.target_resampling_control, target_resampling.get("enabled"), False
+    )
+    args.target_resample_rate_hz = float(
+        _configured(args.target_resample_rate_hz, target_resampling.get("rate_hz"), 250.0)
+    )
+    args.target_prediction_horizon_sec = float(
+        _configured(
+            args.target_prediction_horizon_sec,
+            target_resampling.get("prediction_horizon_sec"),
+            0.01,
+        )
+    )
+    args.target_velocity_filter_alpha = float(
+        _configured(
+            args.target_velocity_filter_alpha,
+            target_resampling.get("velocity_filter_alpha"),
+            0.35,
+        )
+    )
+    args.target_feedforward_scale = float(
+        _configured(
+            args.target_feedforward_scale,
+            target_resampling.get("feedforward_scale"),
+            0.5,
+        )
+    )
+    args.target_max_linear_feedforward_m_s = float(
+        _configured(
+            args.target_max_linear_feedforward_m_s,
+            target_resampling.get("max_linear_feedforward_m_s"),
+            0.25,
+        )
+    )
+    args.target_max_angular_feedforward_rad_s = float(
+        _configured(
+            args.target_max_angular_feedforward_rad_s,
+            target_resampling.get("max_angular_feedforward_rad_s"),
+            1.0,
+        )
+    )
+    args.target_torque_soft_ratio = float(
+        _configured(
+            args.target_torque_soft_ratio,
+            target_resampling.get("torque_soft_ratio"),
+            0.65,
+        )
+    )
+    args.target_min_motion_scale = float(
+        _configured(
+            args.target_min_motion_scale,
+            target_resampling.get("min_motion_scale"),
+            0.25,
+        )
+    )
+    args.target_linear_velocity_deadband_m_s = float(
+        _configured(
+            args.target_linear_velocity_deadband_m_s,
+            target_resampling.get("linear_velocity_deadband_m_s"),
+            0.005,
+        )
+    )
+    args.target_angular_velocity_deadband_rad_s = float(
+        _configured(
+            args.target_angular_velocity_deadband_rad_s,
+            target_resampling.get("angular_velocity_deadband_rad_s"),
+            0.02,
+        )
+    )
+    if args.target_resample_rate_hz <= 0.0:
+        raise ValueError("target resampling rate_hz must be positive")
+    if args.target_prediction_horizon_sec < 0.0:
+        raise ValueError("target resampling prediction_horizon_sec must be non-negative")
+    if not 0.0 <= args.target_velocity_filter_alpha <= 1.0:
+        raise ValueError("target resampling velocity_filter_alpha must be within [0, 1]")
+    if not 0.0 <= args.target_feedforward_scale <= 1.0:
+        raise ValueError("target resampling feedforward_scale must be within [0, 1]")
+    if min(
+        args.target_max_linear_feedforward_m_s,
+        args.target_max_angular_feedforward_rad_s,
+    ) < 0.0:
+        raise ValueError("target resampling feed-forward limits must be non-negative")
+    if not 0.0 <= args.target_torque_soft_ratio < args.joint_torque_trigger_ratio:
+        raise ValueError("target resampling torque_soft_ratio must be below joint torque trigger_ratio")
+    if not 0.0 <= args.target_min_motion_scale <= 1.0:
+        raise ValueError("target resampling min_motion_scale must be within [0, 1]")
+    if min(
+        args.target_linear_velocity_deadband_m_s,
+        args.target_angular_velocity_deadband_rad_s,
+    ) < 0.0:
+        raise ValueError("target resampling velocity deadbands must be non-negative")
     args.scene_config = args.scene_config.expanduser().resolve()
     (
         args.left_nullspace_posture,
@@ -276,7 +437,15 @@ def load_drdk_control(pipeline_config: Path) -> dict:
     drdk = control.get("drdk") or {}
     if not isinstance(drdk, dict):
         raise ValueError(f"{pipeline_config}: control.drdk must be a mapping")
-    for key in ("cartesian_impedance", "self_collision_monitor", "contact_wrench", "joint_torque"):
+    for key in (
+        "cartesian_impedance",
+        "output_torque_regulator",
+        "self_collision_monitor",
+        "contact_wrench",
+        "joint_torque",
+        "target_resampling",
+        "reset_motion",
+    ):
         value = drdk.get(key)
         if value is not None and not isinstance(value, dict):
             raise ValueError(f"{pipeline_config}: control.drdk.{key} must be a mapping")
@@ -400,6 +569,15 @@ def build_command(args: argparse.Namespace) -> list[str]:
         f"--right-cartesian-stiffness={args.right_cartesian_stiffness}",
         f"--left-cartesian-damping-ratio={args.left_cartesian_damping_ratio}",
         f"--right-cartesian-damping-ratio={args.right_cartesian_damping_ratio}",
+        "--output-torque-regulator"
+        if args.output_torque_regulator
+        else "--no-output-torque-regulator",
+        "--output-torque-limiting-factor",
+        str(args.output_torque_limiting_factor),
+        "--output-torque-error-threshold",
+        str(args.output_torque_error_threshold),
+        "--safety-password-env",
+        str(args.safety_password_env),
         "--self-collision-monitor" if args.self_collision_monitor else "--no-self-collision-monitor",
         "--self-collision-min-distance-m",
         str(args.self_collision_min_distance_m),
@@ -429,6 +607,29 @@ def build_command(args: argparse.Namespace) -> list[str]:
         str(args.joint_torque_prediction_horizon_sec),
         "--joint-torque-rollback-sec",
         str(args.joint_torque_rollback_sec),
+        "--target-resampling-control"
+        if args.target_resampling_control
+        else "--no-target-resampling-control",
+        "--target-resample-rate-hz",
+        str(args.target_resample_rate_hz),
+        "--target-prediction-horizon-sec",
+        str(args.target_prediction_horizon_sec),
+        "--target-velocity-filter-alpha",
+        str(args.target_velocity_filter_alpha),
+        "--target-feedforward-scale",
+        str(args.target_feedforward_scale),
+        "--target-max-linear-feedforward-m-s",
+        str(args.target_max_linear_feedforward_m_s),
+        "--target-max-angular-feedforward-rad-s",
+        str(args.target_max_angular_feedforward_rad_s),
+        "--target-torque-soft-ratio",
+        str(args.target_torque_soft_ratio),
+        "--target-min-motion-scale",
+        str(args.target_min_motion_scale),
+        "--target-linear-velocity-deadband-m-s",
+        str(args.target_linear_velocity_deadband_m_s),
+        "--target-angular-velocity-deadband-rad-s",
+        str(args.target_angular_velocity_deadband_rad_s),
         f"--left-nullspace-posture={args.left_nullspace_posture}",
         f"--right-nullspace-posture={args.right_nullspace_posture}",
         "--nullspace-tracking-weight",
@@ -461,6 +662,8 @@ def build_command(args: argparse.Namespace) -> list[str]:
         str(args.reset_max_attempts),
         "--reset-retry-delay-sec",
         str(args.reset_retry_delay_sec),
+        "--reset-motion-method",
+        str(args.reset_motion_method),
         "--max-linear-speed-m-s",
         str(args.max_linear_speed_m_s),
         "--max-angular-speed-rad-s",

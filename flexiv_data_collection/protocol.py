@@ -118,6 +118,35 @@ class JsonLineReqClient(JsonLinePushClient):
         assert self.connection is not None
         return self.connection.recv_json(timeout=timeout)
 
+    def reconnect(self) -> None:
+        """Replace a stale request/reply connection after the server restarts."""
+
+        self.close()
+        self._connect()
+
+    def request_json(
+        self,
+        data: dict[str, Any],
+        *,
+        timeout: float | None = None,
+        reconnect_once: bool = True,
+    ) -> dict[str, Any]:
+        """Perform one request/reply exchange, retrying once on a dead socket."""
+
+        attempts = 2 if reconnect_once else 1
+        for attempt in range(attempts):
+            try:
+                self.send_json(data)
+                return self.recv_json(timeout=timeout)
+            except (EOFError, OSError) as exc:
+                # A response timeout is not proof that the server did not
+                # process the request, so do not duplicate it. Broken pipes,
+                # resets and EOF are safe reasons to replace a stale socket.
+                if isinstance(exc, (TimeoutError, socket.timeout)) or attempt + 1 >= attempts:
+                    raise
+                self.reconnect()
+        raise RuntimeError("unreachable request retry state")
+
 
 class JsonLineRepServer:
     def __init__(self, endpoint: str) -> None:

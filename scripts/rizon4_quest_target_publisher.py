@@ -10,7 +10,7 @@ import socket
 import sys
 import time
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 DEFAULT_SERIAL_NUMBER = "Rizon4-I0LIRN"
@@ -28,6 +28,7 @@ DEFAULT_AXIS_MAP = "-z,-x,y"
 DEFAULT_HAND_SEPARATION_M = 0.40
 DEFAULT_HAND_SEPARATION_TOLERANCE_M = 0.01
 DEFAULT_HAND_DIRECTION_TOLERANCE_DEG = 15.0
+DEFAULT_MIN_HAND_SEPARATION_M = 0.05
 
 
 def _as_float_list(values: Iterable[float], expected_len: int, name: str) -> list[float]:
@@ -195,7 +196,7 @@ def pose_matrix_quat_wxyz(matrix: list[list[float]], axis_map: list[tuple[int, f
 
 
 class QuestSharedFrameCalibration:
-    """Freeze a shared dual-controller frame after a valid two-squeeze confirmation."""
+    """Freeze a shared dual-controller frame on a simultaneous squeeze."""
 
     def __init__(
         self,
@@ -206,6 +207,8 @@ class QuestSharedFrameCalibration:
         separation_m: float = DEFAULT_HAND_SEPARATION_M,
         separation_tolerance_m: float = DEFAULT_HAND_SEPARATION_TOLERANCE_M,
         direction_tolerance_deg: float = DEFAULT_HAND_DIRECTION_TOLERANCE_DEG,
+        strict_geometry: bool = False,
+        min_separation_m: float = DEFAULT_MIN_HAND_SEPARATION_M,
     ) -> None:
         self.axis_map = parse_axis_map(axis_map)
         self.tcp_rot_offset_wxyz = normalize_quat_wxyz(tcp_rot_offset_wxyz)
@@ -213,6 +216,8 @@ class QuestSharedFrameCalibration:
         self.separation_m = float(separation_m)
         self.separation_tolerance_m = max(0.0, float(separation_tolerance_m))
         self.direction_tolerance_deg = max(0.0, float(direction_tolerance_deg))
+        self.strict_geometry = bool(strict_geometry)
+        self.min_separation_m = max(1e-3, float(min_separation_m))
         self.rotation_calibrated_from_mapped: list[list[float]] | None = None
         self._pending_since: float | None = None
         self._require_release = False
@@ -236,36 +241,84 @@ class QuestSharedFrameCalibration:
         tcp_quat = quat_multiply_wxyz(hand_quat, self.tcp_rot_offset_wxyz)
         return rotate_vector_wxyz(tcp_quat, [0.0, 0.0, 1.0])
 
-    def candidate_rotation(
+    def geometry_status(
         self,
-        left_pose: list[list[float]],
-        right_pose: list[list[float]],
-    ) -> list[list[float]] | None:
+        left_pose: list[list[float]] | None,
+        right_pose: list[list[float]] | None,
+    ) -> dict[str, Any]:
+        """Measure the live two-controller geometry used by the strict gate."""
+
+        if left_pose is None or right_pose is None:
+            return {"available": False, "spacing_ok": False, "direction_ok": False, "ok": False}
         left_position = self._mapped_position(left_pose)
         right_position = self._mapped_position(right_pose)
         delta = [right_position[index] - left_position[index] for index in range(3)]
-        if abs(norm3(delta) - self.separation_m) > self.separation_tolerance_m:
-            return None
-
+        separation = norm3(delta)
         left_forward = self._mapped_forward(left_pose)
         right_forward = self._mapped_forward(right_pose)
         line_xy = [delta[0], delta[1], 0.0]
         left_xy = [left_forward[0], left_forward[1], 0.0]
         right_xy = [right_forward[0], right_forward[1], 0.0]
+        horizontal_valid = norm3(line_xy) >= self.min_separation_m
         left_error = abs(vector_angle_deg(left_xy, line_xy) - 90.0)
         right_error = abs(vector_angle_deg(right_xy, line_xy) - 90.0)
         mutual_error = vector_angle_deg(left_xy, right_xy)
-        if max(left_error, right_error, mutual_error) > self.direction_tolerance_deg:
+        spacing_ok = abs(separation - self.separation_m) <= self.separation_tolerance_m
+        direction_ok = bool(
+            horizontal_valid
+            and max(left_error, right_error, mutual_error) <= self.direction_tolerance_deg
+        )
+        return {
+            "available": True,
+            "separation_m": float(separation),
+            "separation_target_m": float(self.separation_m),
+            "separation_tolerance_m": float(self.separation_tolerance_m),
+            "spacing_ok": bool(spacing_ok),
+            "left_direction_error_deg": float(left_error),
+            "right_direction_error_deg": float(right_error),
+            "mutual_direction_error_deg": float(mutual_error),
+            "direction_tolerance_deg": float(self.direction_tolerance_deg),
+            "direction_ok": bool(direction_ok),
+            "ok": bool(spacing_ok and direction_ok),
+        }
+
+    def candidate_rotation(
+        self,
+        left_pose: list[list[float]],
+        right_pose: list[list[float]],
+    ) -> list[list[float]] | None:
+        geometry = self.geometry_status(left_pose, right_pose)
+        left_position = self._mapped_position(left_pose)
+        right_position = self._mapped_position(right_pose)
+        delta = [right_position[index] - left_position[index] for index in range(3)]
+        line_xy = [delta[0], delta[1], 0.0]
+        if norm3(line_xy) < self.min_separation_m:
             return None
 
-        x_axis = normalize3([left_xy[0] + right_xy[0], left_xy[1] + right_xy[1], 0.0])
-        # left-right defines positive lateral direction. Gram-Schmidt removes
-        # the residual confirmation-angle error instead of carrying it into XYZ.
+        left_forward = self._mapped_forward(left_pose)
+        right_forward = self._mapped_forward(right_pose)
+        left_xy = [left_forward[0], left_forward[1], 0.0]
+        right_xy = [right_forward[0], right_forward[1], 0.0]
         left_from_right = [-line_xy[0], -line_xy[1], 0.0]
-        lateral_projection = dot3(left_from_right, x_axis)
-        y_axis = normalize3(
-            [left_from_right[index] - lateral_projection * x_axis[index] for index in range(3)]
-        )
+        if self.strict_geometry and not geometry["ok"]:
+            return None
+
+        # The controller line always defines lateral +Y. Average controller
+        # forward is projected orthogonally to it for +X. In relaxed mode this
+        # accepts any ordinary two-hand pose instead of requiring exactly
+        # 40 cm spacing and a pre-aligned pointing direction.
+        y_axis = normalize3(left_from_right)
+        average_forward = [
+            left_xy[index] + right_xy[index] for index in range(3)
+        ]
+        forward_projection = dot3(average_forward, y_axis)
+        x_candidate = [
+            average_forward[index] - forward_projection * y_axis[index]
+            for index in range(3)
+        ]
+        if norm3(x_candidate) <= 1e-6:
+            x_candidate = [y_axis[1], -y_axis[0], 0.0]
+        x_axis = normalize3(x_candidate)
         z_axis = normalize3(cross3(x_axis, y_axis))
         if z_axis[2] < 0.0:
             y_axis = [-value for value in y_axis]
@@ -390,7 +443,9 @@ def build_quest_input_packet(
     tcp_rot_offset_wxyz: str = "0.0,0.70710678,0.0,0.70710678",
     calibration_confirmed: bool = False,
     both_squeeze: bool = False,
+    calibration_strict_geometry: bool = False,
     calibration_rotation_base_from_mapped: list[list[float]] | None = None,
+    calibration_geometry: dict[str, Any] | None = None,
     serial_number: str = DEFAULT_SERIAL_NUMBER,
     joint_group: str = DEFAULT_JOINT_GROUP,
 ) -> dict:
@@ -423,7 +478,9 @@ def build_quest_input_packet(
         ),
         "calibration_confirmed": bool(calibration_confirmed),
         "both_squeeze": bool(both_squeeze),
+        "calibration_strict_geometry": bool(calibration_strict_geometry),
         "calibration_rotation_base_from_mapped": calibration_rotation_base_from_mapped,
+        "calibration_geometry": calibration_geometry,
         "monotonic_time": float(now),
     }
 
@@ -598,16 +655,41 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--axis-map", default=DEFAULT_AXIS_MAP)
     parser.add_argument("--position-delta-scale", type=float, default=1.0)
     parser.add_argument("--position-deadband", type=float, default=0.0)
-    parser.add_argument("--engage-settle-sec", type=float, default=0.25)
+    parser.add_argument("--engage-settle-sec", type=float, default=0.0)
+    parser.add_argument(
+        "--shared-calibration-settle-sec",
+        type=float,
+        default=0.25,
+        help="Continuous geometry-pass time required before the first dual-squeeze locks the frame.",
+    )
+    parser.add_argument(
+        "--strict-shared-calibration",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Require the legacy 40 cm spacing and direction checks before dual-squeeze calibration.",
+    )
+    parser.add_argument(
+        "--calibration-min-separation-m",
+        type=float,
+        default=DEFAULT_MIN_HAND_SEPARATION_M,
+        help="Minimum horizontal controller separation needed to define the shared lateral axis.",
+    )
     parser.add_argument("--right-tcp-rot-offset", default="0.0,0.70710678,0.0,0.70710678")
-    parser.add_argument("--enable-threshold", type=float, default=0.5)
+    parser.add_argument("--enable-threshold", type=float, default=0.15)
     parser.add_argument("--gripper-threshold", type=float, default=0.5)
     parser.add_argument("--televuer-root", type=Path, default=DEFAULT_TELEVUER_ROOT)
     parser.add_argument("--cert-file", default=str(DEFAULT_CERT_FILE))
     parser.add_argument("--key-file", default=str(DEFAULT_KEY_FILE))
     parser.add_argument("--rate-hz", type=float, default=30.0)
     parser.add_argument("--log-hz", type=float, default=2.0)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if float(args.calibration_min_separation_m) <= 0.0:
+        parser.error("--calibration-min-separation-m must be positive")
+    if float(args.shared_calibration_settle_sec) < 0.0:
+        parser.error("--shared-calibration-settle-sec must be non-negative")
+    if not 0.0 <= float(args.enable_threshold) <= 1.0:
+        parser.error("--enable-threshold must be within [0, 1]")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -655,7 +737,9 @@ def main(argv: list[str] | None = None) -> int:
                 4,
                 "right-tcp-rot-offset",
             ),
-            settle_sec=args.engage_settle_sec,
+            settle_sec=args.shared_calibration_settle_sec,
+            strict_geometry=args.strict_shared_calibration,
+            min_separation_m=args.calibration_min_separation_m,
         )
     publisher = UdpJsonPublisher(args.udp_host, args.udp_port)
     reset_receiver = CalibrationResetUdpReceiver(args.reset_udp_host, args.reset_udp_port)
@@ -665,8 +749,16 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "[Rizon4QuestTargetPublisher] Enter VR and allow controller tracking. "
         + (
-            "Match the two checks in print.sh, then hold squeeze on BOTH controllers "
-            "to lock the shared Quest-to-Isaac frame. Release pauses; the next squeeze resumes relative motion."
+            (
+                "Align both controllers to 0.40+/-0.01 m and parallel forward directions, then "
+                "hold squeeze on BOTH controllers to lock the shared Quest-to-Isaac frame. "
+                "Geometry mismatch blocks control. The confirming squeeze also starts relative "
+                "motion from an exact zero-delta first frame."
+                if args.strict_shared_calibration
+                else "Hold squeeze on BOTH tracked controllers once to lock the current shared "
+                "Quest-to-Isaac frame. Release pauses; the next squeeze resumes relative motion "
+                "without a jump."
+            )
             if args.side == "both"
             else f"Hold {args.enable_button} on the {args.side} controller, then move it."
         ),
@@ -744,6 +836,13 @@ def main(argv: list[str] | None = None) -> int:
                 and len(sides) == 2
                 and all(squeeze_values.get(side, False) for side in ("left", "right"))
             )
+            calibration_geometry = (
+                None
+                if shared_calibration is None
+                else shared_calibration.geometry_status(
+                    controller_matrices.get("left"), controller_matrices.get("right")
+                )
+            )
             calibration_was_confirmed = bool(
                 shared_calibration is not None and shared_calibration.confirmed
             )
@@ -797,11 +896,13 @@ def main(argv: list[str] | None = None) -> int:
                             shared_calibration is not None and shared_calibration.confirmed
                         ),
                         both_squeeze=both_squeeze,
+                        calibration_strict_geometry=bool(args.strict_shared_calibration),
                         calibration_rotation_base_from_mapped=(
                             None
                             if shared_calibration is None
                             else shared_calibration.rotation_calibrated_from_mapped
                         ),
+                        calibration_geometry=calibration_geometry,
                         now=now,
                         axis_map=args.axis_map,
                         position_delta_scale=args.position_delta_scale,
@@ -837,7 +938,15 @@ def main(argv: list[str] | None = None) -> int:
                         publisher.publish(packet)
                         sent += 1
                 if shared_calibration is not None and not shared_calibration.confirmed:
-                    reason = "confirming_frame" if both_squeeze else "awaiting_dual_confirmation"
+                    if (
+                        both_squeeze
+                        and args.strict_shared_calibration
+                        and calibration_geometry is not None
+                        and not calibration_geometry["ok"]
+                    ):
+                        reason = "geometry_mismatch"
+                    else:
+                        reason = "confirming_frame" if both_squeeze else "awaiting_dual_confirmation"
                 states.append(
                     (side, button_value, enabled, control_enabled, gripper_value, gripper_closed, reason, packet)
                 )

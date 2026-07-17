@@ -31,14 +31,33 @@
 | --- | --- | --- |
 | `--studio-root` | `STUDIO_ROOT` | Elements Studio 安装根目录。 |
 
+## 统一 Web 采集入口
+
+### `start_all.sh`
+
+正式采集统一入口。它先调用 `start.sh` 冷启动双臂控制栈，再启动 `web_control_dashboard.py` 和带 UDP 控制/状态通道的 recorder。默认 Web 地址为 `http://<HOST_IP>:8080`。
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `WEB_HOST` / `WEB_PORT` | `0.0.0.0` / `8080` | Dashboard 监听地址；仅应暴露在可信局域网。 |
+| `RECORDER_CONTROL_PORT` | `57687` | Dashboard 向 recorder 发送命令的本机 UDP 端口。 |
+| `RECORDER_STATUS_PORT` | `57688` | Recorder 向 dashboard 发布状态的本机 UDP 端口。 |
+| `TASK_NAME` / `EPISODES` / `FPS` | `pick_place_redblock_dual` / `10` / `30` | 传给 `record.sh` 的采集参数。 |
+
+`start.sh` 仍是只重启控制栈的低层入口，会保留已有 recorder；`print.sh` 与 `record.sh` 是兼容诊断入口。Dashboard 独占 Isaac 状态 UDP `57684`，运行期间不要再启动 `print.sh`。
+
+### `web_control_dashboard.py`
+
+标准库 HTTP 服务，无额外 Web 框架依赖。`GET /api/status` 返回双臂与 recorder 的最新结构化状态；`POST /api/recorder` 只接受 `start/pause/save/discard/reset/quit`。网页不连接 gateway、不读取相机帧，因此不会与 30 Hz recorder 争用唯一采样连接。
+
 ## 数据 gateway
 
 ### `start_data_gateway.py`
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--sample-endpoint` | `tcp://0.0.0.0:5590` | recorder 请求样本、保存后发送 reset 的 TCP 地址。主流程使用 `5690`。 |
-| `--bridge-endpoint` | `tcp://0.0.0.0:5591` | Isaac 推送相机和机器人状态的 TCP 地址。主流程使用 `5691`。 |
+| `--sample-endpoint` | `tcp://0.0.0.0:5590` | recorder 请求样本、保存后发送 reset 的 TCP 地址。主流程使用 `5790`。 |
+| `--bridge-endpoint` | `tcp://0.0.0.0:5591` | Isaac 推送相机和机器人状态的 TCP 地址。主流程使用 `5791`。 |
 | `--backend` | `bridge` | `bridge` 接真实 Isaac；`fake` 只用于数据工具链 smoke。 |
 | `--fps` | `30` | fake backend 生成频率及其时间基准；真实 bridge 的相机频率由 Isaac 控制。 |
 | `--image-size` | `640x480` | fake backend 图像尺寸。 |
@@ -74,33 +93,48 @@
 | --- | --- | --- |
 | `--python` | `ISAAC_PYTHON` | 运行 DRDK streamer 的 Python。 |
 | `--pipeline-config` | `start.sh` 默认传唯一 pipeline | 从 `control.drdk` 读取碰撞监视、接触 wrench 与关节力矩保护参数；显式 CLI 值优先。 |
+| `--output-torque-regulator/--no-output-torque-regulator` | pipeline：启用 | 在两臂 IDLE 时通过官方 RDK Safety 接口配置输出力矩调节器。 |
+| `--output-torque-limiting-factor` | pipeline：`0.85` | 输出力矩饱和值为 `RobotInfo.tau_max × factor`；本项目限制为 `(0,1]`。 |
+| `--output-torque-error-threshold` | pipeline：`50` | 未调节输出连续超过饱和值多少个周期后触发 runtime minor fault。 |
+| `--safety-password-env` | `FLEXIV_SAFETY_PASSWORD` | 只指定保存安全密码的环境变量名；密码本身不进入参数、日志或仓库。 |
 | `--scene-config` | 必填 | 与 Isaac 相同的双臂 scene YAML；左右 `robots[].initial_q` 是 `SetNullSpacePosture()` 的任务 initq。 |
 | `--left/right-serial-number` | Stage2 左右 alias | DRDK `RobotPair` 连接的两个不同 runtime alias。 |
 | `--left/right-port` | `57680/57681` | 接收 Isaac 左右目标的 UDP 端口。 |
 | `--left/right-status-port` | `57682/57683` | 向 Isaac 返回左右 ready、参考 TCP 和当前 TCP。 |
 | `--left/right-translation-in-world` | scene `robots[].position` | DRDK RobotPair 世界坐标中的 base 平移，供双臂几何碰撞计算；CLI 可显式覆盖。 |
-| `--self-collision-monitor/--no-self-collision-monitor` | pipeline：关闭 | 启停官方 DRDK `SelfCollisionMonitor`；`start.sh` 可通过 `SELF_COLLISION_MONITOR=true/false` 临时覆盖。 |
+| `--self-collision-monitor/--no-self-collision-monitor` | pipeline：开启 | 启停官方 DRDK `SelfCollisionMonitor`；`start.sh` 可通过 `SELF_COLLISION_MONITOR=true/false` 临时覆盖。 |
 | `--self-collision-min-distance-m` | `0.05` | 两臂任意受检几何点的最小允许距离；触发后 DRDK 停止双臂。 |
 | `--self-collision-loop-interval-ms` | `10` | 后台碰撞检测周期，默认 10 ms（100 Hz）。 |
 | `--self-collision-skip-link` | 空 | 排除检查的 link 名称，可重复传入；默认不排除。 |
 | `--contact-wrench-control/--no-contact-wrench-control` | pipeline：启用 | 同时控制 runtime `SetMaxContactWrench()` 和上层目标冻结器。 |
 | `--joint-torque-control/--no-joint-torque-control` | pipeline：启用 | 启停基于 `states().tau/tau_dot/tau_ext` 与 `info().tau_max` 的前置保护。 |
-| `--joint-torque-trigger-ratio` | `0.85` | 任一关节测量、外力或短期预测力矩达到 `tau_max` 的该比例时回退。 |
-| `--joint-torque-release-ratio` | `0.70` | 全部关节低于该比例后才开始释放计时。 |
+| `--joint-torque-trigger-ratio` | pipeline：`0.72` | 任一关节测量、外力或短期预测力矩达到 `tau_max` 的该比例时回退。 |
+| `--joint-torque-release-ratio` | pipeline：`0.55` | 全部关节低于该比例后才开始释放计时。 |
 | `--joint-torque-trigger-samples` | `1` | 连续触发样本数。默认单样本响应，预测项负责提前量。 |
-| `--joint-torque-release-dwell-sec` | `0.30` | 解除前必须连续安全的时间。 |
-| `--joint-torque-prediction-horizon-sec` | `0.02` | 使用 `tau + tau_dot * horizon` 进行短期外推。 |
-| `--joint-torque-rollback-sec` | `0.10` | 触发时选择至少这么早以前发送的最近 target 作为回退点。 |
-| `--left/right-max-contact-wrench` | pipeline：`20,20,20,3,3,3` | 左右 TCP 最大接触 `[Fx,Fy,Fz,Mx,My,Mz]`，单位 `[N,Nm]`。 |
-| `--contact-wrench-freeze-trigger-ratio` | `0.95` | 实测 wrench 达到对应上限的比例后计入目标冻结触发。 |
-| `--contact-wrench-release-ratio` | `0.70` | 六轴 wrench 全部降到该比例以下才进入恢复计时。 |
-| `--contact-wrench-trigger-samples` | `3` | 连续超限样本数，避免单帧噪声触发。 |
-| `--contact-wrench-release-dwell-sec` | `0.30` | 低于恢复阈值后必须连续稳定的时间。 |
+| `--joint-torque-release-dwell-sec` | pipeline：`0.15` | 解除前必须连续安全的时间。 |
+| `--joint-torque-prediction-horizon-sec` | pipeline：`0.025` | 使用 runtime `tau_dot` 或连续 `tau` 的本地差分进行短期外推。 |
+| `--joint-torque-rollback-sec` | pipeline：`0.05` | 触发时选择至少这么早以前发送的最近 target 作为回退点。 |
+| `--left/right-max-contact-wrench` | pipeline：`30,30,30,5,5,5` | 左右 TCP 最大接触 `[Fx,Fy,Fz,Mx,My,Mz]`，单位 `[N,Nm]`。 |
+| `--contact-wrench-freeze-trigger-ratio` | pipeline：`0.90` | 实测 wrench 达到对应上限的比例后计入目标冻结触发。 |
+| `--contact-wrench-release-ratio` | pipeline：`0.55` | 六轴 wrench 全部降到该比例以下才进入恢复计时。 |
+| `--contact-wrench-trigger-samples` | pipeline：`1` | 连续触发样本数；当前单样本响应轻碰撞。 |
+| `--contact-wrench-release-dwell-sec` | pipeline：`0.12` | 低于恢复阈值后必须连续稳定的时间。 |
 | `--nullspace-tracking-weight` | `0.5` | 两臂参考关节姿态跟踪权重，范围 `[0.1, 1.0]`。 |
-| `--max-linear-speed-m-s` | `0.5` | NRT runtime 轨迹生成器的最大线速度。 |
-| `--max-angular-speed-rad-s` | `0.75` | NRT runtime 轨迹生成器的最大角速度。 |
-| `--max-linear-acc-m-s2` | `2.0` | 最大线加速度。 |
-| `--max-angular-acc-rad-s2` | `5.0` | 最大角加速度。 |
+| `--max-linear-speed-m-s` | 当前启动栈：`3.0` | 两套 Studio normal safety 的 TCP 线速度上限。 |
+| `--max-angular-speed-rad-s` | 当前启动栈：`12.0` | 两套 Studio normal safety 的 TCP 角速度上限。 |
+| `--max-linear-acc-m-s2` | 当前启动栈：`8.0` | 最大线加速度。 |
+| `--max-angular-acc-rad-s2` | 当前启动栈：`30.0` | 最大角加速度。 |
+| `--target-resampling-control` | pipeline：启用 | 对 30 Hz Cartesian target 做有界 SE(3) 重采样并发送速度前馈。 |
+| `--target-resample-rate-hz` | pipeline：`500` | NRT pose/velocity 命令循环目标频率；不改变 2000 Hz 物理闭环。 |
+| `--target-prediction-horizon-sec` | pipeline：`0.012` | 最长短时预测窗口；超过后保持 pose 并把速度前馈归零。 |
+| `--target-velocity-filter-alpha` | pipeline：`0.65` | 新速度估计权重，范围 `[0,1]`。 |
+| `--target-feedforward-scale` | pipeline：`1.0` | 估计速度进入 NRT velocity feed-forward 前的比例。 |
+| `--target-max-linear-feedforward-m-s` | pipeline：`3.0` | 不超过 Studio normal safety 的线速度前馈上限。 |
+| `--target-max-angular-feedforward-rad-s` | pipeline：`12.0` | 不超过 Studio normal safety 的角速度前馈上限。 |
+| `--target-torque-soft-ratio` | pipeline：`0.58` | 峰值关节力矩风险比达到该值后开始连续降低预测、前馈和 NRT 速度/加速度。 |
+| `--target-min-motion-scale` | pipeline：`0.20` | 到达关节力矩冻结阈值前允许的最小运动倍率。 |
+| `--target-linear-velocity-deadband-m-s` | `0.005` | 低于该值的线速度估计归零。 |
+| `--target-angular-velocity-deadband-rad-s` | `0.02` | 低于该值的角速度估计归零。 |
 | `--network-interface-whitelist` | 空 | DRDK 发现允许使用的本机 IPv4，逗号分隔。 |
 | `--connect-timeout-sec` | `30` | 仅启动阶段等待 SimPlugin 使两套 runtime 可发现；连接成功后不用于故障重连。 |
 | `--initial-joint-timeout-sec` | `45` | NRT joint-position 初始化总超时。 |
@@ -108,17 +142,17 @@
 | `--initial-joint-settle-sec` | `0.5` | 关节位置和速度进入容差后必须连续稳定的时间。 |
 | `--initial-joint-tolerance-rad` | `0.02` | DRDK 判断两臂到达 `initial_q` 的最大关节位置误差。 |
 | `--initial-joint-speed-tolerance-rad-s` | `0.03` | 初始化完成的最大关节速度。 |
-| `--initial-joint-max-vel-rad-s` | `0.5` | `SendJointPosition()` 初始化轨迹的各关节最大速度。 |
-| `--initial-joint-max-acc-rad-s2` | `1.0` | 初始化轨迹的各关节最大加速度。 |
-| `--reset-joint-max-vel-rad-s` | `0.2` | reset 回 `initial_q` 时的各关节最大速度，不影响冷启动和 Cartesian 遥操。 |
-| `--reset-joint-max-acc-rad-s2` | `0.4` | reset 回程的各关节最大加速度。 |
+| `--initial-joint-max-vel-rad-s` | 当前启动栈：`2.0944` | 统一速度上限，取生成模型最慢的 J1/J2 `dq_max`。 |
+| `--initial-joint-max-acc-rad-s2` | 当前启动栈：`2.0` | 初始化轨迹的各关节最大加速度。 |
+| `--reset-joint-max-vel-rad-s` | 当前启动栈：`2.0944` | reset 统一关节速度上限，取生成模型最慢的 J1/J2 `dq_max`。 |
+| `--reset-joint-max-acc-rad-s2` | 当前启动栈：`3.0` | reset 回程的各关节最大加速度。 |
 | `--reset-max-attempts` | `3` | 同一 `reset_seq` 在回程再次 fault 时最多执行的完整恢复次数。 |
 | `--reset-retry-delay-sec` | `0.5` | 两次恢复尝试之间的等待时间。 |
 | `--clear-fault/--no-clear-fault` | 不清故障 | 仅控制首次启动是否清故障；显式协调 reset 始终尝试清除双臂 fault。 |
 
-唯一 pipeline 的 `control.drdk` 是上述安全参数的主配置源，`start.sh` 默认加载它，显式 CLI 或 `SELF_COLLISION_MONITOR` 仅作为临时覆盖。脚本可选启动官方 `SelfCollisionMonitor`。启用后，监视器独立以 100 Hz 检查两臂几何距离，达到阈值时直接停止双臂并锁存 `self_collision_stopped`，需要排除近距离条件后执行协调 reset；它不检查机械臂与桌面或工件的碰撞。当前 pipeline 默认关闭。脚本短暂使用 `NRT_JOINT_POSITION + SendJointPosition()` 平滑到 scene config 的左右 `initial_q`；每次切入 `NRT_CARTESIAN_MOTION_FORCE` 后重设 `SetNullSpacePosture()`，并在 `contact_wrench.enabled: true` 时调用 `SetMaxContactWrench()`。streamer 以 `tcp_wrench` 对两侧独立做迟滞检测：连续三帧达到 95% 上限时把该侧目标冻结在当前 TCP，全部分量降到 70% 以下并稳定 0.30 s 后恢复。独立的关节力矩保护从 `RobotPair.info().tau_max` 取得每关节限制，以 `max(abs(tau), abs(tau_ext), abs(tau + tau_dot * 0.02)) / tau_max` 判定风险；达到 85% 时回退至至少 0.10 s 前的最近 target，全部关节低于 70% 并稳定 0.30 s 后恢复。两种保护解除时都把最新输入重映射到安全输出，禁止追赶冻结期间累积目标。关节轨迹、IK、动力学和力矩仍由 runtime 处理。任一侧故障会使 RobotPair 两侧同时 not-ready。显式 reset 回程再次 fault 时，streamer 会从新的实际 q 低速重建 NRT 基准并有界重试；耗尽次数后保持存活，等待更高的 `reset_seq`。
+唯一 pipeline 的 `control.drdk` 是上述安全参数的主配置源，`start.sh` 默认加载它，显式 CLI 或 `SELF_COLLISION_MONITOR` 仅作为临时覆盖。官方 `SelfCollisionMonitor` 默认开启，独立以 100 Hz 检查两臂几何距离；小于 0.05 m 时直接停止双臂并锁存 `self_collision_stopped`，但不检查机械臂与桌面或工件的碰撞。协调 reset 会临时停止监视器，让 NRT 关节轨迹把已接近的双臂分开并回到安全 `initial_q`，落位后重新创建并启动监视器。脚本短暂使用 `NRT_JOINT_POSITION + SendJointPosition()` 平滑到 scene config 的左右 `initial_q`；每次切入 `NRT_CARTESIAN_MOTION_FORCE` 后重设 `SetNullSpacePosture()`，并在 `contact_wrench.enabled: true` 时调用 `SetMaxContactWrench()`。streamer 以 `tcp_wrench` 对两侧独立做迟滞检测：单样本达到 90% 上限时把该侧目标冻结在当前 TCP，全部分量降到 55% 以下并稳定 0.12 s 后恢复。独立的关节力矩保护从 `RobotPair.info().tau_max` 取得每关节限制，以 `tau`、`tau_ext` 及 25 ms 短期预测的最大值判定风险；预测斜率逐关节选用 runtime `tau_dot` 和连续 `tau` 本地差分中更保守者。达到 72% 时回退至至少 0.05 s 前的最近 target，全部关节低于 55% 并稳定 0.15 s 后恢复。两种保护解除时都把最新输入重映射到安全输出，禁止追赶冻结期间累积目标。关节轨迹、IK、动力学和力矩仍由 runtime 处理。任一侧故障会使 RobotPair 两侧同时 not-ready。显式 reset 回程再次 fault 时，streamer 会从新的实际 q 低速重建 NRT 基准并有界重试；耗尽次数后保持存活，等待更高的 `reset_seq`。
 
-`control.joint_effort_limits_nm` 把 Isaac articulation 的 J1..J7 力矩上限设为 `[150,150,80,80,49,49,49] Nm`，与 Studio 模拟 Rizon4 已有的 safety-function 配置一致。它不替代更低的 TCP 接触保护和基于 `RobotInfo.tau_max` 的 85% 关节力矩回退。
+`control.joint_effort_limits_nm` 把 Isaac articulation 的 J1..J7 力矩上限设为 `[150,150,80,80,49,49,49] Nm`，与 Studio 模拟 Rizon4 已有的 safety-function 配置一致。它不替代更低的 TCP 接触保护和基于 `RobotInfo.tau_max` 的 72% 关节力矩回退。
 
 ## Isaac 控制入口
 
@@ -237,9 +271,11 @@ Stage2 双臂 Isaac 启动入口，参数语义与单臂入口一致，差异如
 | `--axis-map` | `-z,-x,y` | OpenXR 平移轴到机器人基座轴映射。 |
 | `--position-delta-scale` | `1.0` | publisher 侧位移缩放；推荐保持 1，由 Isaac/Hydra 统一缩放。 |
 | `--position-deadband` | `0.0` | publisher 侧平移死区；默认不重复过滤，由 Isaac/Hydra 的 `quest.position_deadband_m` 统一处理。 |
-| `--engage-settle-sec` | `0.25` | 按下使能后建立参考点的等待时间。 |
+| `--engage-settle-sec` | `0` | 按下使能的当前帧立即建立相对参考点。 |
+| `--strict-shared-calibration/--no-strict-shared-calibration` | 关闭严格模式 | 严格模式要求 40 cm/方向匹配；默认只把它们作为诊断指标。 |
+| `--calibration-min-separation-m` | `0.05` | 宽松模式下用于定义双手横向轴的最小水平间距。 |
 | `--right-tcp-rot-offset` | 固定 wxyz | 右手控制器到 TCP 的姿态偏移。 |
-| `--enable-threshold` | `0.5` | squeeze/trigger 等模拟量使能阈值。 |
+| `--enable-threshold` | `0.15` | squeeze/trigger 等模拟量使能阈值。 |
 | `--televuer-root` | 仓库 `third_party/televuer` | TeleVuer 源码目录。 |
 | `--cert-file/--key-file` | `configs/xr_teleoperate` | HTTPS 证书和私钥。 |
 | `--rate-hz` | `30` | Quest 包发布频率。 |
@@ -260,7 +296,7 @@ Stage2 双臂 Isaac 启动入口，参数语义与单臂入口一致，差异如
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--gateway-endpoint` | `tcp://127.0.0.1:5590` | gateway sample 地址；README 使用 `5690`。 |
+| `--gateway-endpoint` | `tcp://127.0.0.1:5590` | gateway sample 地址；README 主流程使用 `5790`。 |
 | `--fps` | `30` | 录制采样频率及 data.json 图像 fps。 |
 | `--episodes` | `1` | 本次进程需要保存的 episode 数。 |
 | `--task-name` | 与 `--task-dir` 二选一 | `--output-root` 下的安全文件夹名。 |
@@ -277,6 +313,8 @@ Stage2 双臂 Isaac 启动入口，参数语义与单臂入口一致，差异如
 | `--reset-key` | `r` | 立即请求 reset。 |
 | `--quit-key` | `q` | 退出。 |
 | `--auto-start` | 关闭 | 自动开始；非 TTY 输入时也自动启用。手动录制不使用此参数。 |
+| `--web-control-host/port` | `127.0.0.1/0` | 可选 UDP Web 命令入口；端口为 0 时关闭。非零时无 TTY 也等待网页点击开始。 |
+| `--web-status-host/port` | `127.0.0.1/0` | 可选结构化录制状态 UDP 目标；端口为 0 时关闭。 |
 | `--task-goal/--task-desc/--task-steps` | Stage1 默认文本 | 写入 data.json 的任务语义描述。 |
 
 ## 转换与验证

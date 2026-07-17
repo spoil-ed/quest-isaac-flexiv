@@ -330,17 +330,22 @@ def quest_hand_match_lines(packet: dict[str, Any], *, color: bool = False) -> tu
         left.get("calibration_confirmed", False) and right.get("calibration_confirmed", False)
     )
     both_squeeze = bool(left.get("both_squeeze", False) and right.get("both_squeeze", False))
+    strict_geometry = bool(
+        left.get("calibration_strict_geometry", False)
+        or right.get("calibration_strict_geometry", False)
+    )
     geometry_ok = spacing_ok and direction_ok
     if calibration_confirmed:
         frame_state = "LOCKED"
-    elif both_squeeze and geometry_ok:
+    elif both_squeeze and (geometry_ok or not strict_geometry):
         frame_state = "CONFIRMING"
     else:
-        frame_state = "HOLD_BOTH_SQUEEZE" if geometry_ok else "ALIGN"
+        frame_state = "HOLD_BOTH_SQUEEZE" if geometry_ok or not strict_geometry else "ALIGN"
+    gate_mode = "STRICT" if strict_geometry else "ADVISORY"
     lines = [
         f"SPACING {_status(spacing_ok)} | delta_base_xyz={_numbers(delta, 3)}m "
         f"distance={separation:.3f}m target={HAND_SEPARATION_M:.2f}±{HAND_SEPARATION_TOLERANCE_M:.2f}m "
-        f"frame={frame_state}",
+        f"gate={gate_mode} frame={frame_state}",
         f"DIRECTION {_status(direction_ok)} | target=perpendicular-to-line-in-XY,same-way "
         f"left_perp_error={left_angle:.1f}deg right_perp_error={right_angle:.1f}deg "
         f"mutual_error={mutual_angle:.1f}deg"
@@ -351,7 +356,7 @@ def quest_hand_match_lines(packet: dict[str, Any], *, color: bool = False) -> tu
             f"{ANSI_GREEN_BOLD}{line}{ANSI_RESET}" if " PASS |" in line else line
             for line in lines
         ]
-    return lines, geometry_ok and calibration_confirmed
+    return lines, calibration_confirmed and (geometry_ok or not strict_geometry)
 
 
 def _axis_correction_text(delta: list[float], *, unit_scale: float = 100.0, unit: str = "cm") -> str:

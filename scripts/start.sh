@@ -123,6 +123,47 @@ start_detached() {
   info "$label stderr=$stderr_log"
 }
 
+start_detached_pty() {
+  local label="$1"
+  local pattern="$2"
+  shift 2
+
+  local existing_pid
+  existing_pid="$(first_matching_pid "$pattern")"
+  if [[ -n "$existing_pid" ]]; then
+    info "$label already running (pid=$existing_pid)"
+    return 0
+  fi
+
+  mkdir -p "$REPO_ROOT/logs"
+  local stamp stdout_log stderr_log pid command
+  stamp="$(date +%Y%m%d_%H%M%S)"
+  stdout_log="$REPO_ROOT/logs/${label}_${stamp}.stdout.log"
+  stderr_log="$REPO_ROOT/logs/${label}_${stamp}.stderr.log"
+  printf -v command '%q ' "$@"
+  # TeleVuer's server process requires a terminal even though it is otherwise
+  # headless. util-linux script supplies a private PTY while setsid keeps the
+  # process alive after this launcher exits.
+  setsid script --quiet --return --flush --command "$command" /dev/null \
+    >"$stdout_log" 2>"$stderr_log" </dev/null &
+  pid=$!
+  info "$label started with PTY (pid=$pid)"
+  info "$label stdout=$stdout_log"
+  info "$label stderr=$stderr_log"
+}
+
+wait_for_tcp_listener() {
+  local description="$1"
+  local port="$2"
+  local timeout_sec="$3"
+  local deadline=$((SECONDS + timeout_sec))
+  while ! ss -ltnH | awk -v port=":$port" '$4 ~ port "$" {found=1} END {exit !found}'; do
+    (( SECONDS >= deadline )) && die "timed out waiting for $description on TCP port $port"
+    sleep 1
+  done
+  info "$description listening on TCP port $port"
+}
+
 wait_for_file_pattern() {
   local description="$1"
   local pattern="$2"
@@ -156,7 +197,9 @@ wait_for_process_log_pattern() {
 
 require_command docker
 require_command pgrep
+require_command script
 require_command setsid
+require_command ss
 
 ISAAC_CONDA_ENV="${ISAAC_CONDA_ENV:-isaacsim}"
 STARTUP_TIMEOUT_SEC="${STARTUP_TIMEOUT_SEC:-120}"
@@ -187,6 +230,26 @@ PIPELINE_CONFIG="$(resolve_from_repo "${PIPELINE_CONFIG:-configs/pipelines/dual_
 FLEXIV_SIM_JOINT_EFFORT_LIMITS_NM="$("$ISAAC_PYTHON" \
   -c 'import sys,yaml; values=(yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {})["control"]["joint_effort_limits_nm"]; print(",".join(str(float(value)) for value in values))' \
   "$PIPELINE_CONFIG")"
+mapfile -t FLEXIV_MOTION_LIMITS < <("$ISAAC_PYTHON" -c '
+import sys, yaml
+control = (yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {})["control"]
+for key in (
+    "max_linear_speed_m_s", "max_angular_speed_rad_s",
+    "max_linear_acc_m_s2", "max_angular_acc_rad_s2",
+    "initial_joint_max_vel_rad_s", "initial_joint_max_acc_rad_s2",
+    "reset_joint_max_vel_rad_s", "reset_joint_max_acc_rad_s2",
+):
+    print(float(control[key]))
+' "$PIPELINE_CONFIG")
+[[ ${#FLEXIV_MOTION_LIMITS[@]} -eq 8 ]] || die "pipeline must define all motion limits"
+FLEXIV_MAX_LINEAR_SPEED_M_S="${FLEXIV_MOTION_LIMITS[0]}"
+FLEXIV_MAX_ANGULAR_SPEED_RAD_S="${FLEXIV_MOTION_LIMITS[1]}"
+FLEXIV_MAX_LINEAR_ACC_M_S2="${FLEXIV_MOTION_LIMITS[2]}"
+FLEXIV_MAX_ANGULAR_ACC_RAD_S2="${FLEXIV_MOTION_LIMITS[3]}"
+FLEXIV_INITIAL_JOINT_MAX_VEL_RAD_S="${FLEXIV_MOTION_LIMITS[4]}"
+FLEXIV_INITIAL_JOINT_MAX_ACC_RAD_S2="${FLEXIV_MOTION_LIMITS[5]}"
+FLEXIV_RESET_JOINT_MAX_VEL_RAD_S="${FLEXIV_MOTION_LIMITS[6]}"
+FLEXIV_RESET_JOINT_MAX_ACC_RAD_S2="${FLEXIV_MOTION_LIMITS[7]}"
 if [[ -n "$TASK_NAME" ]]; then
   [[ -z "${SCENE_CONFIG:-}" ]] \
     || die "--task and SCENE_CONFIG cannot be used together; choose one scene selector"
@@ -232,6 +295,8 @@ fi
 info "scene=$SCENE_CONFIG"
 info "pipeline=$PIPELINE_CONFIG"
 info "simulation joint effort limits=$FLEXIV_SIM_JOINT_EFFORT_LIMITS_NM Nm"
+info "motion limits: tcp=$FLEXIV_MAX_LINEAR_SPEED_M_S m/s,$FLEXIV_MAX_ANGULAR_SPEED_RAD_S rad/s "\
+"reset=$FLEXIV_RESET_JOINT_MAX_VEL_RAD_S rad/s,$FLEXIV_RESET_JOINT_MAX_ACC_RAD_S2 rad/s^2"
 info "left=$LEFT_ROBOT_SERIAL (Docker), right=$RIGHT_ROBOT_SERIAL (host)"
 if [[ ${#SELF_COLLISION_MONITOR_ARGS[@]} -gt 0 ]]; then
   info "DRDK SelfCollisionMonitor override=${SELF_COLLISION_MONITOR_ARGS[0]}"
@@ -338,8 +403,8 @@ else
     --left-rdk-status-udp-port 57682 \
     --right-rdk-status-udp-port 57683 \
     --target-pose-publish-hz 30 \
-    --max-linear-speed-m-s 1.0 \
-    --max-angular-speed-rad-s 0.75 \
+    --max-linear-speed-m-s "$FLEXIV_MAX_LINEAR_SPEED_M_S" \
+    --max-angular-speed-rad-s "$FLEXIV_MAX_ANGULAR_SPEED_RAD_S" \
     --gateway-endpoint tcp://127.0.0.1:5791 \
     --gateway-fps 30 \
     --gateway-jpeg-quality 90 \
@@ -383,13 +448,17 @@ else
     "${SELF_COLLISION_MONITOR_ARGS[@]}" \
     --connect-timeout-sec 120 \
     --nullspace-tracking-weight 1.0 \
-    --initial-joint-max-vel-rad-s 0.5 \
-    --initial-joint-max-acc-rad-s2 1.0 \
-    --max-linear-speed-m-s 1.0 \
-    --max-angular-speed-rad-s 0.75
+    --initial-joint-max-vel-rad-s "$FLEXIV_INITIAL_JOINT_MAX_VEL_RAD_S" \
+    --initial-joint-max-acc-rad-s2 "$FLEXIV_INITIAL_JOINT_MAX_ACC_RAD_S2" \
+    --reset-joint-max-vel-rad-s "$FLEXIV_RESET_JOINT_MAX_VEL_RAD_S" \
+    --reset-joint-max-acc-rad-s2 "$FLEXIV_RESET_JOINT_MAX_ACC_RAD_S2" \
+    --max-linear-speed-m-s "$FLEXIV_MAX_LINEAR_SPEED_M_S" \
+    --max-angular-speed-rad-s "$FLEXIV_MAX_ANGULAR_SPEED_RAD_S" \
+    --max-linear-acc-m-s2 "$FLEXIV_MAX_LINEAR_ACC_M_S2" \
+    --max-angular-acc-rad-s2 "$FLEXIV_MAX_ANGULAR_ACC_RAD_S2"
 fi
 
-start_detached \
+start_detached_pty \
   "quest_target_publisher_dual" \
   'rizon4_quest_target_publisher\.py([[:space:]]|$)' \
   "$QUEST_PYTHON" "$REPO_ROOT/scripts/rizon4_quest_target_publisher.py" \
@@ -403,11 +472,18 @@ start_detached \
   --right-serial-number "$RIGHT_ROBOT_SERIAL" \
   --enable-button squeeze \
   --gripper-button trigger \
+  --strict-shared-calibration \
+  --calibration-min-separation-m 0.05 \
+  --shared-calibration-settle-sec 0.25 \
+  --engage-settle-sec 0 \
+  --enable-threshold 0.15 \
   --axis-map=-z,-x,y \
   --position-delta-scale 1 \
   --position-deadband 0 \
   --rate-hz 30 \
   --log-hz 2
+
+wait_for_tcp_listener "Quest HTTPS/WSS server" 8012 15
 
 info "startup commands completed"
 info "Quest URL: https://$HOST_IP:8012/?ws=wss://$HOST_IP:8012"

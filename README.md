@@ -57,33 +57,43 @@ export HOST_IP=<Quest可访问的宿主机IP>
 
 ### 1. 启动控制栈
 
-在仓库根目录执行：
+在仓库根目录执行统一入口：
 
 ```bash
-./scripts/start.sh
+./scripts/start_all.sh
 ```
 
-脚本会停止旧控制进程并重新启动 Docker 左 Studio、宿主机右 Studio、gateway、Isaac GUI、DRDK 和 Quest publisher；已经运行的 recorder 不会被停止。
+该命令依次启动三部分：双 Studio/Isaac/DRDK/Quest 控制栈、Web 状态监视和等待网页命令的 recorder。浏览器打开启动日志中的 `http://<HOST_IP>:8080`，即可在一个页面查看左右臂 `q/dq/τ/τ_ext`、力矩保护比例、TCP、Quest tracking/squeeze/trigger 与录制状态。`RESET 双臂 + 环境` 在健康、保护停止或 fault 状态下都可主动点击：它停止控制，以低速关节轨迹恢复双臂到 `initial_q`，随后复位 scene config 中的非机械臂资产；完成后双手同时按住 squeeze 重新标定 Quest 坐标系。
 
-DRDK 接触、关节力矩与碰撞参数由 `configs/pipelines/dual_arm_data_collection.yaml` 的 `control.drdk` 统一控制。双臂几何自碰撞监视默认关闭；按需通过布尔环境变量临时覆盖：
+只需重启控制栈并保留已有前台 recorder 时，仍可使用 `./scripts/start.sh`；旧的 `print.sh` 和 `record.sh` 保留为诊断兼容入口，不要与 Web dashboard 同时占用状态端口。
+
+DRDK 接触、关节力矩与碰撞参数由 `configs/pipelines/dual_arm_data_collection.yaml` 的 `control.drdk` 统一控制。双臂几何自碰撞监视默认开启，在连杆距离小于 5 cm 时先停止 RobotPair，避免互撞演变为关节力矩硬故障；按需可通过布尔环境变量临时覆盖：
+
+启动前还需把 Elements 安全密码放入环境变量（不要写入仓库）：
 
 ```bash
-SELF_COLLISION_MONITOR=true ./scripts/start.sh
-SELF_COLLISION_MONITOR=false ./scripts/start.sh
+export FLEXIV_SAFETY_PASSWORD='<Elements 安全密码>'
 ```
 
-该开关只覆盖 DRDK `SelfCollisionMonitor`，不影响 pipeline 中单独开启的 TCP 接触 wrench 限制和关节力矩前置保护。关节保护比较 `tau`、`tau_ext` 及由 `tau_dot` 外推的短期力矩与 runtime `tau_max`：达到 85% 时回退到最近安全 target；降到 70% 以下稳定 0.30 s 后重建相对零点并恢复。
+启动器在两臂 IDLE 时把官方输出力矩调节因子设为 `0.85`，使 A3/A4 的指令饱和值从 `83.2 Nm` 降为 `54.4 Nm`；Studio 的最终 `64 Nm` 安全上限保持不变。
+
+```bash
+SELF_COLLISION_MONITOR=true ./scripts/start_all.sh
+SELF_COLLISION_MONITOR=false ./scripts/start_all.sh
+```
+
+该开关只覆盖 DRDK `SelfCollisionMonitor`，不影响 pipeline 中单独开启的 TCP 接触 wrench 限制和关节力矩前置保护。关节保护比较 `tau`、`tau_ext` 及短期预测力矩与 runtime `tau_max`；runtime 未提供有效 `tau_dot` 时会根据连续 `tau` 样本估算变化率。达到 72% 时回退到最近安全 target；降到 55% 以下稳定 0.15 s 后重建相对零点并恢复。
 
 按任务名选择 `configs/scenes` 中的场景：
 
 ```bash
-./scripts/start.sh --task pick_place_redblock_flexiv_dual
+./scripts/start_all.sh --task pick_place_redblock_flexiv_dual
 ```
 
 也可显式传入场景：
 
 ```bash
-SCENE_CONFIG=configs/scenes/move_cylinder_flexiv_dual.yaml ./scripts/start.sh
+SCENE_CONFIG=configs/scenes/move_cylinder_flexiv_dual.yaml ./scripts/start_all.sh
 ```
 
 启动后确认两套 Studio 的模拟机器人均已启动。Docker Studio GUI 默认地址为 `127.0.0.1:5902`：
@@ -100,15 +110,9 @@ Quest 浏览器打开启动日志中的：
 https://<HOST_IP>:8012/?ws=wss://<HOST_IP>:8012
 ```
 
-另开终端检查输入：
+Quest tracking、双手按键、距离/方向一致性和共享坐标系状态直接显示在 Web 页面的“采集门控”区域。
 
-```bash
-./scripts/print.sh
-```
-
-该命令会同时打开双臂实时状态窗口，按左右臂两列显示 `q`、`dq`、实测力矩和保护比例；终端状态和图形窗口通过独立 UDP 端口接收数据，退出 `print.sh` 时图形窗口也会关闭。默认使用 `isaacsim` conda 环境，可通过 `PRINT_PYTHON` 覆盖。
-
-将左右手柄间距保持在 `0.40±0.01 m`，并使两只手柄在水平面内同向且垂直于左右连线。`SPACING`、`DIRECTION` 均为绿色 `PASS` 后，同时按住双手 `squeeze` 固定 Quest 到机器人坐标系。
+两只手柄均出现追踪数据后，先让 Web 中 `双手距离` 和 `双手方向` 都显示 `PASS`：距离需为 0.40±0.01 m；两手柄需同向，并在水平面内与双手连线近似垂直，误差不超过 15°。保持两项通过并同时按住双手 `squeeze` 0.25 s；系统在锁定坐标系的同一帧建立手柄和 TCP 零点，第一帧增量严格为零，随后无需松手即可直接相对跟随。任一检查为 `FAIL` 时系统拒绝标定，不会向机械臂发送 Quest 目标。
 
 - 按住单侧 `squeeze`：该侧机械臂按相对位置和相对姿态跟随；
 - 松开 `squeeze`：保持最后目标，不回初始位置；
@@ -116,48 +120,45 @@ https://<HOST_IP>:8012/?ws=wss://<HOST_IP>:8012
 
 ### 3. 开始采集
 
-控制栈 READY 后，在独立终端运行：
+启动前可用环境变量设置录制任务：
 
 ```bash
-./scripts/record.sh
+TASK_NAME=pick_place_redblock_dual EPISODES=20 FPS=30 ./scripts/start_all.sh
 ```
 
-常用覆盖：
+Web 录制按钮：
 
-```bash
-TASK_NAME=pick_place_redblock_dual EPISODES=20 FPS=30 ./scripts/record.sh
-```
-
-按键：
-
-- `s`：开始或继续；
-- `e`：暂停，再按一次保存；
-- `d`：丢弃当前 episode；
-- `r`：协调 reset；
-- `q`：退出。
+- `开始 / 继续`：新建 episode 或继续暂停中的 episode；
+- `暂停`：停止写帧但保留当前 episode；
+- `保存本条`：直接完成并保存当前 episode；
+- `丢弃本条`：删除当前 episode；
+- `Reset`：执行协调 reset；
+- `停止录制器`：安全退出；非空的录制中 episode 会按原 recorder 规则保存。
 
 数据保存到 `datasets/stage1_records/<task_name>/`，后台日志位于 `logs/`。
 
 ## 遇到问题怎么办
 
-先看实时状态和最新日志：
+先看 `http://<HOST_IP>:8080` 的在线状态、保护曲线和错误栏；需要底层日志时：
 
 ```bash
-./scripts/print.sh --verbose
 tail -f "$(ls -t logs/isaac_dual_follow_target*.stdout.log | head -n1)"
 tail -f "$(ls -t logs/drdk_target_streamer_dual*.stdout.log | head -n1)"
+tail -f "$(ls -t logs/web_recorder*.stdout.log | head -n1)"
 ```
 
-状态窗口依次显示左右臂 J1–J7 的 `q`、`dq`、实测 `tau` 和保护实际采用的最大风险比例；红色虚线 `0.85` 是关节保护触发线。
+Web 页面依次显示左右臂 J1–J7 的 `q`、`dq`、实测 `tau` 和保护实际采用的最大风险比例；实时曲线中的红色虚线 `0.72` 是关节保护触发线。
 
 | 现象 | 处理 |
 | --- | --- |
 | Quest 页面无信息或手柄无输入 | 在 Quest 中确认 Wi-Fi 已连接到与宿主机相同且可互通的局域网；随后刷新浏览器中的 `https://<HOST_IP>:8012` 页面并重新进入会话。 |
 | 左臂或右臂不动 | 确认两套 Studio 模拟机器人均已启动，alias 与 scene 一致；检查日志中左右两侧是否均为 `READY`。 |
-| Quest 有数据但不跟随 | 先让 `print.sh` 两行均为 `PASS`，双 squeeze 完成坐标标定，再按住对应侧 squeeze。 |
-| 连接被拒绝或进程状态混乱 | 再次执行 `./scripts/start.sh --task <task>`，它会清理旧控制栈后冷启动。 |
+| Quest 有数据但不跟随 | 查看 Web 的距离与方向检查；两项均为 `PASS` 后再同时按住双手 squeeze。严格门控下任一项 `FAIL` 都会拒绝标定。 |
+| Web 页面打不开 | 检查 `ss -ltnp | grep :8080` 和最新 `logs/web_control_dashboard*.stderr.log`；页面默认只应在可信局域网内使用。 |
+| 连接被拒绝或进程状态混乱 | 再次执行 `./scripts/start_all.sh --task <task>`，它会清理旧控制栈、旧 Web recorder 和 dashboard 后冷启动。 |
 | Docker GUI 不显示 | 检查 `docker ps` 和 `docker logs flexiv-studio-left`；本机缺少客户端时安装 `tigervnc-viewer`。 |
 | 关节力矩保护触发 | 松开 squeeze，等待状态中的 `joint_torque_frozen` 自动解除；保护会回退安全 target，不需要 reset。 |
+| 页面显示 `self_collision_stopped` | 松开双手 squeeze，点击 Web `Reset`；恢复过程临时停止几何监视、用 NRT 关节轨迹把两臂分开并回到 `initial_q`，落位后自动重新启用监视。 |
 | 已发生 Studio 力矩 fault | 先松开 squeeze，再按 recorder 的 `r`。若 `ClearFault` 持续失败，说明仍有接触或穿插，需冷重启恢复；不要瞬移关节或调用 `world.reset()`。 |
 | reset 第一次未完成 | 保持机械臂周围无新障碍，再按一次 `r`；recorder 会保持运行。查看 DRDK 日志中的具体关节和恢复阶段。 |
 | Isaac 很卡 | 确认使用 NVIDIA GPU，并关闭无关 Isaac/Studio 进程。保持 `physics_hz=2000`，只降低渲染、目标和采集频率。 |
@@ -172,21 +173,23 @@ tail -f "$(ls -t logs/drdk_target_streamer_dual*.stdout.log | head -n1)"
 configs/scenes/<task>.yaml
 ```
 
-全仓库只保留一份运行管线 `configs/pipelines/dual_arm_data_collection.yaml`；任务差异通过 scene config 或 `start.sh --task` 传入，不再维护 Stage1/2/3 pipeline 副本。
+全仓库只保留一份运行管线 `configs/pipelines/dual_arm_data_collection.yaml`；任务差异通过 scene config 或 `start_all.sh --task` 传入，不再维护 Stage1/2/3 pipeline 副本。
 
 | 目标 | 参数或位置 | 默认值/说明 |
 | --- | --- | --- |
-| 选择任务 | `./scripts/start.sh --task <task.name>` | 按 YAML 中的 `task.name` 精确匹配 |
+| 选择任务 | `./scripts/start_all.sh --task <task.name>` | 按 YAML 中的 `task.name` 精确匹配 |
 | 外部 Studio | `STUDIO_ROOT` | 默认 `../elements_studio/FlexivElementsStudio` |
 | 左右 alias | `LEFT_ROBOT_SERIAL`、`RIGHT_ROBOT_SERIAL` | `Rizon4-qSaFLh`、`Rizon4-I0LIRN` |
 | 机器人初始姿态 | scene 的 `robots[].initial_q` | DRDK 到位后也作为零空间参考 |
 | 冷启动中间点 | scene 的 `robots[].initial_q_waypoints` | 只用于冷启动 |
 | 机器人握手姿态 | scene 的 `robots[].bootstrap_q` | 必须与 Studio home 一致 |
 | 场景资产初始状态 | scene 的 `scene_objects` | reset 时恢复位置、姿态和关节状态 |
-| Quest/TargetFrame 线速度 | `--max-linear-speed-m-s` | 当前启动方案为 `1.0 m/s` |
-| 角速度 | `--max-angular-speed-rad-s` | 当前为 `0.75 rad/s` |
-| 初始化关节速度/加速度 | `--initial-joint-max-vel-rad-s` / `--initial-joint-max-acc-rad-s2` | `0.5 rad/s` / `1.0 rad/s²` |
-| reset 关节速度/加速度 | `--reset-joint-max-vel-rad-s` / `--reset-joint-max-acc-rad-s2` | `0.2 rad/s` / `0.4 rad/s²` |
+| Quest/TargetFrame 线速度 | pipeline 的 `control.max_linear_speed_m_s` | Studio normal safety 上限 `3.0 m/s` |
+| 角速度 | pipeline 的 `control.max_angular_speed_rad_s` | Studio normal safety 上限 `12.0 rad/s` |
+| 线/角加速度 | pipeline 的 `control.max_*_acc_*` | `8.0 m/s²` / `30 rad/s²` |
+| 目标重采样 | pipeline 的 `control.drdk.target_resampling` | 30 Hz 输入、500 Hz NRT 输出、12 ms 预测、全量有界前馈 |
+| 初始化关节速度/加速度 | pipeline 的 `control.initial_joint_*` | 统一速度 `2.0944 rad/s` / `2.0 rad/s²` |
+| reset 关节速度/加速度 | pipeline 的 `control.reset_joint_*` | 统一速度 `2.0944 rad/s` / `3.0 rad/s²` |
 | reset 重试 | `--reset-max-attempts` / `--reset-retry-delay-sec` | `3` 次 / `0.5 s` |
 | Isaac 关节力矩上限 | pipeline 的 `control.joint_effort_limits_nm` | 匹配 Studio 已有配置：`150,150,80,80,49,49,49 Nm` |
 | TCP 接触 wrench | pipeline 的 `control.drdk.contact_wrench` | 每侧 `20 N / 3 Nm`，独立于关节硬上限 |

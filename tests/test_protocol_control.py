@@ -5,9 +5,11 @@ from unittest import mock
 
 from flexiv_data_collection.gateway import LatestBridgeData
 from flexiv_data_collection import recorder
-from flexiv_data_collection.protocol import JsonLineConnection, JsonLinePushClient
+from flexiv_data_collection.protocol import JsonLineConnection, JsonLinePushClient, JsonLineReqClient
 from flexiv_data_collection.recorder import (
     FlexivEpisodeWriter,
+    UdpCommandReader,
+    UdpStatusPublisher,
     format_duration,
     parse_args as parse_recorder_args,
     reset_status_from_sample,
@@ -16,6 +18,30 @@ from flexiv_data_collection.recorder import (
 
 
 class ProtocolControlTests(unittest.TestCase):
+    def test_request_client_reconnects_once_after_broken_pipe(self):
+        client = JsonLineReqClient.__new__(JsonLineReqClient)
+        client.send_json = mock.Mock(side_effect=[BrokenPipeError("stale"), None])
+        client.recv_json = mock.Mock(return_value={"type": "sample"})
+        client.reconnect = mock.Mock()
+
+        reply = client.request_json({"type": "sample_request"}, timeout=1.0)
+
+        self.assertEqual(reply, {"type": "sample"})
+        self.assertEqual(client.send_json.call_count, 2)
+        client.reconnect.assert_called_once_with()
+
+    def test_request_client_does_not_duplicate_timed_out_request(self):
+        client = JsonLineReqClient.__new__(JsonLineReqClient)
+        client.send_json = mock.Mock()
+        client.recv_json = mock.Mock(side_effect=TimeoutError("slow"))
+        client.reconnect = mock.Mock()
+
+        with self.assertRaises(TimeoutError):
+            client.request_json({"type": "reset_request"}, timeout=1.0)
+
+        client.send_json.assert_called_once()
+        client.reconnect.assert_not_called()
+
     def test_recorder_formats_duration(self):
         self.assertEqual(format_duration(0), "00:00:00")
         self.assertEqual(format_duration(3661.4), "01:01:01")
@@ -56,6 +82,48 @@ class ProtocolControlTests(unittest.TestCase):
         self.assertEqual(args.reset_key, "r")
         self.assertEqual(args.reset_key_cooldown_sec, 2.5)
         self.assertEqual(args.reset_timeout_sec, 90.0)
+
+    def test_recorder_exposes_optional_web_control(self):
+        args = parse_recorder_args(
+            [
+                "--task-dir",
+                "dataset",
+                "--web-control-port",
+                "57687",
+                "--web-status-port",
+                "57688",
+            ]
+        )
+        self.assertEqual(args.web_control_port, 57687)
+        self.assertEqual(args.web_status_port, 57688)
+
+    def test_recorder_web_command_reader_accepts_named_json_command(self):
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        reader = UdpCommandReader("127.0.0.1", port)
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sender.sendto(json.dumps({"command": "save"}).encode(), ("127.0.0.1", port))
+            self.assertEqual(reader.poll(), "save")
+        finally:
+            sender.close()
+            reader.close()
+
+    def test_recorder_web_status_publisher_adds_schema(self):
+        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        receiver.bind(("127.0.0.1", 0))
+        receiver.settimeout(1.0)
+        publisher = UdpStatusPublisher("127.0.0.1", receiver.getsockname()[1])
+        try:
+            publisher.publish({"state": "idle"})
+            packet = json.loads(receiver.recvfrom(4096)[0])
+        finally:
+            publisher.close()
+            receiver.close()
+        self.assertEqual(packet["schema"], "flexiv_recorder_status.v1")
+        self.assertEqual(packet["state"], "idle")
 
     def test_recorder_extracts_bridge_reset_status(self):
         status = reset_status_from_sample(

@@ -84,6 +84,10 @@ DEFAULT_LEFT_TARGET_PRIM_PATH = "/World/TargetFrameLeft"
 DEFAULT_RIGHT_TARGET_PRIM_PATH = "/World/TargetFrameRight"
 DEFAULT_LEFT_TARGET_NAME = "target_frame_left"
 DEFAULT_RIGHT_TARGET_NAME = "target_frame_right"
+DEFAULT_LEFT_COMMAND_PRIM_PATH = "/World/CommandFrameLeft"
+DEFAULT_RIGHT_COMMAND_PRIM_PATH = "/World/CommandFrameRight"
+DEFAULT_LEFT_COMMAND_NAME = "command_frame_left"
+DEFAULT_RIGHT_COMMAND_NAME = "command_frame_right"
 DEFAULT_LEFT_TARGET_POSE_UDP_PORT = 57680
 DEFAULT_RIGHT_TARGET_POSE_UDP_PORT = 57681
 DEFAULT_LEFT_RDK_STATUS_UDP_PORT = 57682
@@ -473,6 +477,7 @@ class ArmRuntime:
     joint_group: str
     robot: Any
     target_frame: Any
+    command_frame: Any
     target_prim_path: str
     sim_node: Any
     target_pose_publisher: TargetPoseUdpPublisher
@@ -729,6 +734,18 @@ def run(args: argparse.Namespace) -> int:
             axis_length=float(args.target_axis_length),
             axis_radius=float(args.target_axis_radius),
         )
+        command_prim_path = (
+            DEFAULT_LEFT_COMMAND_PRIM_PATH if side == "left" else DEFAULT_RIGHT_COMMAND_PRIM_PATH
+        )
+        command_name = DEFAULT_LEFT_COMMAND_NAME if side == "left" else DEFAULT_RIGHT_COMMAND_NAME
+        command_frame = create_xyz_target_frame(
+            world,
+            prim_path=command_prim_path,
+            name=command_name,
+            initial_pose=initial_pose,
+            axis_length=0.65 * float(args.target_axis_length),
+            axis_radius=0.65 * float(args.target_axis_radius),
+        )
         target_pose_publisher = TargetPoseUdpPublisher(
             getattr(args, f"{side}_target_pose_udp_host"),
             getattr(args, f"{side}_target_pose_udp_port"),
@@ -740,6 +757,7 @@ def run(args: argparse.Namespace) -> int:
             joint_group=args.joint_group,
             robot=robot,
             target_frame=target_frame,
+            command_frame=command_frame,
             target_prim_path=target_prim,
             sim_node=flexivsimplugin.UserNode(serials[side]),
             target_pose_publisher=target_pose_publisher,
@@ -827,6 +845,9 @@ def run(args: argparse.Namespace) -> int:
     reset_reason = None
     reset_scene_collision_states: dict[str, bool] = {}
     reset_scene_kinematic_states: dict[str, bool] = {}
+    reset_robot_filter_active = False
+    reset_robot_filter_original_targets: list[Any] = []
+    reset_signal_after_time = 0.0
     control_loop_enabled = False
     dual_task_ready_announced = False
 
@@ -891,6 +912,12 @@ def run(args: argparse.Namespace) -> int:
             base_position=arm.base_position,
             base_orientation_wxyz=arm.base_orientation,
         )
+        sync_target_to_base_tcp_pose(
+            arm.command_frame,
+            pose_base_tcp_des=arm.reset_hold_pose_base_tcp,
+            base_position=arm.base_position,
+            base_orientation_wxyz=arm.base_orientation,
+        )
         print(
             f"[FlexivDualTargetFrame] {arm.side} TargetFrame aligned to end effector "
             f"world_position={[round(float(value), 6) for value in synced_target_pose.position]} "
@@ -943,12 +970,14 @@ def run(args: argparse.Namespace) -> int:
         )
 
     def set_reset_scene_collisions_suppressed(suppressed: bool) -> None:
-        """Temporarily remove task-object contacts so joint recovery can leave a collision."""
+        """Temporarily remove all contacts so fault recovery can leave a collision."""
 
-        from pxr import UsdPhysics
+        nonlocal reset_robot_filter_active, reset_robot_filter_original_targets
+
+        from pxr import Sdf, UsdPhysics
 
         if suppressed:
-            if reset_scene_collision_states:
+            if reset_scene_collision_states or reset_robot_filter_active:
                 return
             for item in scene_object_summary:
                 has_collision = bool(item.get("collision"))
@@ -979,11 +1008,38 @@ def run(args: argparse.Namespace) -> int:
                         True if previous_collision is None else bool(previous_collision)
                     )
                     collision_attr.Set(False)
-            if not reset_scene_collision_states and not reset_scene_kinematic_states:
+
+            # SelfCollisionMonitor stops the controllers, but the two Isaac
+            # articulations can already be physically touching by then. A
+            # stopped articulation keeps generating contact torque, so every
+            # ClearFault immediately faults again. Filter the articulation
+            # pair without disabling/deleting any collision shape: changing a
+            # collisionEnabled attribute invalidates Isaac tensor views.
+            left_root = world.stage.GetPrimAtPath(str(arms["left"].robot.prim_path))
+            right_path = Sdf.Path(str(arms["right"].robot.prim_path))
+            if not left_root.IsValid() or not world.stage.GetPrimAtPath(right_path).IsValid():
+                raise RuntimeError("missing robot prim during coordinated reset")
+            filter_api = (
+                UsdPhysics.FilteredPairsAPI(left_root)
+                if left_root.HasAPI(UsdPhysics.FilteredPairsAPI)
+                else UsdPhysics.FilteredPairsAPI.Apply(left_root)
+            )
+            filtered_pairs = filter_api.CreateFilteredPairsRel()
+            reset_robot_filter_original_targets = list(filtered_pairs.GetTargets())
+            if right_path not in reset_robot_filter_original_targets:
+                filtered_pairs.AddTarget(right_path)
+            reset_robot_filter_active = True
+
+            if (
+                not reset_scene_collision_states
+                and not reset_scene_kinematic_states
+                and not reset_robot_filter_active
+            ):
                 raise RuntimeError("no physical scene objects found for coordinated reset")
             print(
                 "[FlexivDualTargetFrame] coordinated reset temporarily disabled collisions for "
-                f"{len(reset_scene_collision_states)} scene objects and froze "
+                f"{len(reset_scene_collision_states)} scene objects, "
+                "the left/right articulation pair, and froze "
                 f"{len(reset_scene_kinematic_states)} rigid bodies",
                 flush=True,
             )
@@ -1007,11 +1063,20 @@ def run(args: argparse.Namespace) -> int:
             if not attr or not attr.IsValid():
                 attr = rigid_api.CreateKinematicEnabledAttr(bool(enabled))
             attr.Set(bool(enabled))
-        restored = len(reset_scene_collision_states)
+        if reset_robot_filter_active:
+            left_root = world.stage.GetPrimAtPath(str(arms["left"].robot.prim_path))
+            if not left_root.IsValid():
+                raise RuntimeError("left robot prim disappeared during reset")
+            filter_api = UsdPhysics.FilteredPairsAPI(left_root)
+            filter_api.CreateFilteredPairsRel().SetTargets(reset_robot_filter_original_targets)
+        restored_scene = len(reset_scene_collision_states)
         reset_scene_collision_states.clear()
         reset_scene_kinematic_states.clear()
+        reset_robot_filter_active = False
+        reset_robot_filter_original_targets = []
         print(
-            f"[FlexivDualTargetFrame] coordinated reset restored collisions for {restored} scene objects",
+            "[FlexivDualTargetFrame] coordinated reset restored collisions for "
+            f"{restored_scene} scene objects and the left/right articulation pair",
             flush=True,
         )
 
@@ -1036,12 +1101,16 @@ def run(args: argparse.Namespace) -> int:
         """Disarm user targets and ask DRDK to recover both robots to init_q."""
 
         nonlocal last_reset_seq, reset_state, reset_error, reset_started_time, reset_reason
-        nonlocal reset_assets_restore_time
+        nonlocal reset_assets_restore_time, reset_signal_after_time
         nonlocal dual_task_ready_announced
         last_reset_seq = int(control.get("seq", 0))
         reset_state = "moving"
         reset_error = None
         reset_started_time = time.monotonic()
+        # Allow PhysX several 2 kHz steps to remove the old contact wrench
+        # before DRDK attempts ClearFault. Without this gap, a collision fault
+        # is cleared and re-triggered in the same controller cycle.
+        reset_signal_after_time = reset_started_time + 0.1
         reset_assets_restore_time = 0.0
         reset_reason = str(control.get("reason", "unspecified"))
         dual_task_ready_announced = False
@@ -1266,7 +1335,11 @@ def run(args: argparse.Namespace) -> int:
             # The streamer ignores the uncalibrated packet pose until it has
             # latched Studio's actual TCP and Isaac has entered effort mode.
             packet["control_active"] = user_target_active
-            if reset_state == "moving" and last_reset_seq > 0:
+            if (
+                reset_state == "moving"
+                and last_reset_seq > 0
+                and time.monotonic() >= reset_signal_after_time
+            ):
                 packet["reset_seq"] = int(last_reset_seq)
                 packet["reset_reason"] = str(reset_reason or "coordinated")
             arm.target_pose_publisher.publish(packet)
@@ -1290,20 +1363,26 @@ def run(args: argparse.Namespace) -> int:
                 )
 
     def _update_quest_target_frames() -> None:
-        """Render the two limited Quest targets without touching the 2 kHz loop."""
+        """Render raw Quest goals and limited command poses outside the 2 kHz loop."""
 
         if not args.enable_quest_target_udp:
             return
         for arm in arms.values():
-            pose_base_tcp = arm.quest_goal_pose_base_tcp
             calibration = arm.rdk_world_calibration
-            if pose_base_tcp is None or calibration is None:
+            if calibration is None:
                 continue
-            world_position, world_orientation = calibration.rdk_pose_to_world(pose_base_tcp)
-            arm.target_frame.set_world_pose(
-                position=np.array(world_position),
-                orientation=np.array(world_orientation),
+            frame_poses = (
+                (arm.target_frame, arm.quest_goal_pose_base_tcp),
+                (arm.command_frame, arm.latest_control_pose_base_tcp),
             )
+            for frame, pose_base_tcp in frame_poses:
+                if pose_base_tcp is None:
+                    continue
+                world_position, world_orientation = calibration.rdk_pose_to_world(pose_base_tcp)
+                frame.set_world_pose(
+                    position=np.array(world_position),
+                    orientation=np.array(world_orientation),
+                )
 
     def _update_rdk_statuses() -> None:
         nonlocal dual_task_ready_announced, reset_state, reset_error, reset_assets_restore_time
@@ -1352,6 +1431,10 @@ def run(args: argparse.Namespace) -> int:
                             *[float(value) for value in tcp_orientation],
                         ]
                         arm.target_frame.set_world_pose(
+                            position=np.array(tcp_position),
+                            orientation=np.array(tcp_orientation),
+                        )
+                        arm.command_frame.set_world_pose(
                             position=np.array(tcp_position),
                             orientation=np.array(tcp_orientation),
                         )
@@ -1737,6 +1820,8 @@ def run(args: argparse.Namespace) -> int:
                     and arm.rdk_phase == "ready"
                     and arm.effort_control_enabled
                 ),
+                "phase": arm.rdk_phase,
+                "error": str(rdk_status.get("error") or ""),
                 "torque": {
                     "tau": _rdk_joint_vector("joint_tau"),
                     "tau_dot": _rdk_joint_vector("joint_tau_dot"),
@@ -1769,6 +1854,10 @@ def run(args: argparse.Namespace) -> int:
                     "both_squeeze": bool(
                         quest_input is not None and quest_input.get("both_squeeze", False)
                     ),
+                    "calibration_strict_geometry": bool(
+                        quest_input is not None
+                        and quest_input.get("calibration_strict_geometry", False)
+                    ),
                     "calibration_rotation_base_from_mapped": (
                         None
                         if quest_input is None
@@ -1777,6 +1866,12 @@ def run(args: argparse.Namespace) -> int:
                             [float(value) for value in row]
                             for row in quest_input["calibration_rotation_base_from_mapped"]
                         ]
+                    ),
+                    "calibration_geometry": (
+                        None
+                        if quest_input is None
+                        or not isinstance(quest_input.get("calibration_geometry"), dict)
+                        else dict(quest_input["calibration_geometry"])
                     ),
                     "gripper_button": (
                         "trigger" if quest_input is None else str(quest_input.get("gripper_button", "trigger"))
@@ -1915,7 +2010,8 @@ def run(args: argparse.Namespace) -> int:
         f"control_source=studio-bridge. physics_hz={physics_hz:g}. "
         f"target_pose_hz={physics_hz / max(1, arms['left'].target_pose_gate.period_cycles):.3f}. "
         f"left={args.left_serial_number} right={args.right_serial_number}. "
-        f"Drag {arms['left'].target_prim_path}; select {arms['right'].target_prim_path} for the right arm.",
+        f"raw_goal_frames={DEFAULT_LEFT_TARGET_PRIM_PATH},{DEFAULT_RIGHT_TARGET_PRIM_PATH}. "
+        f"limited_command_frames={DEFAULT_LEFT_COMMAND_PRIM_PATH},{DEFAULT_RIGHT_COMMAND_PRIM_PATH}.",
         flush=True,
     )
 

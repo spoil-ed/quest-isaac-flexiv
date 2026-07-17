@@ -63,6 +63,9 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         args = mod.parse_args([])
 
         self.assertEqual(args.position_deadband, 0.0)
+        self.assertEqual(args.engage_settle_sec, 0.0)
+        self.assertEqual(args.enable_threshold, 0.15)
+        self.assertFalse(args.strict_shared_calibration)
 
     def test_cli_supports_one_televuer_session_for_both_controllers(self):
         args = mod.parse_args(["--side", "both"])
@@ -72,7 +75,7 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertEqual(args.right_serial_number, "Rizon4-I0LIRN")
 
     def test_shared_frame_requires_valid_geometry_and_both_squeeze(self):
-        calibration = mod.QuestSharedFrameCalibration(settle_sec=0.0)
+        calibration = mod.QuestSharedFrameCalibration(settle_sec=0.0, strict_geometry=True)
         left = _pose(-0.2, 1.2, -0.3)
         right = _pose(0.2, 1.2, -0.3)
 
@@ -80,6 +83,45 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertFalse(calibration.confirmed)
         self.assertTrue(calibration.update(left, right, both_squeeze=True, now=1.1))
         self.assertTrue(calibration.confirmed)
+
+    def test_strict_geometry_status_reports_spacing_and_direction_errors(self):
+        calibration = mod.QuestSharedFrameCalibration(settle_sec=0.0, strict_geometry=True)
+        left = _pose(-0.2, 1.2, -0.3)
+        right = _pose(0.2, 1.2, -0.3)
+
+        status = calibration.geometry_status(left, right)
+
+        self.assertTrue(status["ok"])
+        self.assertAlmostEqual(status["separation_m"], 0.4)
+        self.assertAlmostEqual(status["left_direction_error_deg"], 0.0)
+        self.assertAlmostEqual(status["right_direction_error_deg"], 0.0)
+        self.assertAlmostEqual(status["mutual_direction_error_deg"], 0.0)
+
+        too_close = calibration.geometry_status(left, _pose(0.1, 1.2, -0.3))
+        self.assertFalse(too_close["spacing_ok"])
+        self.assertFalse(too_close["ok"])
+
+        rejected = mod.QuestSharedFrameCalibration(settle_sec=0.0, strict_geometry=True)
+        self.assertFalse(
+            rejected.update(left, _pose(0.1, 1.2, -0.3), both_squeeze=True, now=1.0)
+        )
+        self.assertFalse(rejected.confirmed)
+
+    def test_relaxed_shared_frame_accepts_arbitrary_spacing_and_direction(self):
+        calibration = mod.QuestSharedFrameCalibration(
+            axis_map="x,y,z",
+            tcp_rot_offset_wxyz=[1.0, 0.0, 0.0, 0.0],
+            settle_sec=0.0,
+            strict_geometry=False,
+        )
+        left = _rot_z_pose(0.0, -0.12, 0.0, 0.0)
+        right = _rot_z_pose(math.radians(70.0), 0.18, 0.0, 0.0)
+
+        self.assertTrue(calibration.update(left, right, both_squeeze=True, now=1.0))
+        rotation = calibration.rotation_calibrated_from_mapped
+        self.assertIsNotNone(rotation)
+        for row in rotation:
+            self.assertAlmostEqual(math.sqrt(sum(value * value for value in row)), 1.0)
 
     def test_shared_frame_stays_frozen_after_squeeze_release(self):
         calibration = mod.QuestSharedFrameCalibration(settle_sec=0.0)
@@ -319,6 +361,7 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
                 [0.0, 1.0, 0.0],
                 [0.0, 0.0, 1.0],
             ],
+            calibration_geometry={"available": True, "spacing_ok": True, "ok": True},
             now=13.0,
             serial_number="Rizon4-qSaFLh",
         )
@@ -333,7 +376,9 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertEqual(len(packet["tcp_rot_offset_wxyz"]), 4)
         self.assertTrue(packet["calibration_confirmed"])
         self.assertTrue(packet["both_squeeze"])
+        self.assertFalse(packet["calibration_strict_geometry"])
         self.assertEqual(packet["calibration_rotation_base_from_mapped"][0], [1.0, 0.0, 0.0])
+        self.assertTrue(packet["calibration_geometry"]["ok"])
 
     def test_select_enable_accepts_analog_squeeze_threshold(self):
         class FakeTeleVuer:

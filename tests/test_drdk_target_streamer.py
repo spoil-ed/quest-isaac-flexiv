@@ -1,6 +1,8 @@
 import importlib.util
+import math
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 
 
@@ -16,6 +18,217 @@ spec.loader.exec_module(mod)
 
 
 class DrdkTargetStreamerTests(unittest.TestCase):
+    def test_configures_output_torque_regulator_for_both_idle_robots(self):
+        class Pair:
+            def __init__(self):
+                self.robots = (object(), object())
+
+            def mode(self):
+                return ("IDLE", "IDLE")
+
+            def instances(self):
+                return self.robots
+
+            def info(self):
+                class Info:
+                    tau_max = [123.0, 123.0, 64.0, 64.0, 39.0, 39.0, 39.0]
+
+                return Info(), Info()
+
+        calls = []
+
+        class Safety:
+            def __init__(self, robot, password):
+                self.robot = robot
+                self.password = password
+
+            def SetJointOutputTorqueRegulator(self, factor, threshold):
+                calls.append((self.robot, self.password, factor, threshold))
+
+        class Mode:
+            IDLE = "IDLE"
+
+        class Rdk:
+            pass
+
+        Rdk.Mode = Mode
+        Rdk.Safety = Safety
+        args = mod.parse_args(
+            [
+                "--left-nullspace-posture",
+                "0,1,2,3,4,5,6",
+                "--right-nullspace-posture",
+                "6,5,4,3,2,1,0",
+                "--output-torque-regulator",
+                "--output-torque-limiting-factor",
+                "0.85",
+            ]
+        )
+
+        with unittest.mock.patch.dict(
+            mod.os.environ,
+            {"FLEXIV_SAFETY_PASSWORD": "runtime-only"},
+        ):
+            saturation = mod.configure_output_torque_regulator(
+                args,
+                robot_pair=Pair(),
+                flexivrdk=Rdk,
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([call[1:] for call in calls], [("runtime-only", 0.85, 50)] * 2)
+        self.assertAlmostEqual(saturation[0][2], 54.4)
+        self.assertAlmostEqual(saturation[1][3], 54.4)
+
+    def test_stationary_pair_in_cartesian_mode_is_not_a_collision_stop(self):
+        class Pair:
+            def fault(self):
+                return False
+
+            def stopped(self):
+                return True
+
+            def mode(self):
+                return ("CARTESIAN", "CARTESIAN")
+
+        self.assertFalse(
+            mod.self_collision_monitor_stopped_pair(
+                Pair(), object(), expected_mode="CARTESIAN"
+            )
+        )
+
+    def test_monitor_stop_is_pair_outside_cartesian_mode_even_before_settling(self):
+        class Pair:
+            def fault(self):
+                return False
+
+            def stopped(self):
+                return False
+
+            def mode(self):
+                return ("IDLE", "IDLE")
+
+        self.assertTrue(
+            mod.self_collision_monitor_stopped_pair(
+                Pair(), object(), expected_mode="CARTESIAN"
+            )
+        )
+
+    def test_faulted_pair_uses_fault_recovery_not_collision_status(self):
+        class Pair:
+            def fault(self):
+                return True
+
+            def stopped(self):
+                return True
+
+            def mode(self):
+                return ("IDLE", "IDLE")
+
+        self.assertFalse(
+            mod.self_collision_monitor_stopped_pair(
+                Pair(), object(), expected_mode="CARTESIAN"
+            )
+        )
+
+    def test_se3_resampler_predicts_translation_and_emits_velocity_feedforward(self):
+        resampler = mod.Se3TargetResampler(
+            prediction_horizon_sec=1.0 / 30.0,
+            velocity_filter_alpha=1.0,
+            max_linear_speed=2.0,
+            max_angular_speed=10.0,
+            max_linear_acc=100.0,
+            max_angular_acc=100.0,
+            feedforward_scale=1.0,
+            max_linear_feedforward=2.0,
+            max_angular_feedforward=10.0,
+            linear_velocity_deadband=0.0,
+            angular_velocity_deadband=0.0,
+        )
+        identity = [1.0, 0.0, 0.0, 0.0]
+        resampler.push([0.0, 0.0, 0.0, *identity], now=0.0, active=True)
+        resampler.push([0.03, 0.0, 0.0, *identity], now=0.03, active=True)
+
+        pose, velocity = resampler.sample(now=0.045)
+
+        self.assertAlmostEqual(pose[0], 0.045, places=6)
+        self.assertEqual([round(value, 6) for value in velocity[:3]], [1.0, 0.0, 0.0])
+        self.assertEqual(velocity[3:], [0.0, 0.0, 0.0])
+
+    def test_se3_resampler_uses_shortest_rotation_and_stops_predicting_after_horizon(self):
+        resampler = mod.Se3TargetResampler(
+            prediction_horizon_sec=0.05,
+            velocity_filter_alpha=1.0,
+            max_linear_speed=2.0,
+            max_angular_speed=20.0,
+            max_linear_acc=100.0,
+            max_angular_acc=1000.0,
+            feedforward_scale=1.0,
+            max_linear_feedforward=2.0,
+            max_angular_feedforward=20.0,
+            linear_velocity_deadband=0.0,
+            angular_velocity_deadband=0.0,
+        )
+        half = 2.0**-0.5
+        resampler.push([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], now=0.0, active=True)
+        resampler.push([0.0, 0.0, 0.0, half, 0.0, 0.0, half], now=0.1, active=True)
+
+        pose, velocity = resampler.sample(now=0.15)
+        rotation = mod._quat_to_rotation_vector_wxyz(pose[3:])
+        self.assertAlmostEqual(rotation[2], 0.75 * math.pi, places=6)
+        self.assertAlmostEqual(velocity[5], 0.5 * math.pi / 0.1, places=6)
+
+        held_pose, stale_velocity = resampler.sample(now=0.3)
+        self.assertEqual([round(value, 8) for value in held_pose], [round(value, 8) for value in pose])
+        self.assertEqual(stale_velocity, [0.0] * 6)
+
+    def test_se3_resampler_resets_velocity_when_control_disengages(self):
+        resampler = mod.Se3TargetResampler(
+            prediction_horizon_sec=0.05,
+            velocity_filter_alpha=1.0,
+            max_linear_speed=2.0,
+            max_angular_speed=10.0,
+            max_linear_acc=100.0,
+            max_angular_acc=100.0,
+            feedforward_scale=1.0,
+            max_linear_feedforward=2.0,
+            max_angular_feedforward=10.0,
+            linear_velocity_deadband=0.0,
+            angular_velocity_deadband=0.0,
+        )
+        identity = [1.0, 0.0, 0.0, 0.0]
+        resampler.push([0.0, 0.0, 0.0, *identity], now=0.0, active=True)
+        resampler.push([0.02, 0.0, 0.0, *identity], now=0.02, active=True)
+        resampler.push([0.02, 0.0, 0.0, *identity], now=0.03, active=False)
+
+        pose, velocity = resampler.sample(now=0.04)
+        self.assertAlmostEqual(pose[0], 0.02)
+        self.assertEqual(velocity, [0.0] * 6)
+
+    def test_se3_resampler_bounds_prediction_and_feedforward_with_safety_scale(self):
+        resampler = mod.Se3TargetResampler(
+            prediction_horizon_sec=0.02,
+            velocity_filter_alpha=1.0,
+            max_linear_speed=2.0,
+            max_angular_speed=10.0,
+            max_linear_acc=100.0,
+            max_angular_acc=100.0,
+            feedforward_scale=0.5,
+            max_linear_feedforward=0.25,
+            max_angular_feedforward=1.0,
+            linear_velocity_deadband=0.0,
+            angular_velocity_deadband=0.0,
+        )
+        identity = [1.0, 0.0, 0.0, 0.0]
+        resampler.push([0.0, 0.0, 0.0, *identity], now=0.0, active=True)
+        resampler.push([0.02, 0.0, 0.0, *identity], now=0.02, active=True)
+
+        pose, velocity = resampler.sample(now=0.03, safety_scale=0.5)
+
+        self.assertAlmostEqual(pose[0], 0.025)
+        self.assertAlmostEqual(velocity[0], 0.125)
+        self.assertEqual(velocity[1:], [0.0] * 5)
+
     def test_contact_guard_freezes_one_arm_and_rebases_after_release(self):
         class State:
             def __init__(self, pose, wrench):
@@ -143,6 +356,63 @@ class DrdkTargetStreamerTests(unittest.TestCase):
         self.assertEqual(events, [("left", "frozen"), ("right", "frozen")])
         self.assertAlmostEqual(guard.latest_ratios["left"][0], 0.86)
         self.assertAlmostEqual(guard.latest_ratios["right"][0], 0.90)
+
+    def test_joint_torque_guard_reduces_motion_before_freeze(self):
+        guard = mod.JointTorqueGuard(
+            ([100.0] * 7, [100.0] * 7),
+            trigger_ratio=0.85,
+            release_ratio=0.70,
+            trigger_samples=1,
+            release_dwell_sec=0.3,
+            prediction_horizon_sec=0.02,
+            rollback_sec=0.1,
+        )
+        guard.latest_ratios["left"] = [0.75] + [0.0] * 6
+
+        self.assertAlmostEqual(
+            guard.motion_scale("left", soft_ratio=0.65, minimum_scale=0.25),
+            0.625,
+        )
+        guard.latest_ratios["left"] = [0.85] + [0.0] * 6
+        self.assertAlmostEqual(
+            guard.motion_scale("left", soft_ratio=0.65, minimum_scale=0.25),
+            0.25,
+        )
+        guard.frozen["left"] = True
+        self.assertAlmostEqual(
+            guard.motion_scale("left", soft_ratio=0.65, minimum_scale=0.25),
+            0.25,
+        )
+
+    def test_joint_torque_guard_estimates_slope_when_runtime_tau_dot_is_zero(self):
+        class State:
+            tcp_pose = [0.7, 0.0, 0.2, 1.0, 0.0, 0.0, 0.0]
+
+            def __init__(self, first_tau):
+                self.tau = [first_tau] + [0.0] * 6
+                self.tau_dot = [0.0] * 7
+                self.tau_ext = [0.0] * 7
+
+        guard = mod.JointTorqueGuard(
+            ([100.0] * 7, [100.0] * 7),
+            trigger_ratio=0.85,
+            release_ratio=0.70,
+            trigger_samples=1,
+            release_dwell_sec=0.3,
+            prediction_horizon_sec=0.02,
+            rollback_sec=0.1,
+        )
+        latest = {"left": list(State.tcp_pose), "right": list(State.tcp_pose)}
+        self.assertEqual(
+            guard.update((State(80.0), State(0.0)), latest, now=1.0),
+            [],
+        )
+
+        events = guard.update((State(83.0), State(0.0)), latest, now=1.01)
+
+        self.assertEqual(events, [("left", "frozen")])
+        self.assertAlmostEqual(guard.latest_tau_dot["left"][0], 150.0)
+        self.assertAlmostEqual(guard.latest_ratios["left"][0], 0.86)
 
     def test_reads_joint_torque_limits_from_robot_pair_info(self):
         class JointGroup:
@@ -424,7 +694,7 @@ class DrdkTargetStreamerTests(unittest.TestCase):
         self.assertEqual(pair.joint_commands[2][0], expected)
         self.assertEqual(pair.postures, [expected])
         self.assertEqual(pair.objectives[0]["ref_positions_tracking"], (0.5, 0.5))
-        self.assertEqual(pair.max_contact_wrenches, ([20.0] * 3 + [3.0] * 3,) * 2)
+        self.assertEqual(pair.max_contact_wrenches, ([30.0] * 3 + [5.0] * 3,) * 2)
 
     def test_reset_stops_clears_fault_and_recovers_with_send_joint_position(self):
         class State:
@@ -473,6 +743,8 @@ class DrdkTargetStreamerTests(unittest.TestCase):
                 return State(self.current_q[0]), State(self.current_q[1])
 
             def SendJointPosition(self, positions, _velocities, _max_vel, _max_acc):
+                if self.current_mode != ("NRT_JOINT_POSITION", "NRT_JOINT_POSITION"):
+                    raise RuntimeError("joint command rejected outside NRT joint mode")
                 self.events.append(f"send:{positions}")
                 self.current_q = tuple(list(position) for position in positions)
 
@@ -603,6 +875,117 @@ class DrdkTargetStreamerTests(unittest.TestCase):
         mod.recover_connected_robot_pair_to_initial_q(args, robot_pair=pair, flexivrdk=Rdk)
 
         self.assertEqual(pair.enable_count, 1)
+
+    def test_reset_can_use_movej_without_entering_nrt_joint_mode(self):
+        class State:
+            def __init__(self, q):
+                self.q = list(q)
+                self.dq = [0.0] * 7
+                self.tcp_pose = [0.3, 0.0, -0.6, 1.0, 0.0, 0.0, 0.0]
+
+        class JPos:
+            def __init__(self, values):
+                self.values = list(values)
+
+        class Pair:
+            def __init__(self):
+                self.current_q = ([0.1] * 7, [0.2] * 7)
+                self.current_mode = ("IDLE", "IDLE")
+                self.has_fault = False
+                self.nrt_switches = 0
+                self.primitive_calls = []
+
+            def Stop(self):
+                self.current_mode = ("IDLE", "IDLE")
+
+            def fault(self):
+                return self.has_fault
+
+            def ClearFault(self):
+                self.has_fault = False
+                return True, True
+
+            def operational(self):
+                return not self.has_fault
+
+            def connected(self):
+                return True
+
+            def Enable(self):
+                return None
+
+            def mode(self):
+                return self.current_mode
+
+            def SwitchMode(self, mode):
+                if mode == "NRT_JOINT_POSITION":
+                    self.nrt_switches += 1
+                    self.has_fault = True
+                    raise RuntimeError(
+                        "Failed to switch control mode to [NRT_JOINT_POSITION]"
+                    )
+                self.current_mode = (mode, mode)
+
+            def states(self):
+                return State(self.current_q[0]), State(self.current_q[1])
+
+            def SendJointPosition(self, *_args):
+                raise RuntimeError("joint command rejected outside NRT joint mode")
+
+            def ExecutePrimitive(self, names, params):
+                self.primitive_calls.append((names, params))
+                self.current_q = tuple(
+                    [math.radians(value) for value in side["target"].values]
+                    for side in params
+                )
+
+            def SetNullSpacePosture(self, _postures):
+                return None
+
+            def SetNullSpaceObjectives(self, **_objectives):
+                return None
+
+            def SetMaxContactWrench(self, _wrenches):
+                return None
+
+        class Mode:
+            NRT_JOINT_POSITION = "NRT_JOINT_POSITION"
+            NRT_PRIMITIVE_EXECUTION = "NRT_PRIMITIVE_EXECUTION"
+            NRT_CARTESIAN_MOTION_FORCE = "NRT_CARTESIAN_MOTION_FORCE"
+
+        class Rdk:
+            pass
+
+        Rdk.Mode = Mode
+        Rdk.JPos = JPos
+        pair = Pair()
+        args = mod.parse_args(
+            [
+                "--left-nullspace-posture",
+                "0,1,2,3,4,5,6",
+                "--right-nullspace-posture",
+                "6,5,4,3,2,1,0",
+                "--initial-joint-settle-sec",
+                "0.001",
+                "--initial-joint-handoff-sec",
+                "0",
+                "--reset-retry-delay-sec",
+                "0",
+                "--reset-motion-method",
+                "movej",
+            ]
+        )
+
+        postures = mod.recover_connected_robot_pair_to_initial_q(
+            args,
+            robot_pair=pair,
+            flexivrdk=Rdk,
+        )
+
+        self.assertEqual(pair.nrt_switches, 0)
+        self.assertEqual(len(pair.primitive_calls), 1)
+        self.assertEqual(pair.primitive_calls[0][0], ("MoveJ", "MoveJ"))
+        self.assertEqual(postures[0], [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 
     def test_reset_retries_mid_motion_fault_from_current_q_at_recovery_speed(self):
         class State:

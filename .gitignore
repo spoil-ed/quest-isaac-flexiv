@@ -18,6 +18,10 @@ recordings/
 outputs/
 tmp/
 
+# Runtime URDF collision-mesh downloads created by DRDK SelfCollisionMonitor.
+L_coll_meshes/
+R_coll_meshes/
+
 isaac_sim_ws/
 isaacsim
 exts

@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import select
 import socket
 import sys
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -29,6 +31,10 @@ from rdk_target_streamer import parse_target_pose_packet  # noqa: E402
 DEFAULT_LEFT_SERIAL = "Rizon4-qSaFLh"
 DEFAULT_RIGHT_SERIAL = "Rizon4-I0LIRN"
 DEFAULT_JOINT_GROUP = "ARM_1"
+COLLISION_STOP_ERROR = (
+    "DRDK SelfCollisionMonitor stopped both robots; "
+    "remove the inter-arm proximity condition, then request a coordinated reset"
+)
 
 
 class TargetCommand(NamedTuple):
@@ -56,6 +62,177 @@ def _quat_multiply_wxyz(left, right) -> list[float]:
             lw * rz + lx * ry - ly * rx + lz * rw,
         ]
     )
+
+
+def _quat_inverse_wxyz(quaternion) -> list[float]:
+    w, x, y, z = _normalize_quat_wxyz(quaternion)
+    return [w, -x, -y, -z]
+
+
+def _quat_to_rotation_vector_wxyz(quaternion) -> list[float]:
+    """Return the shortest axis-angle rotation vector represented by a quaternion."""
+
+    quat = _normalize_quat_wxyz(quaternion)
+    if quat[0] < 0.0:
+        quat = [-value for value in quat]
+    vector_norm = math.sqrt(sum(value * value for value in quat[1:]))
+    if vector_norm <= 1e-12:
+        return [0.0, 0.0, 0.0]
+    angle = 2.0 * math.atan2(vector_norm, max(0.0, quat[0]))
+    return [value * angle / vector_norm for value in quat[1:]]
+
+
+def _quat_from_rotation_vector_wxyz(rotation_vector) -> list[float]:
+    values = [float(value) for value in rotation_vector]
+    if len(values) != 3 or not all(math.isfinite(value) for value in values):
+        raise ValueError("rotation vector must contain three finite values")
+    angle = math.sqrt(sum(value * value for value in values))
+    if angle <= 1e-12:
+        return [1.0, 0.0, 0.0, 0.0]
+    scale = math.sin(0.5 * angle) / angle
+    return _normalize_quat_wxyz([math.cos(0.5 * angle), *(value * scale for value in values)])
+
+
+def _limit_vector_norm(vector, limit: float) -> list[float]:
+    values = [float(value) for value in vector]
+    norm = math.sqrt(sum(value * value for value in values))
+    maximum = max(0.0, float(limit))
+    if norm <= maximum or norm <= 1e-12:
+        return values
+    return [value * maximum / norm for value in values]
+
+
+def _rate_limit_vector(target, current, max_delta: float) -> list[float]:
+    current_values = [float(value) for value in current]
+    delta = [float(value) - current_values[index] for index, value in enumerate(target)]
+    limited_delta = _limit_vector_norm(delta, max(0.0, float(max_delta)))
+    return [current_values[index] + limited_delta[index] for index in range(len(current_values))]
+
+
+class Se3TargetResampler:
+    """Estimate Cartesian velocity and produce bounded low-latency NRT targets."""
+
+    def __init__(
+        self,
+        *,
+        prediction_horizon_sec: float,
+        velocity_filter_alpha: float,
+        max_linear_speed: float,
+        max_angular_speed: float,
+        max_linear_acc: float,
+        max_angular_acc: float,
+        feedforward_scale: float,
+        max_linear_feedforward: float,
+        max_angular_feedforward: float,
+        linear_velocity_deadband: float,
+        angular_velocity_deadband: float,
+    ) -> None:
+        self.prediction_horizon_sec = max(0.0, float(prediction_horizon_sec))
+        self.velocity_filter_alpha = min(1.0, max(0.0, float(velocity_filter_alpha)))
+        self.max_linear_speed = float(max_linear_speed)
+        self.max_angular_speed = float(max_angular_speed)
+        self.max_linear_acc = float(max_linear_acc)
+        self.max_angular_acc = float(max_angular_acc)
+        self.feedforward_scale = min(1.0, max(0.0, float(feedforward_scale)))
+        self.max_linear_feedforward = max(0.0, float(max_linear_feedforward))
+        self.max_angular_feedforward = max(0.0, float(max_angular_feedforward))
+        self.linear_velocity_deadband = max(0.0, float(linear_velocity_deadband))
+        self.angular_velocity_deadband = max(0.0, float(angular_velocity_deadband))
+        self.reset()
+
+    def reset(self, pose=None, *, now: float | None = None, active: bool = False) -> None:
+        self.pose = None if pose is None else [float(value) for value in pose]
+        self.sample_time = None if now is None else float(now)
+        self.active = bool(active)
+        self.linear_velocity = [0.0, 0.0, 0.0]
+        self.angular_velocity = [0.0, 0.0, 0.0]
+
+    def push(self, pose, *, now: float, active: bool, force_reset: bool = False) -> None:
+        incoming = [float(value) for value in pose]
+        if len(incoming) != 7 or not all(math.isfinite(value) for value in incoming):
+            raise ValueError("SE(3) target pose must contain seven finite values")
+        incoming[3:] = _normalize_quat_wxyz(incoming[3:])
+        stamp = float(now)
+        if (
+            force_reset
+            or self.pose is None
+            or self.sample_time is None
+            or bool(active) != self.active
+            or stamp <= self.sample_time
+        ):
+            self.reset(incoming, now=stamp, active=active)
+            return
+        dt = stamp - self.sample_time
+        raw_linear = [
+            (incoming[index] - self.pose[index]) / dt for index in range(3)
+        ]
+        delta_quat = _quat_multiply_wxyz(incoming[3:], _quat_inverse_wxyz(self.pose[3:]))
+        raw_angular = [value / dt for value in _quat_to_rotation_vector_wxyz(delta_quat)]
+        raw_linear = _limit_vector_norm(raw_linear, self.max_linear_speed)
+        raw_angular = _limit_vector_norm(raw_angular, self.max_angular_speed)
+        alpha = self.velocity_filter_alpha
+        filtered_linear = [
+            alpha * raw_linear[index] + (1.0 - alpha) * self.linear_velocity[index]
+            for index in range(3)
+        ]
+        filtered_angular = [
+            alpha * raw_angular[index] + (1.0 - alpha) * self.angular_velocity[index]
+            for index in range(3)
+        ]
+        self.linear_velocity = _rate_limit_vector(
+            filtered_linear,
+            self.linear_velocity,
+            self.max_linear_acc * dt,
+        )
+        self.angular_velocity = _rate_limit_vector(
+            filtered_angular,
+            self.angular_velocity,
+            self.max_angular_acc * dt,
+        )
+        if math.sqrt(sum(value * value for value in self.linear_velocity)) < self.linear_velocity_deadband:
+            self.linear_velocity = [0.0, 0.0, 0.0]
+        if math.sqrt(sum(value * value for value in self.angular_velocity)) < self.angular_velocity_deadband:
+            self.angular_velocity = [0.0, 0.0, 0.0]
+        if not active:
+            self.linear_velocity = [0.0, 0.0, 0.0]
+            self.angular_velocity = [0.0, 0.0, 0.0]
+        self.pose = incoming
+        self.sample_time = stamp
+        self.active = bool(active)
+
+    def sample(
+        self,
+        *,
+        now: float,
+        safety_scale: float = 1.0,
+    ) -> tuple[list[float], list[float]] | None:
+        if self.pose is None or self.sample_time is None:
+            return None
+        response_scale = min(1.0, max(0.0, float(safety_scale)))
+        age = max(0.0, float(now) - self.sample_time)
+        horizon = (
+            min(age, self.prediction_horizon_sec) * response_scale
+            if self.active
+            else 0.0
+        )
+        position = [
+            self.pose[index] + self.linear_velocity[index] * horizon for index in range(3)
+        ]
+        delta_quat = _quat_from_rotation_vector_wxyz(
+            [value * horizon for value in self.angular_velocity]
+        )
+        orientation = _quat_multiply_wxyz(delta_quat, self.pose[3:])
+        velocity = [0.0] * 6
+        if self.active and age <= self.prediction_horizon_sec:
+            feedforward_scale = self.feedforward_scale * response_scale
+            velocity = _limit_vector_norm(
+                [value * feedforward_scale for value in self.linear_velocity],
+                self.max_linear_feedforward * response_scale,
+            ) + _limit_vector_norm(
+                [value * feedforward_scale for value in self.angular_velocity],
+                self.max_angular_feedforward * response_scale,
+            )
+        return position + orientation, velocity
 
 
 def rebase_relative_pose(incoming_pose, incoming_anchor, output_anchor) -> list[float]:
@@ -229,6 +406,15 @@ class JointTorqueGuard:
         self.latest_tau_ext = {side: [0.0] * len(self.limits[side]) for side in self.SIDES}
         self.latest_ratios = {side: [0.0] * len(self.limits[side]) for side in self.SIDES}
         self.trigger_joints: dict[str, int | None] = {side: None for side in self.SIDES}
+        self.previous_tau: dict[str, list[float] | None] = {
+            side: None for side in self.SIDES
+        }
+        self.previous_tau_time: dict[str, float | None] = {
+            side: None for side in self.SIDES
+        }
+        self.estimated_tau_dot = {
+            side: [0.0] * len(self.limits[side]) for side in self.SIDES
+        }
         self.command_history: dict[str, deque[tuple[float, list[float]]]] = {
             side: deque() for side in self.SIDES
         }
@@ -270,18 +456,55 @@ class JointTorqueGuard:
         for index, side in enumerate(self.SIDES):
             try:
                 tau = [float(value) for value in states[index].tau]
-                tau_dot = [float(value) for value in states[index].tau_dot]
+                reported_tau_dot = [float(value) for value in states[index].tau_dot]
                 tau_ext = [float(value) for value in states[index].tau_ext]
                 tcp_pose = [float(value) for value in states[index].tcp_pose]
             except (AttributeError, TypeError, ValueError):
                 continue
             limits = self.limits[side]
-            if any(len(values) != len(limits) for values in (tau, tau_dot, tau_ext)):
+            if any(len(values) != len(limits) for values in (tau, reported_tau_dot, tau_ext)):
                 continue
             if len(tcp_pose) != 7 or not all(
-                math.isfinite(value) for values in (tau, tau_dot, tau_ext, tcp_pose) for value in values
+                math.isfinite(value)
+                for values in (tau, reported_tau_dot, tau_ext, tcp_pose)
+                for value in values
             ):
                 continue
+            previous_tau = self.previous_tau[side]
+            previous_time = self.previous_tau_time[side]
+            if previous_tau is not None and previous_time is not None:
+                sample_dt = float(now) - previous_time
+                if 1e-4 <= sample_dt <= 0.1:
+                    raw_estimate = [
+                        (current - previous) / sample_dt
+                        for current, previous in zip(tau, previous_tau, strict=True)
+                    ]
+                    self.estimated_tau_dot[side] = [
+                        0.5 * raw + 0.5 * old
+                        for raw, old in zip(
+                            raw_estimate,
+                            self.estimated_tau_dot[side],
+                            strict=True,
+                        )
+                    ]
+            self.previous_tau[side] = list(tau)
+            self.previous_tau_time[side] = float(now)
+            # Some simulated runtimes report tau_dot as all zeros. Select, per
+            # joint, whichever reported or locally estimated slope predicts the
+            # larger absolute torque over the protection horizon.
+            tau_dot = []
+            for current, reported, estimated in zip(
+                tau,
+                reported_tau_dot,
+                self.estimated_tau_dot[side],
+                strict=True,
+            ):
+                tau_dot.append(
+                    max(
+                        (reported, estimated),
+                        key=lambda rate: abs(current + rate * self.prediction_horizon_sec),
+                    )
+                )
             predicted_tau = [
                 current + rate * self.prediction_horizon_sec
                 for current, rate in zip(tau, tau_dot, strict=True)
@@ -350,6 +573,31 @@ class JointTorqueGuard:
             )
         return incoming
 
+    def motion_scale(
+        self,
+        side: str,
+        *,
+        soft_ratio: float,
+        minimum_scale: float,
+    ) -> float:
+        """Continuously reduce command aggressiveness before the hard freeze."""
+
+        if not self.enabled:
+            return 1.0
+        if self.frozen[side]:
+            # Keep a small positive NRT limit so the rollback target remains
+            # reachable; the resampler is inactive and emits zero velocity.
+            return min(1.0, max(0.0, float(minimum_scale)))
+        peak_ratio = max(self.latest_ratios[side], default=0.0)
+        soft = min(float(soft_ratio), self.trigger_ratio)
+        minimum = min(1.0, max(0.0, float(minimum_scale)))
+        if peak_ratio <= soft:
+            return 1.0
+        if peak_ratio >= self.trigger_ratio or self.trigger_ratio <= soft:
+            return minimum
+        fraction = (peak_ratio - soft) / (self.trigger_ratio - soft)
+        return 1.0 - fraction * (1.0 - minimum)
+
 
 def joint_torque_limits(robot_pair, flexivrdk, joint_group: str) -> tuple[list[float], list[float]]:
     """Read both robots' software joint-torque limits from RobotPair.info()."""
@@ -376,6 +624,62 @@ def joint_torque_limits(robot_pair, flexivrdk, joint_group: str) -> tuple[list[f
             raise RuntimeError(f"invalid DRDK tau_max for {side}/{joint_group}: {values}")
         limits.append(values)
     return limits[0], limits[1]
+
+
+def configure_output_torque_regulator(
+    args: argparse.Namespace,
+    *,
+    robot_pair,
+    flexivrdk,
+) -> tuple[list[float], list[float]] | None:
+    """Configure the official per-robot output-torque regulator while IDLE."""
+
+    if not bool(args.output_torque_regulator):
+        return None
+    password_env = str(args.safety_password_env).strip()
+    password = os.environ.get(password_env)
+    if not password:
+        raise RuntimeError(
+            "output torque regulator is enabled but the safety password is unavailable; "
+            f"export {password_env} before starting the DRDK streamer"
+        )
+    idle_mode = flexivrdk.Mode.IDLE
+    deadline = time.monotonic() + max(0.1, float(args.enable_timeout_sec))
+    while True:
+        current_modes = tuple(robot_pair.mode())
+        if all(mode == idle_mode for mode in current_modes):
+            break
+        if not robot_pair.connected() or robot_pair.fault():
+            raise RuntimeError(
+                "robot pair became unavailable while waiting to configure the output "
+                f"torque regulator; current modes={current_modes}"
+            )
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                "output torque regulator requires both robots to reach IDLE; "
+                f"current modes={current_modes}"
+            )
+        time.sleep(0.05)
+    robots = tuple(robot_pair.instances())
+    if len(robots) != 2:
+        raise RuntimeError(f"DRDK RobotPair returned {len(robots)} robot instances, expected 2")
+    factor = float(args.output_torque_limiting_factor)
+    error_threshold = int(args.output_torque_error_threshold)
+    for robot in robots:
+        safety = flexivrdk.Safety(robot, password)
+        safety.SetJointOutputTorqueRegulator(factor, error_threshold)
+    torque_limits = joint_torque_limits(robot_pair, flexivrdk, args.joint_group)
+    saturation_limits = tuple(
+        [factor * value for value in limits] for limits in torque_limits
+    )
+    print(
+        "[DrdkTargetStreamer] output torque regulator configured "
+        f"factor={factor:.3f} error_threshold={error_threshold} "
+        f"left_saturation_nm={[round(value, 3) for value in saturation_limits[0]]} "
+        f"right_saturation_nm={[round(value, 3) for value in saturation_limits[1]]}",
+        flush=True,
+    )
+    return saturation_limits[0], saturation_limits[1]
 
 
 def parse_csv_floats(value: str, *, expected: int, name: str) -> list[float]:
@@ -483,6 +787,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--left-cartesian-damping-ratio", default="0.7,0.7,0.7,0.7,0.7,0.7")
     parser.add_argument("--right-cartesian-damping-ratio", default="0.7,0.7,0.7,0.7,0.7,0.7")
     parser.add_argument(
+        "--output-torque-regulator",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Limit each robot's total output torque below RobotInfo.tau_max.",
+    )
+    parser.add_argument("--output-torque-limiting-factor", type=float, default=0.85)
+    parser.add_argument("--output-torque-error-threshold", type=int, default=50)
+    parser.add_argument("--safety-password-env", default="FLEXIV_SAFETY_PASSWORD")
+    parser.add_argument(
         "--self-collision-monitor",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -506,29 +819,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         help="Robot link name excluded from inter-arm collision checks; repeat as needed.",
     )
-    parser.add_argument("--left-max-contact-wrench", default="20,20,20,3,3,3")
-    parser.add_argument("--right-max-contact-wrench", default="20,20,20,3,3,3")
+    parser.add_argument("--left-max-contact-wrench", default="30,30,30,5,5,5")
+    parser.add_argument("--right-max-contact-wrench", default="30,30,30,5,5,5")
     parser.add_argument(
         "--contact-wrench-control",
         action=argparse.BooleanOptionalAction,
         default=True,
     )
-    parser.add_argument("--contact-wrench-freeze-trigger-ratio", type=float, default=0.95)
-    parser.add_argument("--contact-wrench-release-ratio", type=float, default=0.70)
-    parser.add_argument("--contact-wrench-trigger-samples", type=int, default=3)
-    parser.add_argument("--contact-wrench-release-dwell-sec", type=float, default=0.30)
+    parser.add_argument("--contact-wrench-freeze-trigger-ratio", type=float, default=0.90)
+    parser.add_argument("--contact-wrench-release-ratio", type=float, default=0.55)
+    parser.add_argument("--contact-wrench-trigger-samples", type=int, default=1)
+    parser.add_argument("--contact-wrench-release-dwell-sec", type=float, default=0.12)
     parser.add_argument(
         "--joint-torque-control",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Roll back a target before measured or predicted joint torque reaches its limit.",
     )
-    parser.add_argument("--joint-torque-trigger-ratio", type=float, default=0.85)
-    parser.add_argument("--joint-torque-release-ratio", type=float, default=0.70)
+    parser.add_argument("--joint-torque-trigger-ratio", type=float, default=0.72)
+    parser.add_argument("--joint-torque-release-ratio", type=float, default=0.55)
     parser.add_argument("--joint-torque-trigger-samples", type=int, default=1)
-    parser.add_argument("--joint-torque-release-dwell-sec", type=float, default=0.30)
-    parser.add_argument("--joint-torque-prediction-horizon-sec", type=float, default=0.02)
-    parser.add_argument("--joint-torque-rollback-sec", type=float, default=0.10)
+    parser.add_argument("--joint-torque-release-dwell-sec", type=float, default=0.15)
+    parser.add_argument("--joint-torque-prediction-horizon-sec", type=float, default=0.025)
+    parser.add_argument("--joint-torque-rollback-sec", type=float, default=0.05)
     parser.add_argument("--left-nullspace-posture", required=True)
     parser.add_argument("--right-nullspace-posture", required=True)
     parser.add_argument(
@@ -579,16 +892,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0.5,
         help="Delay after a recoverable mid-motion failure before retrying the same reset sequence.",
     )
+    parser.add_argument(
+        "--reset-motion-method",
+        choices=("send_joint_position", "movej"),
+        default="send_joint_position",
+        help=(
+            "Joint recovery command used by coordinated Reset. MoveJ avoids the "
+            "Studio NRT_JOINT_POSITION empty-target handoff race."
+        ),
+    )
     parser.add_argument("--max-linear-speed-m-s", type=float, default=0.5)
     parser.add_argument("--max-angular-speed-rad-s", type=float, default=0.75)
     parser.add_argument("--max-linear-acc-m-s2", type=float, default=2.0)
     parser.add_argument("--max-angular-acc-rad-s2", type=float, default=5.0)
+    parser.add_argument(
+        "--target-resampling-control",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Resample low-rate Cartesian targets and send pose plus velocity feed-forward.",
+    )
+    parser.add_argument("--target-resample-rate-hz", type=float, default=250.0)
+    parser.add_argument("--target-prediction-horizon-sec", type=float, default=0.01)
+    parser.add_argument("--target-velocity-filter-alpha", type=float, default=0.35)
+    parser.add_argument("--target-feedforward-scale", type=float, default=0.5)
+    parser.add_argument("--target-max-linear-feedforward-m-s", type=float, default=0.25)
+    parser.add_argument("--target-max-angular-feedforward-rad-s", type=float, default=1.0)
+    parser.add_argument("--target-torque-soft-ratio", type=float, default=0.65)
+    parser.add_argument("--target-min-motion-scale", type=float, default=0.25)
+    parser.add_argument("--target-linear-velocity-deadband-m-s", type=float, default=0.005)
+    parser.add_argument("--target-angular-velocity-deadband-rad-s", type=float, default=0.02)
     parser.add_argument("--clear-fault", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--strict-clear-fault", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--log-hz", type=float, default=2.0)
     args = parser.parse_args(argv)
     if args.left_serial_number == args.right_serial_number:
         parser.error("left and right serial numbers must be different")
+    if not 0.0 < float(args.output_torque_limiting_factor) <= 1.0:
+        parser.error("--output-torque-limiting-factor must be within (0, 1]")
+    if int(args.output_torque_error_threshold) < 1:
+        parser.error("--output-torque-error-threshold must be at least 1")
+    if args.output_torque_regulator and not str(args.safety_password_env).strip():
+        parser.error("--safety-password-env must name a non-empty environment variable")
     if not 0.1 <= float(args.nullspace_tracking_weight) <= 1.0:
         parser.error("--nullspace-tracking-weight must be within [0.1, 1.0]")
     for option in (
@@ -609,6 +953,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--reset-max-attempts must be at least 1")
     if float(args.reset_retry_delay_sec) < 0.0:
         parser.error("--reset-retry-delay-sec must be non-negative")
+    if float(args.target_resample_rate_hz) <= 0.0:
+        parser.error("--target-resample-rate-hz must be positive")
+    if float(args.target_prediction_horizon_sec) < 0.0:
+        parser.error("--target-prediction-horizon-sec must be non-negative")
+    if not 0.0 <= float(args.target_velocity_filter_alpha) <= 1.0:
+        parser.error("--target-velocity-filter-alpha must be within [0, 1]")
+    if not 0.0 <= float(args.target_feedforward_scale) <= 1.0:
+        parser.error("--target-feedforward-scale must be within [0, 1]")
+    if min(
+        float(args.target_max_linear_feedforward_m_s),
+        float(args.target_max_angular_feedforward_rad_s),
+    ) < 0.0:
+        parser.error("target feed-forward limits must be non-negative")
+    if not 0.0 <= float(args.target_torque_soft_ratio) < float(
+        args.joint_torque_trigger_ratio
+    ):
+        parser.error("--target-torque-soft-ratio must be below the joint torque trigger ratio")
+    if not 0.0 <= float(args.target_min_motion_scale) <= 1.0:
+        parser.error("--target-min-motion-scale must be within [0, 1]")
+    if min(
+        float(args.target_linear_velocity_deadband_m_s),
+        float(args.target_angular_velocity_deadband_rad_s),
+    ) < 0.0:
+        parser.error("target velocity deadbands must be non-negative")
     if float(args.self_collision_min_distance_m) <= 0.0:
         parser.error("--self-collision-min-distance-m must be positive")
     if int(args.self_collision_loop_interval_ms) < 1:
@@ -729,6 +1097,84 @@ def _switch_mode_and_wait(robot_pair, target_mode, *, timeout_sec: float) -> Non
         raise RuntimeError(f"DRDK robot pair left requested mode {target_mode} during handoff")
 
 
+def _switch_nrt_joint_mode_with_seed(
+    robot_pair,
+    joint_mode,
+    *,
+    positions,
+    velocities,
+    max_velocities,
+    max_accelerations,
+    timeout_sec: float,
+) -> None:
+    """Enter NRT joint mode while priming its first complete command.
+
+    Some Elements Studio simulator versions instantiate the NRT trajectory
+    generator before ``RobotPair.SwitchMode()`` returns.  After IDLE has reset
+    the command container, that generator can therefore observe empty vectors
+    and immediately raise event 303010.  A short-lived sender overlaps the
+    blocking mode transition and installs the hold-current-position command as
+    soon as the runtime accepts NRT joint commands.
+    """
+
+    if all(current_mode == joint_mode for current_mode in robot_pair.mode()):
+        robot_pair.SendJointPosition(
+            positions,
+            velocities,
+            max_velocities,
+            max_accelerations,
+        )
+        return
+
+    stop_sender = threading.Event()
+    command_seeded = threading.Event()
+    sender_errors: list[Exception] = []
+
+    def seed_first_command() -> None:
+        deadline = time.monotonic() + max(0.1, float(timeout_sec))
+        while not stop_sender.is_set() and time.monotonic() < deadline:
+            try:
+                robot_pair.SendJointPosition(
+                    positions,
+                    velocities,
+                    max_velocities,
+                    max_accelerations,
+                )
+                command_seeded.set()
+                return
+            except Exception as exc:
+                # IDLE rejects joint commands until the mode transition has
+                # begun. Retrying here is intentional and bounded.
+                sender_errors[:] = [exc]
+                time.sleep(0.0005)
+
+    sender = threading.Thread(
+        target=seed_first_command,
+        name="drdk-nrt-joint-command-primer",
+        daemon=True,
+    )
+    sender.start()
+    try:
+        _switch_mode_and_wait(robot_pair, joint_mode, timeout_sec=timeout_sec)
+        if not command_seeded.wait(timeout=min(0.1, max(0.01, float(timeout_sec)))):
+            # Normal runtimes reach this path: SwitchMode succeeds first and
+            # the explicit command below seeds the controller immediately.
+            robot_pair.SendJointPosition(
+                positions,
+                velocities,
+                max_velocities,
+                max_accelerations,
+            )
+            command_seeded.set()
+    finally:
+        stop_sender.set()
+        sender.join(timeout=0.2)
+
+    if not command_seeded.is_set():
+        detail = f": {sender_errors[-1]}" if sender_errors else ""
+        raise RuntimeError(f"failed to seed NRT joint-position handoff{detail}")
+
+
 def _connect_robot_pair(args: argparse.Namespace, *, flexivdrdk):
     whitelist = [item.strip() for item in str(args.network_interface_whitelist).split(",") if item.strip()]
     deadline = time.monotonic() + max(0.0, float(args.connect_timeout_sec))
@@ -786,11 +1232,182 @@ def stop_self_collision_monitor(monitor) -> None:
         print(f"[DrdkTargetStreamer] SelfCollisionMonitor stop warning: {exc}", flush=True)
 
 
+def self_collision_monitor_stopped_pair(
+    robot_pair,
+    collision_monitor,
+    *,
+    expected_mode,
+) -> bool:
+    """Distinguish a monitor Stop() from a healthy pair that is merely stationary.
+
+    RobotPair.stopped() only means both robots have zero motion, so it is also
+    true while a healthy pair holds a Cartesian pose. SelfCollisionMonitor
+    invokes RobotPair.Stop(), which leaves the pair outside the expected
+    Cartesian mode. Mode departure is used without waiting for stopped() so a
+    command racing the asynchronous Stop() cannot terminate the streamer. A
+    fault is reported through the separate fault path.
+    """
+
+    if collision_monitor is None or robot_pair is None:
+        return False
+    if robot_pair.fault():
+        return False
+    return any(mode != expected_mode for mode in robot_pair.mode())
+
+
 def _joint_errors(current_q, target_q) -> list[float]:
     return [
         math.atan2(math.sin(float(actual) - float(target)), math.cos(float(actual) - float(target)))
         for actual, target in zip(current_q, target_q)
     ]
+
+
+def _wait_for_joint_target(
+    args: argparse.Namespace,
+    *,
+    robot_pair,
+    target_postures,
+    phase: str,
+    progress_callback=None,
+) -> None:
+    """Wait until both robots settle at a joint target."""
+
+    deadline = time.monotonic() + float(args.initial_joint_timeout_sec)
+    settled_since = None
+    last_progress_log = 0.0
+    while True:
+        if not robot_pair.connected() or robot_pair.fault() or not robot_pair.operational():
+            raise RuntimeError(f"DRDK robot pair failed during {phase} joint-position motion")
+        states = robot_pair.states()
+        if progress_callback is not None:
+            progress_callback(states)
+        position_errors = (
+            _joint_errors(states[0].q, target_postures[0]),
+            _joint_errors(states[1].q, target_postures[1]),
+        )
+        max_position_error = max(abs(value) for errors in position_errors for value in errors)
+        max_joint_speed = max(abs(float(value)) for state in states for value in state.dq)
+        within_tolerance = bool(
+            max_position_error <= float(args.initial_joint_tolerance_rad)
+            and max_joint_speed <= float(args.initial_joint_speed_tolerance_rad_s)
+        )
+        now = time.monotonic()
+        if now - last_progress_log >= 1.0:
+            print(
+                f"[DrdkTargetStreamer] {phase} joint trajectory progress "
+                f"max_position_error={max_position_error:.6f}rad "
+                f"max_joint_speed={max_joint_speed:.6f}rad/s",
+                flush=True,
+            )
+            last_progress_log = now
+        if within_tolerance:
+            settled_since = now if settled_since is None else settled_since
+            if now - settled_since >= float(args.initial_joint_settle_sec):
+                return
+        else:
+            settled_since = None
+        if now >= deadline:
+            raise TimeoutError(
+                f"DRDK {phase} joint-position motion timed out: "
+                f"max_position_error={max_position_error:.6f}rad "
+                f"max_joint_speed={max_joint_speed:.6f}rad/s"
+            )
+        time.sleep(0.02)
+
+
+def _enter_cartesian_mode_after_initial_q(
+    args: argparse.Namespace,
+    *,
+    robot_pair,
+    flexivrdk,
+    nullspace_postures,
+) -> None:
+    """Enter Cartesian control and restore task-specific controller settings."""
+
+    print(
+        "[DrdkTargetStreamer] initial_q reached and settled; switching to Cartesian mode",
+        flush=True,
+    )
+    cartesian_mode = flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE
+    _switch_mode_and_wait(robot_pair, cartesian_mode, timeout_sec=float(args.enable_timeout_sec))
+    if args.cartesian_impedance_control:
+        stiffness = (
+            list(args.left_cartesian_stiffness),
+            list(args.right_cartesian_stiffness),
+        )
+        damping_ratio = (
+            list(args.left_cartesian_damping_ratio),
+            list(args.right_cartesian_damping_ratio),
+        )
+        robot_pair.SetCartesianImpedance(stiffness, damping_ratio)
+        print(
+            "[DrdkTargetStreamer] Cartesian impedance configured "
+            f"left_K={stiffness[0]} right_K={stiffness[1]} "
+            f"left_Z={damping_ratio[0]} right_Z={damping_ratio[1]}",
+            flush=True,
+        )
+    robot_pair.SetNullSpacePosture(nullspace_postures)
+    weight = float(args.nullspace_tracking_weight)
+    robot_pair.SetNullSpaceObjectives(
+        linear_manipulability=(0.0, 0.0),
+        angular_manipulability=(0.0, 0.0),
+        ref_positions_tracking=(weight, weight),
+    )
+    max_contact_wrenches = (
+        list(args.left_max_contact_wrench),
+        list(args.right_max_contact_wrench),
+    )
+    if args.contact_wrench_control:
+        robot_pair.SetMaxContactWrench(max_contact_wrenches)
+        print(
+            "[DrdkTargetStreamer] maximum contact wrench configured "
+            f"left={max_contact_wrenches[0]} right={max_contact_wrenches[1]}",
+            flush=True,
+        )
+
+
+def move_robot_pair_to_initial_q_via_movej(
+    args: argparse.Namespace,
+    *,
+    robot_pair,
+    flexivrdk,
+    progress_callback=None,
+):
+    """Recover to init_q through MoveJ when Studio rejects NRT mode handoff."""
+
+    _wait_until_operational(robot_pair, float(args.enable_timeout_sec))
+    nullspace_postures = (
+        list(args.left_nullspace_posture),
+        list(args.right_nullspace_posture),
+    )
+    primitive_mode = flexivrdk.Mode.NRT_PRIMITIVE_EXECUTION
+    _switch_mode_and_wait(robot_pair, primitive_mode, timeout_sec=float(args.enable_timeout_sec))
+    targets_deg = tuple(
+        flexivrdk.JPos([math.degrees(float(value)) for value in posture])
+        for posture in nullspace_postures
+    )
+    robot_pair.ExecutePrimitive(
+        ("MoveJ", "MoveJ"),
+        ({"target": targets_deg[0]}, {"target": targets_deg[1]}),
+    )
+    print(
+        "[DrdkTargetStreamer] coordinated reset started official MoveJ to initial_q",
+        flush=True,
+    )
+    _wait_for_joint_target(
+        args,
+        robot_pair=robot_pair,
+        target_postures=nullspace_postures,
+        phase="initial_q MoveJ recovery",
+        progress_callback=progress_callback,
+    )
+    _enter_cartesian_mode_after_initial_q(
+        args,
+        robot_pair=robot_pair,
+        flexivrdk=flexivrdk,
+        nullspace_postures=nullspace_postures,
+    )
+    return nullspace_postures
 
 
 def move_robot_pair_to_initial_q(
@@ -814,14 +1431,6 @@ def move_robot_pair_to_initial_q(
     if len(nullspace_postures[0]) != len(current_q[0]) or len(nullspace_postures[1]) != len(current_q[1]):
         raise ValueError("configured null-space posture length must match each robot DoF")
 
-    joint_mode = flexivrdk.Mode.NRT_JOINT_POSITION
-    _switch_mode_and_wait(robot_pair, joint_mode, timeout_sec=float(args.enable_timeout_sec))
-    # Follow the official NRT joint-position example: establish the first
-    # command from state sampled *after* the mode switch.  Sending a distant
-    # task posture as the first command leaves the controller handoff
-    # discontinuous and can trip the simulated torque protection.
-    states = robot_pair.states()
-    current_q = ([float(value) for value in states[0].q], [float(value) for value in states[1].q])
     dofs = (len(nullspace_postures[0]), len(nullspace_postures[1]))
     zero_velocities = ([0.0] * dofs[0], [0.0] * dofs[1])
     max_velocities = (
@@ -832,11 +1441,15 @@ def move_robot_pair_to_initial_q(
         [float(args.initial_joint_max_acc_rad_s2)] * dofs[0],
         [float(args.initial_joint_max_acc_rad_s2)] * dofs[1],
     )
-    robot_pair.SendJointPosition(
-        current_q,
-        zero_velocities,
-        max_velocities,
-        max_accelerations,
+    joint_mode = flexivrdk.Mode.NRT_JOINT_POSITION
+    _switch_nrt_joint_mode_with_seed(
+        robot_pair,
+        joint_mode,
+        positions=current_q,
+        velocities=zero_velocities,
+        max_velocities=max_velocities,
+        max_accelerations=max_accelerations,
+        timeout_sec=float(args.enable_timeout_sec),
     )
     print(
         "[DrdkTargetStreamer] NRT joint mode handoff seeded from current q "
@@ -875,91 +1488,20 @@ def move_robot_pair_to_initial_q(
             f"max_acc={float(args.initial_joint_max_acc_rad_s2):.3f}rad/s^2",
             flush=True,
         )
-        deadline = time.monotonic() + float(args.initial_joint_timeout_sec)
-        settled_since = None
-        last_progress_log = 0.0
-        while True:
-            if not robot_pair.connected() or robot_pair.fault() or not robot_pair.operational():
-                raise RuntimeError(f"DRDK robot pair failed during {phase} joint-position motion")
-            states = robot_pair.states()
-            if progress_callback is not None:
-                progress_callback(states)
-            position_errors = (
-                _joint_errors(states[0].q, target_postures[0]),
-                _joint_errors(states[1].q, target_postures[1]),
-            )
-            max_position_error = max(abs(value) for errors in position_errors for value in errors)
-            max_joint_speed = max(abs(float(value)) for state in states for value in state.dq)
-            within_tolerance = bool(
-                max_position_error <= float(args.initial_joint_tolerance_rad)
-                and max_joint_speed <= float(args.initial_joint_speed_tolerance_rad_s)
-            )
-            now = time.monotonic()
-            if now - last_progress_log >= 1.0:
-                print(
-                    f"[DrdkTargetStreamer] {phase} joint trajectory progress "
-                    f"max_position_error={max_position_error:.6f}rad "
-                    f"max_joint_speed={max_joint_speed:.6f}rad/s",
-                    flush=True,
-                )
-                last_progress_log = now
-            if within_tolerance:
-                settled_since = now if settled_since is None else settled_since
-                if now - settled_since >= float(args.initial_joint_settle_sec):
-                    break
-            else:
-                settled_since = None
-            if now >= deadline:
-                raise TimeoutError(
-                    f"DRDK {phase} joint-position motion timed out: "
-                    f"max_position_error={max_position_error:.6f}rad "
-                    f"max_joint_speed={max_joint_speed:.6f}rad/s"
-                )
-            time.sleep(0.02)
+        _wait_for_joint_target(
+            args,
+            robot_pair=robot_pair,
+            target_postures=target_postures,
+            phase=phase,
+            progress_callback=progress_callback,
+        )
 
-    print(
-        "[DrdkTargetStreamer] initial_q reached and settled; switching to Cartesian mode",
-        flush=True,
+    _enter_cartesian_mode_after_initial_q(
+        args,
+        robot_pair=robot_pair,
+        flexivrdk=flexivrdk,
+        nullspace_postures=nullspace_postures,
     )
-
-    cartesian_mode = flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE
-    _switch_mode_and_wait(robot_pair, cartesian_mode, timeout_sec=float(args.enable_timeout_sec))
-    if args.cartesian_impedance_control:
-        stiffness = (
-            list(args.left_cartesian_stiffness),
-            list(args.right_cartesian_stiffness),
-        )
-        damping_ratio = (
-            list(args.left_cartesian_damping_ratio),
-            list(args.right_cartesian_damping_ratio),
-        )
-        robot_pair.SetCartesianImpedance(stiffness, damping_ratio)
-        print(
-            "[DrdkTargetStreamer] Cartesian impedance configured "
-            f"left_K={stiffness[0]} right_K={stiffness[1]} "
-            f"left_Z={damping_ratio[0]} right_Z={damping_ratio[1]}",
-            flush=True,
-        )
-    # The runtime resets the null-space reference whenever this mode is
-    # re-entered, so install the task initq only after the Cartesian switch.
-    robot_pair.SetNullSpacePosture(nullspace_postures)
-    weight = float(args.nullspace_tracking_weight)
-    robot_pair.SetNullSpaceObjectives(
-        linear_manipulability=(0.0, 0.0),
-        angular_manipulability=(0.0, 0.0),
-        ref_positions_tracking=(weight, weight),
-    )
-    max_contact_wrenches = (
-        list(args.left_max_contact_wrench),
-        list(args.right_max_contact_wrench),
-    )
-    if args.contact_wrench_control:
-        robot_pair.SetMaxContactWrench(max_contact_wrenches)
-        print(
-            "[DrdkTargetStreamer] maximum contact wrench configured "
-            f"left={max_contact_wrenches[0]} right={max_contact_wrenches[1]}",
-            flush=True,
-        )
     return nullspace_postures
 
 
@@ -972,6 +1514,11 @@ def initialize_connected_robot_pair(args: argparse.Namespace, *, robot_pair, fle
         cleared = robot_pair.ClearFault()
         if args.strict_clear_fault and not all(bool(value) for value in cleared):
             raise RuntimeError(f"DRDK failed to clear both robot faults: {cleared}")
+    configure_output_torque_regulator(
+        args,
+        robot_pair=robot_pair,
+        flexivrdk=flexivrdk,
+    )
     nullspace_postures = move_robot_pair_to_initial_q(
         args,
         robot_pair=robot_pair,
@@ -1014,6 +1561,7 @@ def recover_connected_robot_pair_to_initial_q(
     )
     max_attempts = int(args.reset_max_attempts)
     last_error: Exception | None = None
+    use_movej_fallback = args.reset_motion_method == "movej"
 
     for attempt in range(1, max_attempts + 1):
         if attempt > 1:
@@ -1051,6 +1599,13 @@ def recover_connected_robot_pair_to_initial_q(
         robot_pair.Enable()
         try:
             _wait_until_operational(robot_pair, float(args.enable_timeout_sec))
+            if use_movej_fallback:
+                return move_robot_pair_to_initial_q_via_movej(
+                    recovery_args,
+                    robot_pair=robot_pair,
+                    flexivrdk=flexivrdk,
+                    progress_callback=progress_callback,
+                )
             return move_robot_pair_to_initial_q(
                 recovery_args,
                 robot_pair=robot_pair,
@@ -1059,6 +1614,18 @@ def recover_connected_robot_pair_to_initial_q(
             )
         except Exception as exc:
             last_error = exc
+            error_text = str(exc)
+            if (
+                "NRT_JOINT_POSITION" in error_text
+                or "Unable to generate a feasible trajectory" in error_text
+                or "303010" in error_text
+            ):
+                use_movej_fallback = True
+                print(
+                    "[DrdkTargetStreamer] Studio rejected NRT joint-mode handoff; "
+                    "next recovery attempt will use official MoveJ fallback",
+                    flush=True,
+                )
             if not robot_pair.connected():
                 break
 
@@ -1143,6 +1710,25 @@ def main(argv: list[str] | None = None) -> int:
     collision_monitor = None
     reference_poses: dict[str, list[float]] = {}
     latest_input_poses: dict[str, list[float]] = {}
+    latest_control_active = {"left": False, "right": False}
+    target_resamplers = {
+        side: Se3TargetResampler(
+            prediction_horizon_sec=float(args.target_prediction_horizon_sec),
+            velocity_filter_alpha=float(args.target_velocity_filter_alpha),
+            max_linear_speed=float(args.max_linear_speed_m_s),
+            max_angular_speed=float(args.max_angular_speed_rad_s),
+            max_linear_acc=float(args.max_linear_acc_m_s2),
+            max_angular_acc=float(args.max_angular_acc_rad_s2),
+            feedforward_scale=float(args.target_feedforward_scale),
+            max_linear_feedforward=float(args.target_max_linear_feedforward_m_s),
+            max_angular_feedforward=float(args.target_max_angular_feedforward_rad_s),
+            linear_velocity_deadband=float(args.target_linear_velocity_deadband_m_s),
+            angular_velocity_deadband=float(args.target_angular_velocity_deadband_rad_s),
+        )
+        for side in ("left", "right")
+    }
+    resample_period_sec = 1.0 / float(args.target_resample_rate_hz)
+    next_resample_time = time.monotonic()
     contact_guard = ContactWrenchGuard(
         (args.left_max_contact_wrench, args.right_max_contact_wrench),
         enabled=bool(args.contact_wrench_control),
@@ -1226,7 +1812,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     def latch_cartesian_references() -> None:
-        nonlocal reference_poses, latest_input_poses
+        nonlocal reference_poses, latest_input_poses, latest_control_active, next_resample_time
         states = robot_pair.states()
         reference_poses = {
             "left": [float(value) for value in states[0].tcp_pose],
@@ -1235,6 +1821,11 @@ def main(argv: list[str] | None = None) -> int:
         latest_input_poses = {
             side: list(pose) for side, pose in reference_poses.items()
         }
+        latest_control_active = {"left": False, "right": False}
+        now = time.monotonic()
+        for side in ("left", "right"):
+            target_resamplers[side].reset(reference_poses[side], now=now, active=False)
+        next_resample_time = now
         contact_guard.reset()
         if joint_guard is not None:
             joint_guard.reset(reference_poses, now=time.monotonic())
@@ -1250,8 +1841,14 @@ def main(argv: list[str] | None = None) -> int:
         nonlocal joint_guard, recovery_required, recovery_phase, status_error
         print(f"[DrdkTargetStreamer] reset seq={reset_seq}: stopping both robots", flush=True)
         publish_status(False, phase="reset_stopping", reset_seq=reset_seq)
+        # A triggered SelfCollisionMonitor leaves RobotPair stopped while the
+        # arms are still inside its distance threshold. Temporarily stop the
+        # monitor so the coordinated NRT joint trajectory can separate both
+        # arms and return them to the known-safe initial_q. Re-enable geometric
+        # monitoring only after that recovery trajectory has completed.
+        stop_self_collision_monitor(collision_monitor)
+        collision_monitor = None
         if robot_pair is None or not robot_pair.connected():
-            stop_self_collision_monitor(collision_monitor)
             robot_pair = _connect_robot_pair(args, flexivdrdk=flexivdrdk)
             torque_limits = joint_torque_limits(robot_pair, flexivrdk, args.joint_group)
             joint_guard = JointTorqueGuard(
@@ -1264,11 +1861,6 @@ def main(argv: list[str] | None = None) -> int:
                 prediction_horizon_sec=float(args.joint_torque_prediction_horizon_sec),
                 rollback_sec=float(args.joint_torque_rollback_sec),
             )
-            collision_monitor = start_self_collision_monitor(
-                args,
-                robot_pair=robot_pair,
-                flexivdrdk=flexivdrdk,
-            )
         recover_connected_robot_pair_to_initial_q(
             args,
             robot_pair=robot_pair,
@@ -1277,6 +1869,11 @@ def main(argv: list[str] | None = None) -> int:
             phase_callback=lambda phase: publish_status(False, phase=phase, reset_seq=reset_seq),
         )
         latch_cartesian_references()
+        collision_monitor = start_self_collision_monitor(
+            args,
+            robot_pair=robot_pair,
+            flexivdrdk=flexivdrdk,
+        )
         states = robot_pair.states()
         publish_status(
             True,
@@ -1323,11 +1920,16 @@ def main(argv: list[str] | None = None) -> int:
             f"release={float(args.joint_torque_release_ratio):.2f}",
             flush=True,
         )
-        collision_monitor = start_self_collision_monitor(
-            args,
-            robot_pair=robot_pair,
-            flexivdrdk=flexivdrdk,
-        )
+        if args.target_resampling_control:
+            print(
+                "[DrdkTargetStreamer] SE(3) target resampling configured "
+                f"rate={float(args.target_resample_rate_hz):.1f}Hz "
+                f"prediction={float(args.target_prediction_horizon_sec) * 1000.0:.1f}ms "
+                f"velocity_alpha={float(args.target_velocity_filter_alpha):.2f} "
+                f"feedforward_scale={float(args.target_feedforward_scale):.2f} "
+                f"torque_soft_ratio={float(args.target_torque_soft_ratio):.2f}",
+                flush=True,
+            )
         try:
             nullspace_postures = initialize_connected_robot_pair(
                 args,
@@ -1336,6 +1938,17 @@ def main(argv: list[str] | None = None) -> int:
                 progress_callback=publish_joint_initialization,
             )
             latch_cartesian_references()
+            # The home -> initial_q trajectory is deterministic and may pass
+            # through link clearances that are intentionally tighter than the
+            # teleoperation threshold. Enable the DRDK monitor only after both
+            # arms have reached the known-safe initial pose; otherwise it can
+            # stop RobotPair during initialization and leave a healthy pair in
+            # self_collision_stopped before teleoperation even begins.
+            collision_monitor = start_self_collision_monitor(
+                args,
+                robot_pair=robot_pair,
+                flexivdrdk=flexivdrdk,
+            )
             states = robot_pair.states()
             print(
                 "[DrdkTargetStreamer] null-space posture initialized "
@@ -1365,7 +1978,11 @@ def main(argv: list[str] | None = None) -> int:
         last_status_time = time.monotonic()
 
         while True:
-            readable, _, _ = select.select(list(target_sockets), [], [], 0.05)
+            now = time.monotonic()
+            select_timeout = 0.05
+            if args.target_resampling_control:
+                select_timeout = min(select_timeout, max(0.0, next_resample_time - now))
+            readable, _, _ = select.select(list(target_sockets), [], [], select_timeout)
             for target_socket in readable:
                 side = target_sockets[target_socket]
                 while True:
@@ -1414,10 +2031,10 @@ def main(argv: list[str] | None = None) -> int:
                 last_status_time = time.monotonic()
                 continue
 
-            collision_stopped = bool(
-                collision_monitor is not None
-                and robot_pair is not None
-                and robot_pair.stopped()
+            collision_stopped = self_collision_monitor_stopped_pair(
+                robot_pair,
+                collision_monitor,
+                expected_mode=flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE,
             )
             healthy = bool(
                 robot_pair is not None
@@ -1430,10 +2047,7 @@ def main(argv: list[str] | None = None) -> int:
                 recovery_required = True
                 if collision_stopped:
                     recovery_phase = "self_collision_stopped"
-                    status_error = (
-                        "DRDK SelfCollisionMonitor stopped both robots; "
-                        "remove the inter-arm proximity condition, then request a coordinated reset"
-                    )
+                    status_error = COLLISION_STOP_ERROR
                 now = time.monotonic()
                 if now - last_status_time >= 0.1:
                     publish_status(
@@ -1456,6 +2070,10 @@ def main(argv: list[str] | None = None) -> int:
                 latest_input_poses = {
                     "left": list(raw_command_poses[0]),
                     "right": list(raw_command_poses[1]),
+                }
+                latest_control_active = {
+                    "left": bool(left.control_active),
+                    "right": bool(right.control_active),
                 }
                 synchronized_cycle = left.servo_cycle
             states = robot_pair.states()
@@ -1483,13 +2101,13 @@ def main(argv: list[str] | None = None) -> int:
                     f"tau_dot={joint_guard.latest_tau_dot[side][peak_joint]:.3f}Nm/s",
                     flush=True,
                 )
-            command_poses = None
+            protected_target_poses = None
             if raw_command_poses is not None:
                 contact_command_poses = (
                     contact_guard.command_pose("left", raw_command_poses[0]),
                     contact_guard.command_pose("right", raw_command_poses[1]),
                 )
-                command_poses = (
+                protected_target_poses = (
                     joint_guard.command_pose("left", contact_command_poses[0]),
                     joint_guard.command_pose("right", contact_command_poses[1]),
                 )
@@ -1499,22 +2117,93 @@ def main(argv: list[str] | None = None) -> int:
                     contact_guard.command_pose("left", latest_input_poses["left"]),
                     contact_guard.command_pose("right", latest_input_poses["right"]),
                 )
-                command_poses = (
+                protected_target_poses = (
                     joint_guard.command_pose("left", contact_command_poses[0]),
                     joint_guard.command_pose("right", contact_command_poses[1]),
                 )
-            if command_poses is not None:
-                robot_pair.SendCartesianMotionForce(
-                    command_poses,
-                    max_linear_vel=(float(args.max_linear_speed_m_s),) * 2,
-                    max_angular_vel=(float(args.max_angular_speed_rad_s),) * 2,
-                    max_linear_acc=(float(args.max_linear_acc_m_s2),) * 2,
-                    max_angular_acc=(float(args.max_angular_acc_rad_s2),) * 2,
+            force_resampler_reset = bool(guard_events or torque_guard_events)
+            if protected_target_poses is not None and args.target_resampling_control:
+                for index, side in enumerate(("left", "right")):
+                    active = bool(
+                        latest_control_active[side]
+                        and not contact_guard.frozen[side]
+                        and not joint_guard.frozen[side]
+                    )
+                    target_resamplers[side].push(
+                        protected_target_poses[index],
+                        now=now,
+                        active=active,
+                        force_reset=force_resampler_reset,
+                    )
+
+            command_poses = None
+            command_velocities = None
+            resample_due = bool(
+                args.target_resampling_control and now + 1e-9 >= next_resample_time
+            )
+            if resample_due:
+                motion_scales = tuple(
+                    joint_guard.motion_scale(
+                        side,
+                        soft_ratio=float(args.target_torque_soft_ratio),
+                        minimum_scale=float(args.target_min_motion_scale),
+                    )
+                    for side in ("left", "right")
                 )
+                samples = tuple(
+                    target_resamplers[side].sample(now=now, safety_scale=motion_scales[index])
+                    for index, side in enumerate(("left", "right"))
+                )
+                if all(sample is not None for sample in samples):
+                    command_poses = (samples[0][0], samples[1][0])
+                    command_velocities = (samples[0][1], samples[1][1])
+                missed_periods = max(1, int((now - next_resample_time) / resample_period_sec) + 1)
+                next_resample_time += missed_periods * resample_period_sec
+            elif not args.target_resampling_control and protected_target_poses is not None:
+                command_poses = protected_target_poses
+            if command_poses is not None:
+                try:
+                    robot_pair.SendCartesianMotionForce(
+                        command_poses,
+                        velocities=command_velocities or ([0.0] * 6, [0.0] * 6),
+                        max_linear_vel=tuple(
+                            float(args.max_linear_speed_m_s) * scale for scale in motion_scales
+                        ) if args.target_resampling_control else (float(args.max_linear_speed_m_s),) * 2,
+                        max_angular_vel=tuple(
+                            float(args.max_angular_speed_rad_s) * scale for scale in motion_scales
+                        ) if args.target_resampling_control else (float(args.max_angular_speed_rad_s),) * 2,
+                        max_linear_acc=tuple(
+                            float(args.max_linear_acc_m_s2) * scale for scale in motion_scales
+                        ) if args.target_resampling_control else (float(args.max_linear_acc_m_s2),) * 2,
+                        max_angular_acc=tuple(
+                            float(args.max_angular_acc_rad_s2) * scale for scale in motion_scales
+                        ) if args.target_resampling_control else (float(args.max_angular_acc_rad_s2),) * 2,
+                    )
+                except Exception as exc:
+                    # The monitor can switch RobotPair to IDLE between the
+                    # health check and this send. Preserve the process so the
+                    # coordinated Web Reset still has a live receiver.
+                    if self_collision_monitor_stopped_pair(
+                        robot_pair,
+                        collision_monitor,
+                        expected_mode=flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE,
+                    ):
+                        recovery_required = True
+                        recovery_phase = "self_collision_stopped"
+                        status_error = COLLISION_STOP_ERROR
+                        print(
+                            "[DrdkTargetStreamer] Cartesian send interrupted by "
+                            f"SelfCollisionMonitor Stop(): {exc}; waiting for Web Reset",
+                            flush=True,
+                        )
+                        publish_status(False, phase=recovery_phase, error=status_error)
+                        last_status_time = time.monotonic()
+                        continue
+                    raise
                 joint_guard.record_command("left", command_poses[0], now=now)
                 joint_guard.record_command("right", command_poses[1], now=now)
 
-            if command_poses is not None or now - last_status_time >= 0.1:
+            if now - last_status_time >= 0.1:
                 current_poses = {
                     "left": [float(value) for value in states[0].tcp_pose],
                     "right": [float(value) for value in states[1].tcp_pose],
@@ -1543,7 +2232,8 @@ def main(argv: list[str] | None = None) -> int:
                     print(
                         f"[DrdkTargetStreamer] sent synchronized cycle={last_sent_cycle} "
                         f"left={format_pose_xyz_quat(command_poses[0])} "
-                        f"right={format_pose_xyz_quat(command_poses[1])}",
+                        f"right={format_pose_xyz_quat(command_poses[1])} "
+                        f"velocity_ff_left={[round(value, 4) for value in (command_velocities or ([0.0] * 6,))[0]]}",
                         flush=True,
                     )
                     last_log_time = now

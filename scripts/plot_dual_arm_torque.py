@@ -22,7 +22,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=57684)
     parser.add_argument("--window-sec", type=float, default=30.0)
     parser.add_argument("--refresh-hz", type=float, default=10.0)
-    parser.add_argument("--trigger-ratio", type=float, default=0.85)
+    parser.add_argument("--trigger-ratio", type=float, default=0.72)
     args = parser.parse_args(argv)
     if not 0 <= args.port <= 65535:
         parser.error("--port must be between 0 and 65535")

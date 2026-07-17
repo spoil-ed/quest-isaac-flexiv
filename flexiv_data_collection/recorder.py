@@ -7,6 +7,7 @@ import argparse
 import json
 import select
 import shutil
+import socket
 import sys
 import termios
 import time
@@ -254,9 +255,76 @@ class StdinKeyReader:
             self.fd = None
 
 
+class UdpCommandReader:
+    """Receive optional Web-dashboard commands without changing recorder I/O."""
+
+    COMMANDS = {"start", "pause", "save", "discard", "reset", "quit"}
+
+    def __init__(self, host: str, port: int) -> None:
+        self.socket: socket.socket | None = None
+        if int(port) <= 0:
+            return
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.bind((str(host), int(port)))
+        self.socket.setblocking(False)
+
+    def poll(self) -> str | None:
+        if self.socket is None:
+            return None
+        latest = None
+        while True:
+            try:
+                payload, _address = self.socket.recvfrom(4096)
+            except BlockingIOError:
+                break
+            try:
+                decoded = payload.decode("utf-8").strip()
+                message = json.loads(decoded) if decoded.startswith("{") else decoded
+                command = message.get("command") if isinstance(message, dict) else message
+                command = str(command).strip().lower()
+            except (UnicodeDecodeError, ValueError, TypeError):
+                continue
+            if command in self.COMMANDS:
+                latest = command
+        return latest
+
+    def close(self) -> None:
+        if self.socket is not None:
+            self.socket.close()
+            self.socket = None
+
+
+class UdpStatusPublisher:
+    """Publish small structured recorder status packets for the Web dashboard."""
+
+    def __init__(self, host: str, port: int) -> None:
+        self.address = (str(host), int(port))
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if int(port) > 0 else None
+
+    def publish(self, status: dict[str, Any]) -> None:
+        if self.socket is None:
+            return
+        packet = {
+            "schema": "flexiv_recorder_status.v1",
+            "monotonic_time": time.monotonic(),
+            **status,
+        }
+        self.socket.sendto(
+            json.dumps(packet, separators=(",", ":"), ensure_ascii=False).encode("utf-8"),
+            self.address,
+        )
+
+    def close(self) -> None:
+        if self.socket is not None:
+            self.socket.close()
+            self.socket = None
+
+
 def request_sample(client: JsonLineReqClient) -> dict[str, Any] | None:
-    client.send_json({"type": "sample_request", "stamp_ns": time.time_ns()})
-    reply = client.recv_json(timeout=5.0)
+    reply = client.request_json(
+        {"type": "sample_request", "stamp_ns": time.time_ns()}, timeout=5.0
+    )
     if reply.get("type") == "error":
         print(f"[recorder] gateway error: {reply.get('error')}", flush=True)
         return None
@@ -314,8 +382,10 @@ def wait_for_reset(
 
 
 def request_reset(client: JsonLineReqClient, reason: str, *, timeout_sec: float = 25.0) -> dict[str, Any]:
-    client.send_json({"type": "reset_request", "reason": reason, "stamp_ns": time.time_ns()})
-    reply = client.recv_json(timeout=5.0)
+    reply = client.request_json(
+        {"type": "reset_request", "reason": reason, "stamp_ns": time.time_ns()},
+        timeout=5.0,
+    )
     if reply.get("type") == "error":
         raise RuntimeError(f"reset request rejected: {reply.get('error')}")
     control = reply.get("control") or {}
@@ -364,10 +434,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--quit-key", default="q")
     parser.add_argument("--auto-start", action="store_true")
+    parser.add_argument("--web-control-host", default="127.0.0.1")
+    parser.add_argument(
+        "--web-control-port",
+        type=int,
+        default=0,
+        help="Optional local UDP port receiving start/pause/save/discard/reset/quit commands.",
+    )
+    parser.add_argument("--web-status-host", default="127.0.0.1")
+    parser.add_argument(
+        "--web-status-port",
+        type=int,
+        default=0,
+        help="Optional UDP destination for structured recorder status packets.",
+    )
     parser.add_argument("--task-goal", default="Flexiv Stage1 data collection")
     parser.add_argument("--task-desc", default="Record Flexiv controller actions and observations")
     parser.add_argument("--task-steps", default="teleoperate; record; save; convert")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    for name in ("web_control_port", "web_status_port"):
+        port = int(getattr(args, name))
+        if not 0 <= port <= 65535:
+            parser.error(f"--{name.replace('_', '-')} must be between 0 and 65535")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -383,7 +472,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     client = JsonLineReqClient(args.gateway_endpoint)
     period = 1.0 / max(args.fps, 1e-6)
-    auto = args.auto_start or not sys.stdin.isatty()
+    # A headless recorder controlled by the Web dashboard must wait for the
+    # explicit Start button. Preserve the legacy headless auto-start behavior
+    # only when no Web control channel was requested.
+    auto = args.auto_start or (not sys.stdin.isatty() and args.web_control_port <= 0)
     episodes_done = 0
     active = False
     paused = False
@@ -392,7 +484,56 @@ def main(argv: list[str] | None = None) -> int:
     last_keyboard_reset = float("-inf")
     reset_failed = False
     key_reader = StdinKeyReader()
+    command_reader = UdpCommandReader(args.web_control_host, args.web_control_port)
+    status_publisher = UdpStatusPublisher(args.web_status_host, args.web_status_port)
     saved_task_episodes, saved_task_frames, saved_task_duration_sec = writer.saved_task_summary()
+    operation_state = ""
+    last_event = "启动待机"
+    last_error = ""
+    last_status_publish = float("-inf")
+
+    def publish_status(*, event: str | None = None, force: bool = False) -> None:
+        nonlocal last_event, last_status_publish
+        now = time.monotonic()
+        if event is not None:
+            last_event = str(event)
+            force = True
+        if not force and now - last_status_publish < 0.2:
+            return
+        if operation_state:
+            state = operation_state
+        elif reset_failed:
+            state = "error"
+        elif active and paused:
+            state = "paused"
+        elif active:
+            state = "recording"
+        else:
+            state = "idle"
+        current_duration_sec = frames_this_episode / max(float(args.fps), 1e-6)
+        status_publisher.publish(
+            {
+                "state": state,
+                "event": last_event,
+                "error": last_error,
+                "task_name": task_dir.name,
+                "task_dir": task_dir.as_posix(),
+                "episode_dir": writer.episode_dir.name if writer.episode_dir is not None else "",
+                "active": active,
+                "paused": paused,
+                "reset_failed": reset_failed,
+                "frames_current": frames_this_episode,
+                "duration_current_sec": current_duration_sec,
+                "episodes_done": episodes_done,
+                "episodes_target": args.episodes,
+                "saved_episodes": saved_task_episodes,
+                "saved_frames": saved_task_frames,
+                "saved_duration_sec": saved_task_duration_sec,
+                "total_duration_sec": saved_task_duration_sec + current_duration_sec,
+                "fps": args.fps,
+            }
+        )
+        last_status_publish = now
 
     def register_saved_episode(frame_count: int) -> None:
         nonlocal saved_task_episodes, saved_task_frames, saved_task_duration_sec
@@ -411,20 +552,29 @@ def main(argv: list[str] | None = None) -> int:
             f"含当前总时长={format_duration(saved_task_duration_sec + current_duration_sec)}",
             flush=True,
         )
+        publish_status(event=event)
 
     def perform_reset(reason: str) -> dict[str, Any]:
-        nonlocal reset_failed
+        nonlocal reset_failed, operation_state, last_error
+        operation_state = "resetting"
+        last_error = ""
+        publish_status(event="reset进行中")
         try:
             status = request_reset(client, reason, timeout_sec=args.reset_timeout_sec)
         except Exception as exc:
             reset_failed = True
+            operation_state = ""
+            last_error = str(exc)
             print(
                 f"[recorder] reset failed: {exc}; recorder remains alive, "
                 f"press {args.reset_key} to retry",
                 flush=True,
             )
+            publish_status(event="reset失败")
             raise
         reset_failed = False
+        operation_state = ""
+        publish_status(event="reset完成")
         return status
 
     def try_perform_reset(reason: str) -> bool:
@@ -444,6 +594,17 @@ def main(argv: list[str] | None = None) -> int:
         print_recording_status(event="启动待机")
         while episodes_done < args.episodes:
             key = key_reader.poll()
+            web_command = command_reader.poll()
+            if web_command is not None:
+                key = {
+                    "start": args.start_key,
+                    "pause": args.stop_key,
+                    "save": args.stop_key,
+                    "discard": args.discard_key,
+                    "reset": args.reset_key,
+                    "quit": args.quit_key,
+                }[web_command]
+            publish_status()
             if key == args.quit_key:
                 break
             if key == args.reset_key:
@@ -471,6 +632,7 @@ def main(argv: list[str] | None = None) -> int:
                 paused = False
                 last_tick = time.monotonic()
                 print("[recorder] resumed", flush=True)
+                print_recording_status(event="继续录制")
                 continue
             if (key == args.start_key or (auto and not active)) and not active:
                 reset_status = wait_for_reset(
@@ -493,7 +655,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[recorder] started {episode_dir}", flush=True)
                 print_recording_status(event="开始录制")
             if key == args.stop_key and active:
-                if not paused:
+                if not paused and web_command != "save":
                     paused = True
                     print("[recorder] paused", flush=True)
                     print_recording_status(event="已暂停")
@@ -524,6 +686,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             writer.add_sample(sample)
             frames_this_episode += 1
+            publish_status()
             if frames_this_episode % max(1, int(args.fps)) == 0:
                 print_recording_status(event="录制中")
             if args.max_frames > 0 and frames_this_episode >= args.max_frames:
@@ -542,6 +705,7 @@ def main(argv: list[str] | None = None) -> int:
         print("[recorder] interrupted", flush=True)
     finally:
         key_reader.close()
+        command_reader.close()
         try:
             if active and frames_this_episode > 0:
                 completed_frames = frames_this_episode
@@ -558,6 +722,9 @@ def main(argv: list[str] | None = None) -> int:
                 print("[recorder] discarded empty interrupted episode", flush=True)
         finally:
             client.close()
+            operation_state = "stopped"
+            publish_status(event="录制器已停止", force=True)
+            status_publisher.close()
     return 0
 
 

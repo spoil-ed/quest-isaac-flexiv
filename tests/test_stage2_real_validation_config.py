@@ -297,6 +297,10 @@ class Stage2RealValidationConfigTests(unittest.TestCase):
         self.assertIn("set_reset_scene_collisions_suppressed(False)", source)
         self.assertIn("collision_attr.Set(False)", source)
         self.assertIn("kinematic_attr.Set(True)", source)
+        self.assertIn("reset_robot_filter_active", source)
+        self.assertIn("UsdPhysics.FilteredPairsAPI.Apply(left_root)", source)
+        self.assertIn("filtered_pairs.AddTarget(right_path)", source)
+        self.assertIn("time.monotonic() >= reset_signal_after_time", source)
 
     def test_quest_mode_does_not_author_usd_inside_the_target_update_branch(self):
         source = DUAL_APP.read_text(encoding="utf-8")
@@ -319,7 +323,10 @@ class Stage2RealValidationConfigTests(unittest.TestCase):
 
         self.assertIn("arm.rdk_world_calibration", render_update)
         self.assertIn("calibration.rdk_pose_to_world", render_update)
-        self.assertIn("arm.target_frame.set_world_pose", render_update)
+        self.assertIn("arm.target_frame, arm.quest_goal_pose_base_tcp", render_update)
+        self.assertIn("arm.command_frame", render_update)
+        self.assertIn("arm.latest_control_pose_base_tcp", render_update)
+        self.assertIn("frame.set_world_pose", render_update)
         self.assertIn("world.step(render=True)", render_loop)
         self.assertIn("_update_quest_target_frames()", render_loop)
 

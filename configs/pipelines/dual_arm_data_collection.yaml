@@ -33,13 +33,24 @@ control:
   render_hz: 30
   gpu_dynamics: false
   # Isaac articulation limits [Nm], matching the existing Studio simulated
-  # Rizon4 safety-function limits. The 85% guard below remains more conservative.
+  # Rizon4 safety-function limits. The 72% guard below leaves impact headroom.
   joint_effort_limits_nm: [150.0, 150.0, 80.0, 80.0, 49.0, 49.0, 49.0]
   quest_position_scale: 1.0
   quest_position_deadband_m: 0.0
   quest_relative_orientation_mode: "relative"
-  max_linear_speed_m_s: 1.0
-  max_angular_speed_rad_s: 0.75
+  # Shared Isaac limiter and DRDK NRT trajectory limits. Reset uses a separate
+  # joint-space profile so it does not inherit the former 0.2 rad/s crawl.
+  # Match the normal-mode TCP safety limits loaded by both Studios.
+  max_linear_speed_m_s: 3.0
+  max_angular_speed_rad_s: 12.0
+  max_linear_acc_m_s2: 8.0
+  max_angular_acc_rad_s2: 30.0
+  # The joint command currently applies one common scalar. 2.0944 rad/s is
+  # the slowest J1/J2 dq_max in both generated Rizon4 models.
+  initial_joint_max_vel_rad_s: 2.0944
+  initial_joint_max_acc_rad_s2: 2.0
+  reset_joint_max_vel_rad_s: 2.0944
+  reset_joint_max_acc_rad_s2: 3.0
   isaac_max_frames: 900
   target_pose_publish_hz: 30
   target_axis_length: 0.30
@@ -47,39 +58,69 @@ control:
   rdk_clear_fault: false
   rdk_strict_clear_fault: true
   drdk:
+    reset_motion:
+      # Avoid Studio's empty-target race when entering NRT_JOINT_POSITION.
+      method: "movej"
+    output_torque_regulator:
+      enabled: true
+      # Keep the controller's output-torque saturation below RobotInfo.tau_max.
+      # For A3/A4 this changes 64 * 1.3 = 83.2 Nm to 64 * 0.85 = 54.4 Nm.
+      limiting_factor: 0.85
+      error_threshold: 50
+      # The password value is never stored in the repository. Export this
+      # variable before start.sh so both simulated robots can be configured.
+      password_env: "FLEXIV_SAFETY_PASSWORD"
     cartesian_impedance:
       enabled: true
-      # 10% of the Rizon4 nominal [10000 N/m, 1500 Nm/rad]. Lower values
-      # approach free-floating behavior and no longer track Quest reliably.
-      left_stiffness: [1000.0, 1000.0, 1000.0, 150.0, 150.0, 150.0]
-      right_stiffness: [1000.0, 1000.0, 1000.0, 150.0, 150.0, 150.0]
-      left_damping_ratio: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
-      right_damping_ratio: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
+      # Responsive NRT profile with impact headroom. The full-stiffness test
+      # reached A3/A4 torque faults during small contacts.
+      left_stiffness: [8000.0, 8000.0, 8000.0, 1200.0, 1200.0, 1200.0]
+      right_stiffness: [8000.0, 8000.0, 8000.0, 1200.0, 1200.0, 1200.0]
+      left_damping_ratio: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
+      right_damping_ratio: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
     self_collision_monitor:
-      enabled: false
-      min_distance_m: 0.05
+      enabled: true
+      # DRDK Stop() can take hundreds of milliseconds under load. Keep enough
+      # geometric headroom that the arms do not enter a torque fault while the
+      # coordinated stop is completing.
+      min_distance_m: 0.15
       loop_interval_ms: 10
       skipped_links: []
     contact_wrench:
       enabled: true
       # [Fx, Fy, Fz, Mx, My, Mz], units [N, Nm].
-      left_limit: [20.0, 20.0, 20.0, 3.0, 3.0, 3.0]
-      right_limit: [20.0, 20.0, 20.0, 3.0, 3.0, 3.0]
-      freeze_trigger_ratio: 0.95
-      release_ratio: 0.70
-      trigger_samples: 3
-      release_dwell_sec: 0.30
+      left_limit: [30.0, 30.0, 30.0, 5.0, 5.0, 5.0]
+      right_limit: [30.0, 30.0, 30.0, 5.0, 5.0, 5.0]
+      freeze_trigger_ratio: 0.90
+      release_ratio: 0.55
+      trigger_samples: 1
+      release_dwell_sec: 0.12
     joint_torque:
       enabled: true
-      # Compare tau, tau_ext and tau + tau_dot * prediction_horizon_sec
-      # against RobotPair.info().tau_max for each joint independently.
-      trigger_ratio: 0.85
-      release_ratio: 0.70
+      # Compare tau, tau_ext and a short-term torque prediction against
+      # RobotPair.info().tau_max. If runtime tau_dot is zero, estimate it from
+      # consecutive tau samples so simulation contacts still trigger early.
+      trigger_ratio: 0.72
+      release_ratio: 0.55
       trigger_samples: 1
-      release_dwell_sec: 0.30
-      prediction_horizon_sec: 0.02
+      release_dwell_sec: 0.15
+      prediction_horizon_sec: 0.025
       # Roll back to the newest target at least this old when protection triggers.
-      rollback_sec: 0.10
+      rollback_sec: 0.05
+    target_resampling:
+      enabled: true
+      # Responsive NRT profile. Quest/Isaac remains 30 Hz; DRDK sends bounded
+      # pose/velocity targets at 500 Hz while keeping impact headroom.
+      rate_hz: 500.0
+      prediction_horizon_sec: 0.012
+      velocity_filter_alpha: 0.65
+      feedforward_scale: 1.0
+      max_linear_feedforward_m_s: 3.0
+      max_angular_feedforward_rad_s: 12.0
+      torque_soft_ratio: 0.58
+      min_motion_scale: 0.20
+      linear_velocity_deadband_m_s: 0.005
+      angular_velocity_deadband_rad_s: 0.02
 
 convert:
   repo_id: "qiming/isaacsim_flexiv_dual_arm"

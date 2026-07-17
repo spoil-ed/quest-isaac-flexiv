@@ -67,9 +67,14 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("resolve_scene_task.py", text)
         self.assertIn("configs/pipelines/dual_arm_data_collection.yaml", text)
         self.assertIn('--pipeline-config "$PIPELINE_CONFIG"', text)
+        self.assertIn('"reset_joint_max_vel_rad_s"', text)
+        self.assertIn('--reset-joint-max-vel-rad-s "$FLEXIV_RESET_JOINT_MAX_VEL_RAD_S"', text)
+        self.assertIn('--max-linear-speed-m-s "$FLEXIV_MAX_LINEAR_SPEED_M_S"', text)
         self.assertIn("Usage: ./scripts/start.sh [--task TASK_NAME]", text)
         self.assertIn('TASK_NAME="$2"', text)
         self.assertIn('QUEST_PYTHON="$ISAAC_PYTHON"', text)
+        self.assertIn("--strict-shared-calibration", text)
+        self.assertNotIn("--no-strict-shared-calibration", text)
         self.assertNotIn("QUEST_CONDA_ENV", text)
         self.assertIn('--task and SCENE_CONFIG cannot be used together', text)
         self.assertIn("Starting DRDK earlier can make its native constructor exit", text)
@@ -109,6 +114,19 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("--gateway-endpoint", text)
         self.assertIn("--reset-on-save", text)
         self.assertIn('exec "${COMMAND[@]}"', text)
+        self.assertNotIn("/home/", text)
+
+    def test_start_all_wraps_stack_monitor_and_web_recorder(self):
+        script = SCRIPTS / "start_all.sh"
+        text = script.read_text(encoding="utf-8")
+
+        self.assertTrue(script.stat().st_mode & 0o111)
+        self.assertIn('REPO_ROOT="$(cd --', text)
+        self.assertIn('"$REPO_ROOT/scripts/start.sh" "$@"', text)
+        self.assertIn("web_control_dashboard.py", text)
+        self.assertIn('"$REPO_ROOT/scripts/record.sh"', text)
+        self.assertIn("--web-control-port", text)
+        self.assertIn("--web-status-port", text)
         self.assertNotIn("/home/", text)
 
     def test_scripts_print_wrapper_wraps_dual_arm_state_monitor(self):
@@ -194,6 +212,7 @@ class RepoLayoutTests(unittest.TestCase):
             "stop_flexiv_stack.py",
             "teleop_sdg.py",
             "validate_data_artifacts.py",
+            "web_control_dashboard.py",
         }
 
         self.assertEqual({path.name for path in SCRIPTS.glob("*.py")}, expected)
@@ -313,26 +332,57 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("--initial-joint-max-vel-rad-s", command)
         self.assertIn("--initial-joint-max-acc-rad-s2", command)
         self.assertIn("--initial-joint-handoff-sec", command)
+        self.assertEqual(command[command.index("--reset-motion-method") + 1], "movej")
         self.assertIn("--no-clear-fault", command)
-        self.assertIn("--no-self-collision-monitor", command)
+        self.assertIn("--self-collision-monitor", command)
         self.assertIn("--left-translation-in-world=-0.06,0.2,1.08", command)
         self.assertIn("--right-translation-in-world=-0.06,-0.2,1.08", command)
         self.assertIn("--contact-wrench-control", command)
-        self.assertIn("--left-max-contact-wrench=20.0,20.0,20.0,3.0,3.0,3.0", command)
-        self.assertIn("--right-max-contact-wrench=20.0,20.0,20.0,3.0,3.0,3.0", command)
+        self.assertIn("--output-torque-regulator", command)
+        self.assertEqual(
+            command[command.index("--output-torque-limiting-factor") + 1],
+            "0.85",
+        )
+        self.assertEqual(
+            command[command.index("--output-torque-error-threshold") + 1],
+            "50",
+        )
+        self.assertEqual(
+            command[command.index("--safety-password-env") + 1],
+            "FLEXIV_SAFETY_PASSWORD",
+        )
+        self.assertIn("--left-max-contact-wrench=30.0,30.0,30.0,5.0,5.0,5.0", command)
+        self.assertIn("--right-max-contact-wrench=30.0,30.0,30.0,5.0,5.0,5.0", command)
         self.assertEqual(
             command[command.index("--contact-wrench-trigger-samples") + 1],
-            "3",
+            "1",
         )
         self.assertIn("--joint-torque-control", command)
-        self.assertEqual(command[command.index("--joint-torque-trigger-ratio") + 1], "0.85")
-        self.assertEqual(command[command.index("--joint-torque-release-ratio") + 1], "0.7")
+        self.assertEqual(command[command.index("--joint-torque-trigger-ratio") + 1], "0.72")
+        self.assertEqual(command[command.index("--joint-torque-release-ratio") + 1], "0.55")
         self.assertEqual(command[command.index("--joint-torque-trigger-samples") + 1], "1")
         self.assertEqual(
             command[command.index("--joint-torque-prediction-horizon-sec") + 1],
-            "0.02",
+            "0.025",
         )
-        self.assertEqual(command[command.index("--joint-torque-rollback-sec") + 1], "0.1")
+        self.assertEqual(command[command.index("--joint-torque-rollback-sec") + 1], "0.05")
+        self.assertIn("--target-resampling-control", command)
+        self.assertEqual(command[command.index("--target-resample-rate-hz") + 1], "500.0")
+        self.assertEqual(
+            command[command.index("--target-prediction-horizon-sec") + 1],
+            "0.012",
+        )
+        self.assertEqual(command[command.index("--target-velocity-filter-alpha") + 1], "0.65")
+        self.assertEqual(command[command.index("--target-feedforward-scale") + 1], "1.0")
+        self.assertEqual(
+            command[command.index("--target-max-linear-feedforward-m-s") + 1],
+            "3.0",
+        )
+        self.assertEqual(
+            command[command.index("--target-max-angular-feedforward-rad-s") + 1],
+            "12.0",
+        )
+        self.assertEqual(command[command.index("--target-torque-soft-ratio") + 1], "0.58")
 
     def test_isaac_follow_startup_does_not_embed_rdk_client(self):
         follow = load_script("start_isaac_follow.py")
