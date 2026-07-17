@@ -38,6 +38,17 @@ def _rot_z_90_pose(x=0.0, y=0.0, z=0.0):
     ]
 
 
+def _rot_z_pose(angle_rad, x=0.0, y=0.0, z=0.0):
+    cosine = math.cos(angle_rad)
+    sine = math.sin(angle_rad)
+    return [
+        [cosine, -sine, 0.0, x],
+        [sine, cosine, 0.0, y],
+        [0.0, 0.0, 1.0, z],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+
+
 def _rotate_vector_wxyz(quat, vector):
     pure = [0.0, *vector]
     rotated = mod.quat_multiply_wxyz(
@@ -59,6 +70,57 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertEqual(args.side, "both")
         self.assertEqual(args.left_serial_number, "Rizon4-qSaFLh")
         self.assertEqual(args.right_serial_number, "Rizon4-I0LIRN")
+
+    def test_shared_frame_requires_valid_geometry_and_both_squeeze(self):
+        calibration = mod.QuestSharedFrameCalibration(settle_sec=0.0)
+        left = _pose(-0.2, 1.2, -0.3)
+        right = _pose(0.2, 1.2, -0.3)
+
+        self.assertFalse(calibration.update(left, right, both_squeeze=False, now=1.0))
+        self.assertFalse(calibration.confirmed)
+        self.assertTrue(calibration.update(left, right, both_squeeze=True, now=1.1))
+        self.assertTrue(calibration.confirmed)
+
+    def test_shared_frame_stays_frozen_after_squeeze_release(self):
+        calibration = mod.QuestSharedFrameCalibration(settle_sec=0.0)
+        left = _pose(-0.2, 1.2, -0.3)
+        right = _pose(0.2, 1.2, -0.3)
+        calibration.update(left, right, both_squeeze=True, now=1.0)
+        frozen = [list(row) for row in calibration.rotation_calibrated_from_mapped]
+
+        calibration.update(None, None, both_squeeze=False, now=2.0)
+
+        self.assertTrue(calibration.confirmed)
+        self.assertEqual(calibration.rotation_calibrated_from_mapped, frozen)
+
+    def test_shared_frame_removes_confirmation_yaw_from_translation(self):
+        angle = math.radians(30.0)
+        forward = [math.cos(angle), math.sin(angle)]
+        lateral = [-math.sin(angle), math.cos(angle)]
+        calibration = mod.QuestSharedFrameCalibration(
+            axis_map="x,y,z",
+            tcp_rot_offset_wxyz=[math.sqrt(0.5), 0.0, math.sqrt(0.5), 0.0],
+            settle_sec=0.0,
+        )
+        left = _rot_z_pose(angle, 0.2 * lateral[0], 0.2 * lateral[1], 0.0)
+        right = _rot_z_pose(angle, -0.2 * lateral[0], -0.2 * lateral[1], 0.0)
+        self.assertTrue(calibration.update(left, right, both_squeeze=True, now=1.0))
+        mapper = mod.QuestRelativeMapper(
+            axis_map="x,y,z",
+            tcp_rot_offset_wxyz=[1.0, 0.0, 0.0, 0.0],
+            engage_settle_sec=0.0,
+        )
+        mapper.update(_rot_z_pose(angle), enabled=True, seq=1, now=1.0, calibration=calibration)
+
+        packet = mapper.update(
+            _rot_z_pose(angle, 0.1 * forward[0], 0.1 * forward[1], 0.0),
+            enabled=True,
+            seq=2,
+            now=1.1,
+            calibration=calibration,
+        )
+
+        self.assertEqual([round(value, 6) for value in packet["controller_delta_base"]], [0.1, 0.0, 0.0])
 
     def test_televuer_streams_both_motion_controllers(self):
         source = TELEVUER_PATH.read_text(encoding="utf-8")
@@ -163,10 +225,10 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
 
         packet = mapper.update(_pose(0.0, 0.0, 0.0), enabled=True, seq=1, now=10.0)
 
-        tcp_forward_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [0.0, 0.0, -1.0])
+        tcp_forward_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [0.0, 0.0, 1.0])
         tcp_left_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [0.0, 1.0, 0.0])
         tcp_up_in_base = _rotate_vector_wxyz(packet["pose_base_tcp_des"][3:], [1.0, 0.0, 0.0])
-        self.assertEqual([round(value, 4) for value in tcp_forward_in_base], [-1.0, 0.0, 0.0])
+        self.assertEqual([round(value, 4) for value in tcp_forward_in_base], [1.0, 0.0, 0.0])
         self.assertEqual([round(value, 4) for value in tcp_left_in_base], [0.0, -1.0, 0.0])
         self.assertEqual([round(value, 4) for value in tcp_up_in_base], [0.0, 0.0, 1.0])
 
@@ -236,6 +298,13 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
             gripper_button="trigger",
             gripper_value=0.7,
             gripper_closed=True,
+            calibration_confirmed=True,
+            both_squeeze=True,
+            calibration_rotation_base_from_mapped=[
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
             now=13.0,
             serial_number="Rizon4-qSaFLh",
         )
@@ -248,6 +317,9 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertEqual(packet["axis_map"], mod.DEFAULT_AXIS_MAP)
         self.assertEqual(packet["position_delta_scale"], 1.0)
         self.assertEqual(len(packet["tcp_rot_offset_wxyz"]), 4)
+        self.assertTrue(packet["calibration_confirmed"])
+        self.assertTrue(packet["both_squeeze"])
+        self.assertEqual(packet["calibration_rotation_base_from_mapped"][0], [1.0, 0.0, 0.0])
 
     def test_select_enable_accepts_analog_squeeze_threshold(self):
         class FakeTeleVuer:

@@ -22,12 +22,14 @@ robots:
     # through a rate-limited Cartesian target trajectory.
     bootstrap_q: [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
     # Task-tuned ready posture; DRDK reaches it through NRT joint position.
-    initial_q: [-2.0879, 1.7997, 1.1, 1.5, 2.1874, 1.8322, -0.1244]
+    initial_q_waypoints:
+      - [-1.8879, 1.7997, 0.5862, 1.9189, 2.1874, 1.8322, -0.1244]
+    initial_q: [-2.76749928, 1.60589571, -0.10185033, 2.13409496, 2.94157208, 1.03397210, -0.20519636]
     target:
       prim_path: "/World/TargetFrameLeft"
       name: "target_frame_left"
-      position: {x: 0.48, y: 0.18, z: 0.56}
-      euler_deg: {x: 0.0, y: 0.0, z: 0.0}
+      position: {x: 0.75348038, y: 0.20, z: 0.98000}
+      euler_deg: {x: 0.0, y: 90.0, z: 0.0}
     target_pose: {host: "127.0.0.1", port: 57680}
 
   - side: "right"
@@ -42,12 +44,14 @@ robots:
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
     bootstrap_q: [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
     # Task-tuned ready posture; DRDK reaches it through NRT joint position.
-    initial_q: [-1.18, -1.7187, -1.1, -1.5, -0.1607, 1.9371, -0.0858]
+    initial_q_waypoints:
+      - [-1.18, -1.7187, -0.6799, -1.7503, -0.1607, 1.9371, -0.0858]
+    initial_q: [-0.77857750, -1.41308403, -0.30362110, -1.84063396, -0.63279176, 1.04804090, 1.39382554]
     target:
       prim_path: "/World/TargetFrameRight"
       name: "target_frame_right"
-      position: {x: 0.48, y: -0.18, z: 0.56}
-      euler_deg: {x: 0.0, y: 0.0, z: 0.0}
+      position: {x: 0.75348038, y: -0.20, z: 0.98000}
+      euler_deg: {x: 0.0, y: 90.0, z: 0.0}
     target_pose: {host: "127.0.0.1", port: 57681}
 
 cameras:

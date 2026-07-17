@@ -1,5 +1,5 @@
-# Legacy Stage1 pipeline entrypoint.
-# Prefer configs/pipelines/stage1_single_rizon4_data_collection.yaml for new use.
+# Archived single-arm validation config. New collection uses the unified
+# configs/pipelines/dual_arm_data_collection.yaml pipeline.
 
 environment_config: "environments/local_flexiv_runtime.yaml"
 scene_config: "scenes/single_rizon4_cam_front.yaml"

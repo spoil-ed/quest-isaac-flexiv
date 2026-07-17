@@ -15,7 +15,7 @@ fake/Quest dual target -> Isaac dual TargetFrame
 
 ## 主要成果
 
-- 新增双臂 scene/pipeline 配置：`dual_rizon4_cam_front.yaml` 和 `stage2_dual_rizon4_data_collection.yaml`。
+- 当时新增的双臂 pipeline 现已收敛为 `configs/pipelines/dual_arm_data_collection.yaml`；任务差异由 scene config 承担。
 - 新增双臂 Isaac app：独立于单臂 `follow_ball_with_studio.py`，通过一个 Quest UDP endpoint 按 `side=left/right` 分流，向左右两个 RDK streamer 发布 target pose。
 - 新增双臂验收编排脚本：`run_stage2_dual_rizon4_real_validation.py`，启动本仓库 gateway、双 RDK、dual Isaac、fake dual sender、recorder、converter 和 strict dual validator。
 - 新增双臂严格校验：要求 Stage2 backend、左右 serial 匹配、左右 q delta 达标、左右 torque 非零、相机帧数完整、LeRobot-style 视频为 H264。
@@ -40,7 +40,7 @@ python scripts/run_stage2_dual_data_collection_smoke.py
 
 ```bash
 python scripts/run_stage2_dual_rizon4_real_validation.py \
-  --config configs/pipelines/stage2_dual_rizon4_data_collection.yaml \
+  --config configs/pipelines/dual_arm_data_collection.yaml \
   --left-serial-number "$LEFT_ROBOT_SERIAL" \
   --right-serial-number "$RIGHT_ROBOT_SERIAL"
 ```

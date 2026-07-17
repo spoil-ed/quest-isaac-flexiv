@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = REPO_ROOT / "configs/pipelines/stage3_pick_place_redblock_dual.yaml"
+DEFAULT_CONFIG = REPO_ROOT / "configs/pipelines/dual_arm_data_collection.yaml"
 
 if str(REPO_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))

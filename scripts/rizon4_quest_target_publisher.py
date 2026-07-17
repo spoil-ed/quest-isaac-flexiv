@@ -24,6 +24,9 @@ DEFAULT_UDP_HOST = "127.0.0.1"
 DEFAULT_UDP_PORT = 45679
 DEFAULT_TCP_ROT_OFFSET_WXYZ = (0.0, 0.70710678, 0.0, 0.70710678)
 DEFAULT_AXIS_MAP = "-z,-x,y"
+DEFAULT_HAND_SEPARATION_M = 0.40
+DEFAULT_HAND_SEPARATION_TOLERANCE_M = 0.01
+DEFAULT_HAND_DIRECTION_TOLERANCE_DEG = 15.0
 
 
 def _as_float_list(values: Iterable[float], expected_len: int, name: str) -> list[float]:
@@ -77,6 +80,46 @@ def transpose_matrix3(matrix: list[list[float]]) -> list[list[float]]:
     return [[float(matrix[row][col]) for row in range(3)] for col in range(3)]
 
 
+def multiply_matrix3_vector(matrix: list[list[float]], vector: Iterable[float]) -> list[float]:
+    values = _as_float_list(vector, 3, "vector")
+    return [sum(float(matrix[row][col]) * values[col] for col in range(3)) for row in range(3)]
+
+
+def dot3(left: Iterable[float], right: Iterable[float]) -> float:
+    a = _as_float_list(left, 3, "left vector")
+    b = _as_float_list(right, 3, "right vector")
+    return sum(x * y for x, y in zip(a, b))
+
+
+def norm3(vector: Iterable[float]) -> float:
+    values = _as_float_list(vector, 3, "vector")
+    return math.sqrt(sum(value * value for value in values))
+
+
+def normalize3(vector: Iterable[float]) -> list[float]:
+    values = _as_float_list(vector, 3, "vector")
+    length = norm3(values)
+    if length <= 1e-9:
+        raise ValueError("cannot normalize a zero-length vector")
+    return [value / length for value in values]
+
+
+def cross3(left: Iterable[float], right: Iterable[float]) -> list[float]:
+    ax, ay, az = _as_float_list(left, 3, "left vector")
+    bx, by, bz = _as_float_list(right, 3, "right vector")
+    return [ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx]
+
+
+def vector_angle_deg(left: Iterable[float], right: Iterable[float]) -> float:
+    left_values = _as_float_list(left, 3, "left vector")
+    right_values = _as_float_list(right, 3, "right vector")
+    denominator = norm3(left_values) * norm3(right_values)
+    if denominator <= 1e-9:
+        return 180.0
+    cosine = max(-1.0, min(1.0, dot3(left_values, right_values) / denominator))
+    return math.degrees(math.acos(cosine))
+
+
 def normalize_quat_wxyz(values: Iterable[float]) -> list[float]:
     quat = _as_float_list(values, 4, "quaternion")
     norm = math.sqrt(sum(value * value for value in quat))
@@ -101,6 +144,19 @@ def quat_multiply_wxyz(a: Iterable[float], b: Iterable[float]) -> list[float]:
             aw * bz + ax * by - ay * bx + az * bw,
         ]
     )
+
+
+def quat_to_rotation_matrix(quaternion: Iterable[float]) -> list[list[float]]:
+    w, x, y, z = normalize_quat_wxyz(quaternion)
+    return [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)],
+        [2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x)],
+        [2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)],
+    ]
+
+
+def rotate_vector_wxyz(quaternion: Iterable[float], vector: Iterable[float]) -> list[float]:
+    return multiply_matrix3_vector(quat_to_rotation_matrix(quaternion), vector)
 
 
 def rotation_matrix_to_quat_wxyz(matrix: list[list[float]]) -> list[float]:
@@ -135,6 +191,120 @@ def pose_matrix_quat_wxyz(matrix: list[list[float]], axis_map: list[tuple[int, f
         transform = axis_map_matrix(axis_map)
         rotation = multiply_matrix3(multiply_matrix3(transform, rotation), transpose_matrix3(transform))
     return rotation_matrix_to_quat_wxyz(rotation)
+
+
+class QuestSharedFrameCalibration:
+    """Freeze a shared dual-controller frame after a valid two-squeeze confirmation."""
+
+    def __init__(
+        self,
+        *,
+        axis_map: str = DEFAULT_AXIS_MAP,
+        tcp_rot_offset_wxyz: Iterable[float] = DEFAULT_TCP_ROT_OFFSET_WXYZ,
+        settle_sec: float = 0.25,
+        separation_m: float = DEFAULT_HAND_SEPARATION_M,
+        separation_tolerance_m: float = DEFAULT_HAND_SEPARATION_TOLERANCE_M,
+        direction_tolerance_deg: float = DEFAULT_HAND_DIRECTION_TOLERANCE_DEG,
+    ) -> None:
+        self.axis_map = parse_axis_map(axis_map)
+        self.tcp_rot_offset_wxyz = normalize_quat_wxyz(tcp_rot_offset_wxyz)
+        self.settle_sec = max(0.0, float(settle_sec))
+        self.separation_m = float(separation_m)
+        self.separation_tolerance_m = max(0.0, float(separation_tolerance_m))
+        self.direction_tolerance_deg = max(0.0, float(direction_tolerance_deg))
+        self.rotation_calibrated_from_mapped: list[list[float]] | None = None
+        self._pending_since: float | None = None
+
+    @property
+    def confirmed(self) -> bool:
+        return self.rotation_calibrated_from_mapped is not None
+
+    def _mapped_position(self, pose: list[list[float]]) -> list[float]:
+        return apply_axis_map(pose_matrix_position(pose), self.axis_map)
+
+    def _mapped_forward(self, pose: list[list[float]]) -> list[float]:
+        hand_quat = pose_matrix_quat_wxyz(pose, axis_map=self.axis_map)
+        tcp_quat = quat_multiply_wxyz(hand_quat, self.tcp_rot_offset_wxyz)
+        return rotate_vector_wxyz(tcp_quat, [0.0, 0.0, 1.0])
+
+    def candidate_rotation(
+        self,
+        left_pose: list[list[float]],
+        right_pose: list[list[float]],
+    ) -> list[list[float]] | None:
+        left_position = self._mapped_position(left_pose)
+        right_position = self._mapped_position(right_pose)
+        delta = [right_position[index] - left_position[index] for index in range(3)]
+        if abs(norm3(delta) - self.separation_m) > self.separation_tolerance_m:
+            return None
+
+        left_forward = self._mapped_forward(left_pose)
+        right_forward = self._mapped_forward(right_pose)
+        line_xy = [delta[0], delta[1], 0.0]
+        left_xy = [left_forward[0], left_forward[1], 0.0]
+        right_xy = [right_forward[0], right_forward[1], 0.0]
+        left_error = abs(vector_angle_deg(left_xy, line_xy) - 90.0)
+        right_error = abs(vector_angle_deg(right_xy, line_xy) - 90.0)
+        mutual_error = vector_angle_deg(left_xy, right_xy)
+        if max(left_error, right_error, mutual_error) > self.direction_tolerance_deg:
+            return None
+
+        x_axis = normalize3([left_xy[0] + right_xy[0], left_xy[1] + right_xy[1], 0.0])
+        # left-right defines positive lateral direction. Gram-Schmidt removes
+        # the residual confirmation-angle error instead of carrying it into XYZ.
+        left_from_right = [-line_xy[0], -line_xy[1], 0.0]
+        lateral_projection = dot3(left_from_right, x_axis)
+        y_axis = normalize3(
+            [left_from_right[index] - lateral_projection * x_axis[index] for index in range(3)]
+        )
+        z_axis = normalize3(cross3(x_axis, y_axis))
+        if z_axis[2] < 0.0:
+            y_axis = [-value for value in y_axis]
+            z_axis = [-value for value in z_axis]
+        # Rows project mapped-base vectors onto the frozen Quest frame. This
+        # frame is identified with Isaac/Studio base +X/+Y/+Z.
+        return [x_axis, y_axis, z_axis]
+
+    def update(
+        self,
+        left_pose: list[list[float]] | None,
+        right_pose: list[list[float]] | None,
+        *,
+        both_squeeze: bool,
+        now: float,
+    ) -> bool:
+        if self.confirmed:
+            return True
+        if not both_squeeze or left_pose is None or right_pose is None:
+            self._pending_since = None
+            return False
+        candidate = self.candidate_rotation(left_pose, right_pose)
+        if candidate is None:
+            self._pending_since = None
+            return False
+        if self._pending_since is None:
+            self._pending_since = float(now)
+            if self.settle_sec > 0.0:
+                return False
+        if float(now) - self._pending_since < self.settle_sec:
+            return False
+        self.rotation_calibrated_from_mapped = candidate
+        return True
+
+    def transform_position(self, mapped_position: Iterable[float]) -> list[float]:
+        if self.rotation_calibrated_from_mapped is None:
+            return _as_float_list(mapped_position, 3, "mapped position")
+        return multiply_matrix3_vector(self.rotation_calibrated_from_mapped, mapped_position)
+
+    def transform_orientation(self, mapped_quaternion: Iterable[float]) -> list[float]:
+        if self.rotation_calibrated_from_mapped is None:
+            return normalize_quat_wxyz(mapped_quaternion)
+        rotation = self.rotation_calibrated_from_mapped
+        transformed = multiply_matrix3(
+            multiply_matrix3(rotation, quat_to_rotation_matrix(mapped_quaternion)),
+            transpose_matrix3(rotation),
+        )
+        return rotation_matrix_to_quat_wxyz(transformed)
 
 
 def build_quest_packet(
@@ -203,6 +373,9 @@ def build_quest_input_packet(
     position_deadband: float = 0.0,
     engage_settle_sec: float = 0.25,
     tcp_rot_offset_wxyz: str = "0.0,0.70710678,0.0,0.70710678",
+    calibration_confirmed: bool = False,
+    both_squeeze: bool = False,
+    calibration_rotation_base_from_mapped: list[list[float]] | None = None,
     serial_number: str = DEFAULT_SERIAL_NUMBER,
     joint_group: str = DEFAULT_JOINT_GROUP,
 ) -> dict:
@@ -233,6 +406,9 @@ def build_quest_input_packet(
             4,
             "tcp_rot_offset_wxyz",
         ),
+        "calibration_confirmed": bool(calibration_confirmed),
+        "both_squeeze": bool(both_squeeze),
+        "calibration_rotation_base_from_mapped": calibration_rotation_base_from_mapped,
         "monotonic_time": float(now),
     }
 
@@ -262,10 +438,21 @@ class QuestRelativeMapper:
         self._engage_time: float | None = None
         self._settled = False
 
-    def update(self, pose_matrix: list[list[float]], *, enabled: bool, seq: int, now: float) -> dict | None:
+    def update(
+        self,
+        pose_matrix: list[list[float]],
+        *,
+        enabled: bool,
+        seq: int,
+        now: float,
+        calibration: QuestSharedFrameCalibration | None = None,
+    ) -> dict | None:
         position_openxr = pose_matrix_position(pose_matrix)
         mapped_position = apply_axis_map(position_openxr, self.axis_map)
         hand_quat = pose_matrix_quat_wxyz(pose_matrix, axis_map=self.axis_map)
+        if calibration is not None:
+            mapped_position = calibration.transform_position(mapped_position)
+            hand_quat = calibration.transform_orientation(hand_quat)
         if not enabled:
             self._position_zero = None
             self._engage_time = None
@@ -405,13 +592,29 @@ def main(argv: list[str] | None = None) -> int:
         )
         for side in sides
     }
+    shared_calibration = None
+    if args.side == "both":
+        shared_calibration = QuestSharedFrameCalibration(
+            axis_map=args.axis_map,
+            tcp_rot_offset_wxyz=parse_csv_floats(
+                args.right_tcp_rot_offset,
+                4,
+                "right-tcp-rot-offset",
+            ),
+            settle_sec=args.engage_settle_sec,
+        )
     publisher = UdpJsonPublisher(args.udp_host, args.udp_port)
     url = f"https://{args.host_ip}:8012/?ws=wss://{args.host_ip}:8012"
     print("[Rizon4QuestTargetPublisher] Open this URL in the Quest browser:", flush=True)
     print(url, flush=True)
     print(
-        "[Rizon4QuestTargetPublisher] Enter VR, allow controller tracking, "
-        f"hold {args.enable_button} on the {args.side} controller(s), then move them.",
+        "[Rizon4QuestTargetPublisher] Enter VR and allow controller tracking. "
+        + (
+            "Match the two checks in print.sh, then hold squeeze on BOTH controllers "
+            "to lock the shared Quest-to-Isaac frame. Release pauses; the next squeeze resumes relative motion."
+            if args.side == "both"
+            else f"Hold {args.enable_button} on the {args.side} controller, then move it."
+        ),
         flush=True,
     )
     print(f"[Rizon4QuestTargetPublisher] UDP target: {args.udp_host}:{args.udp_port}", flush=True)
@@ -423,24 +626,86 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             now = time.monotonic()
             ready = bool(tv.motion_data_ready)
+            button_values = {
+                side: select_button_value(tv, side, args.enable_button) if ready else 0.0
+                for side in sides
+            }
+            gripper_values = {
+                side: select_button_value(tv, side, args.gripper_button) if ready else 0.0
+                for side in sides
+            }
+            enabled_values = {
+                side: bool(
+                    ready
+                    and select_enable(
+                        tv,
+                        side,
+                        args.enable_button,
+                        threshold=args.enable_threshold,
+                    )
+                )
+                for side in sides
+            }
+            squeeze_values = {
+                side: bool(
+                    ready
+                    and select_enable(
+                        tv,
+                        side,
+                        "squeeze",
+                        threshold=args.enable_threshold,
+                    )
+                )
+                for side in sides
+            }
+            gripper_closed_values = {
+                side: bool(
+                    ready
+                    and select_enable(
+                        tv,
+                        side,
+                        args.gripper_button,
+                        threshold=args.gripper_threshold,
+                    )
+                )
+                for side in sides
+            }
+            controller_matrices = {
+                side: select_controller_pose(tv, side) if ready else None for side in sides
+            }
+            both_squeeze = bool(
+                ready
+                and len(sides) == 2
+                and all(squeeze_values.get(side, False) for side in ("left", "right"))
+            )
+            calibration_was_confirmed = bool(
+                shared_calibration is not None and shared_calibration.confirmed
+            )
+            if shared_calibration is not None:
+                shared_calibration.update(
+                    controller_matrices.get("left"),
+                    controller_matrices.get("right"),
+                    both_squeeze=both_squeeze,
+                    now=now,
+                )
+                if shared_calibration.confirmed and not calibration_was_confirmed:
+                    print(
+                        "[Rizon4QuestTargetPublisher] shared Quest-to-Isaac frame LOCKED; "
+                        "position and orientation now use the frozen 3D rotation.",
+                        flush=True,
+                    )
             states = []
             for side in sides:
-                button_value = select_button_value(tv, side, args.enable_button) if ready else 0.0
-                gripper_value = select_button_value(tv, side, args.gripper_button) if ready else 0.0
-                enabled = ready and select_enable(
-                    tv,
-                    side,
-                    args.enable_button,
-                    threshold=args.enable_threshold,
-                )
-                gripper_closed = ready and select_enable(
-                    tv,
-                    side,
-                    args.gripper_button,
-                    threshold=args.gripper_threshold,
+                button_value = button_values[side]
+                gripper_value = gripper_values[side]
+                enabled = enabled_values[side]
+                gripper_closed = gripper_closed_values[side]
+                control_enabled = bool(
+                    enabled
+                    and (shared_calibration is None or shared_calibration.confirmed)
                 )
                 packet = None
-                controller_matrix = select_controller_pose(tv, side) if ready else None
+                controller_matrix = controller_matrices[side]
                 controller_pose_openxr = (
                     None
                     if controller_matrix is None
@@ -462,6 +727,15 @@ def main(argv: list[str] | None = None) -> int:
                         gripper_button=args.gripper_button,
                         gripper_value=gripper_value,
                         gripper_closed=gripper_closed,
+                        calibration_confirmed=bool(
+                            shared_calibration is not None and shared_calibration.confirmed
+                        ),
+                        both_squeeze=both_squeeze,
+                        calibration_rotation_base_from_mapped=(
+                            None
+                            if shared_calibration is None
+                            else shared_calibration.rotation_calibrated_from_mapped
+                        ),
                         now=now,
                         axis_map=args.axis_map,
                         position_delta_scale=args.position_delta_scale,
@@ -487,23 +761,38 @@ def main(argv: list[str] | None = None) -> int:
                     sent += 1
                     packet = mappers[side].update(
                         controller_matrix,
-                        enabled=enabled,
+                        enabled=control_enabled,
                         seq=seq,
                         now=now,
+                        calibration=shared_calibration,
                     )
                     if packet is not None:
                         reason = str(packet.get("reason", "tracking"))
                         publisher.publish(packet)
                         sent += 1
-                states.append((side, button_value, enabled, gripper_value, gripper_closed, reason, packet))
+                if shared_calibration is not None and not shared_calibration.confirmed:
+                    reason = "confirming_frame" if both_squeeze else "awaiting_dual_confirmation"
+                states.append(
+                    (side, button_value, enabled, control_enabled, gripper_value, gripper_closed, reason, packet)
+                )
             if args.log_hz > 0.0 and now - last_log >= 1.0 / float(args.log_hz):
                 state_text = []
-                for side, button_value, enabled, gripper_value, gripper_closed, reason, packet in states:
+                for (
+                    side,
+                    button_value,
+                    enabled,
+                    control_enabled,
+                    gripper_value,
+                    gripper_closed,
+                    reason,
+                    packet,
+                ) in states:
                     pose_text = ""
                     if packet is not None:
                         pose_text = f" pose={[round(value, 4) for value in packet['pose_base_tcp_des']]}"
                     state_text.append(
-                        f"{side}[enabled={enabled} {args.enable_button}Value={button_value:.3f} "
+                        f"{side}[{args.enable_button}={enabled} control={control_enabled} "
+                        f"{args.enable_button}Value={button_value:.3f} "
                         f"{args.gripper_button}Value={gripper_value:.3f} gripper_closed={gripper_closed} "
                         f"reason={reason}{pose_text}]"
                     )

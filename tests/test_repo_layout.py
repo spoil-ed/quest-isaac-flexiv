@@ -64,11 +64,37 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("start_drdk_target_streamer.py", text)
         self.assertIn("start_dual_isaac_follow.py", text)
         self.assertIn("rizon4_quest_target_publisher.py", text)
+        self.assertIn("resolve_scene_task.py", text)
+        self.assertIn("Usage: ./scripts/start.sh [--task TASK_NAME]", text)
+        self.assertIn('TASK_NAME="$2"', text)
+        self.assertIn('QUEST_PYTHON="$ISAAC_PYTHON"', text)
+        self.assertNotIn("QUEST_CONDA_ENV", text)
+        self.assertIn('--task and SCENE_CONFIG cannot be used together', text)
+        self.assertIn("Starting DRDK earlier can make its native constructor exit", text)
+        isaac_start = text.index('"$REPO_ROOT/scripts/start_dual_isaac_follow.py"')
+        drdk_start = text.index('"$REPO_ROOT/scripts/start_drdk_target_streamer.py"')
+        self.assertLess(isaac_start, drdk_start)
         self.assertNotIn("record_unitree_json.py", text)
         self.assertIn("stop_flexiv_stack.py", text)
         self.assertIn("down --remove-orphans", text)
         self.assertIn("clearing stale host shared memory", text)
         self.assertNotIn("/home/", text)
+
+    def test_scene_task_resolver_uses_yaml_task_name(self):
+        resolver = load_script("resolve_scene_task.py")
+
+        path = resolver.resolve_scene_task("wall_table_base")
+
+        self.assertEqual(path.name, "dual_rizon4_wall_table_base.yaml")
+        self.assertEqual(path.parent, ROOT / "configs" / "scenes")
+
+    def test_scene_task_resolver_rejects_unknown_or_path_names(self):
+        resolver = load_script("resolve_scene_task.py")
+
+        with self.assertRaisesRegex(ValueError, "available tasks"):
+            resolver.resolve_scene_task("missing_task")
+        with self.assertRaisesRegex(ValueError, "path separators"):
+            resolver.resolve_scene_task("../move_cylinder_flexiv_dual")
 
     def test_scripts_record_script_wraps_interactive_recorder(self):
         record_script = SCRIPTS / "record.sh"
@@ -143,6 +169,7 @@ class RepoLayoutTests(unittest.TestCase):
             "drdk_target_streamer.py",
             "rdk_target_streamer.py",
             "record_unitree_json.py",
+            "resolve_scene_task.py",
             "print_dual_arm_state.py",
             "rizon4_quest_target_publisher.py",
             "run_stage1_data_collection_smoke.py",
@@ -257,11 +284,19 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("--left-serial-number", command)
         self.assertIn("--right-serial-number", command)
         self.assertIn(
-            "--left-nullspace-posture=-1.8879,1.7997,0.5862,1.9189,2.1874,1.8322,-0.1244",
+                "--left-nullspace-posture=-2.76749928,1.60589571,-0.10185033,2.13409496,2.94157208,1.0339721,-0.20519636",
             command,
         )
         self.assertIn(
-            "--right-nullspace-posture=-1.18,-1.7187,-0.6799,-1.7503,-0.1607,1.9371,-0.0858",
+                "--right-nullspace-posture=-0.7785775,-1.41308403,-0.3036211,-1.84063396,-0.63279176,1.0480409,1.39382554",
+            command,
+        )
+        self.assertIn(
+            "--left-startup-waypoint=-1.8879,1.7997,0.5862,1.9189,2.1874,1.8322,-0.1244",
+            command,
+        )
+        self.assertIn(
+            "--right-startup-waypoint=-1.18,-1.7187,-0.6799,-1.7503,-0.1607,1.9371,-0.0858",
             command,
         )
         self.assertIn("--nullspace-tracking-weight", command)

@@ -132,6 +132,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--right-translation-in-world", default="0,0,0")
     parser.add_argument("--left-nullspace-posture", required=True)
     parser.add_argument("--right-nullspace-posture", required=True)
+    parser.add_argument(
+        "--left-startup-waypoint",
+        action="append",
+        default=[],
+        help="Optional 7-DoF NRT joint waypoint used only during initial startup; repeat with the right option.",
+    )
+    parser.add_argument(
+        "--right-startup-waypoint",
+        action="append",
+        default=[],
+        help="Optional 7-DoF NRT joint waypoint used only during initial startup; repeat with the left option.",
+    )
     parser.add_argument("--nullspace-tracking-weight", type=float, default=0.5)
     parser.add_argument("--network-interface-whitelist", default="")
     parser.add_argument("--max-age-sec", type=float, default=0.5)
@@ -144,6 +156,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--initial-joint-speed-tolerance-rad-s", type=float, default=0.03)
     parser.add_argument("--initial-joint-max-vel-rad-s", type=float, default=0.5)
     parser.add_argument("--initial-joint-max-acc-rad-s2", type=float, default=1.0)
+    parser.add_argument(
+        "--reset-joint-max-vel-rad-s",
+        type=float,
+        default=0.2,
+        help="Joint velocity limit used only while recovering from a coordinated reset.",
+    )
+    parser.add_argument(
+        "--reset-joint-max-acc-rad-s2",
+        type=float,
+        default=0.4,
+        help="Joint acceleration limit used only while recovering from a coordinated reset.",
+    )
+    parser.add_argument(
+        "--reset-max-attempts",
+        type=int,
+        default=3,
+        help="Maximum bounded Stop/ClearFault/Enable/NRT recovery attempts per reset sequence.",
+    )
+    parser.add_argument(
+        "--reset-retry-delay-sec",
+        type=float,
+        default=0.5,
+        help="Delay after a recoverable mid-motion failure before retrying the same reset sequence.",
+    )
     parser.add_argument("--max-linear-speed-m-s", type=float, default=0.5)
     parser.add_argument("--max-angular-speed-rad-s", type=float, default=0.75)
     parser.add_argument("--max-linear-acc-m-s2", type=float, default=2.0)
@@ -163,11 +199,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "initial_joint_speed_tolerance_rad_s",
         "initial_joint_max_vel_rad_s",
         "initial_joint_max_acc_rad_s2",
+        "reset_joint_max_vel_rad_s",
+        "reset_joint_max_acc_rad_s2",
     ):
         if float(getattr(args, option)) <= 0.0:
             parser.error(f"--{option.replace('_', '-')} must be positive")
     if float(args.initial_joint_handoff_sec) < 0.0:
         parser.error("--initial-joint-handoff-sec must be non-negative")
+    if int(args.reset_max_attempts) < 1:
+        parser.error("--reset-max-attempts must be at least 1")
+    if float(args.reset_retry_delay_sec) < 0.0:
+        parser.error("--reset-retry-delay-sec must be non-negative")
     args.left_translation_in_world = parse_csv_floats(
         args.left_translation_in_world, expected=3, name="left translation"
     )
@@ -180,6 +222,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.right_nullspace_posture = parse_csv_floats(
         args.right_nullspace_posture, expected=7, name="right null-space posture"
     )
+    if len(args.left_startup_waypoint) != len(args.right_startup_waypoint):
+        parser.error("left and right startup waypoints must be supplied in pairs")
+    args.left_startup_waypoint = [
+        parse_csv_floats(value, expected=7, name="left startup waypoint")
+        for value in args.left_startup_waypoint
+    ]
+    args.right_startup_waypoint = [
+        parse_csv_floats(value, expected=7, name="right startup waypoint")
+        for value in args.right_startup_waypoint
+    ]
     return args
 
 
@@ -242,7 +294,14 @@ def _joint_errors(current_q, target_q) -> list[float]:
     ]
 
 
-def move_robot_pair_to_initial_q(args: argparse.Namespace, *, robot_pair, flexivrdk, progress_callback=None):
+def move_robot_pair_to_initial_q(
+    args: argparse.Namespace,
+    *,
+    robot_pair,
+    flexivrdk,
+    progress_callback=None,
+    use_startup_waypoints: bool = False,
+):
     """Move an already connected pair to init_q and enter Cartesian mode."""
 
     _wait_until_operational(robot_pair, float(args.enable_timeout_sec))
@@ -295,61 +354,69 @@ def move_robot_pair_to_initial_q(args: argparse.Namespace, *, robot_pair, flexiv
             progress_callback(states)
         time.sleep(0.02)
 
-    robot_pair.SendJointPosition(
-        nullspace_postures,
-        zero_velocities,
-        max_velocities,
-        max_accelerations,
-    )
-    print(
-        "[DrdkTargetStreamer] initial NRT joint trajectory started "
-        f"left={[round(value, 6) for value in nullspace_postures[0]]} "
-        f"right={[round(value, 6) for value in nullspace_postures[1]]} "
-        f"max_vel={float(args.initial_joint_max_vel_rad_s):.3f}rad/s "
-        f"max_acc={float(args.initial_joint_max_acc_rad_s2):.3f}rad/s^2",
-        flush=True,
-    )
-    deadline = time.monotonic() + float(args.initial_joint_timeout_sec)
-    settled_since = None
-    last_progress_log = 0.0
-    while True:
-        if not robot_pair.connected() or robot_pair.fault() or not robot_pair.operational():
-            raise RuntimeError("DRDK robot pair failed during initial joint-position motion")
-        states = robot_pair.states()
-        if progress_callback is not None:
-            progress_callback(states)
-        position_errors = (
-            _joint_errors(states[0].q, nullspace_postures[0]),
-            _joint_errors(states[1].q, nullspace_postures[1]),
+    trajectory_targets = []
+    if use_startup_waypoints:
+        trajectory_targets.extend(
+            zip(args.left_startup_waypoint, args.right_startup_waypoint, strict=True)
         )
-        max_position_error = max(abs(value) for errors in position_errors for value in errors)
-        max_joint_speed = max(abs(float(value)) for state in states for value in state.dq)
-        within_tolerance = bool(
-            max_position_error <= float(args.initial_joint_tolerance_rad)
-            and max_joint_speed <= float(args.initial_joint_speed_tolerance_rad_s)
+    trajectory_targets.append(nullspace_postures)
+    for target_index, target_postures in enumerate(trajectory_targets, start=1):
+        phase = "startup waypoint" if target_index < len(trajectory_targets) else "initial_q"
+        robot_pair.SendJointPosition(
+            target_postures,
+            zero_velocities,
+            max_velocities,
+            max_accelerations,
         )
-        now = time.monotonic()
-        if now - last_progress_log >= 1.0:
-            print(
-                "[DrdkTargetStreamer] initial joint trajectory progress "
-                f"max_position_error={max_position_error:.6f}rad "
-                f"max_joint_speed={max_joint_speed:.6f}rad/s",
-                flush=True,
+        print(
+            f"[DrdkTargetStreamer] {phase} NRT joint trajectory started "
+            f"left={[round(value, 6) for value in target_postures[0]]} "
+            f"right={[round(value, 6) for value in target_postures[1]]} "
+            f"max_vel={float(args.initial_joint_max_vel_rad_s):.3f}rad/s "
+            f"max_acc={float(args.initial_joint_max_acc_rad_s2):.3f}rad/s^2",
+            flush=True,
+        )
+        deadline = time.monotonic() + float(args.initial_joint_timeout_sec)
+        settled_since = None
+        last_progress_log = 0.0
+        while True:
+            if not robot_pair.connected() or robot_pair.fault() or not robot_pair.operational():
+                raise RuntimeError(f"DRDK robot pair failed during {phase} joint-position motion")
+            states = robot_pair.states()
+            if progress_callback is not None:
+                progress_callback(states)
+            position_errors = (
+                _joint_errors(states[0].q, target_postures[0]),
+                _joint_errors(states[1].q, target_postures[1]),
             )
-            last_progress_log = now
-        if within_tolerance:
-            settled_since = now if settled_since is None else settled_since
-            if now - settled_since >= float(args.initial_joint_settle_sec):
-                break
-        else:
-            settled_since = None
-        if now >= deadline:
-            raise TimeoutError(
-                "DRDK initial joint-position motion timed out: "
-                f"max_position_error={max_position_error:.6f}rad "
-                f"max_joint_speed={max_joint_speed:.6f}rad/s"
+            max_position_error = max(abs(value) for errors in position_errors for value in errors)
+            max_joint_speed = max(abs(float(value)) for state in states for value in state.dq)
+            within_tolerance = bool(
+                max_position_error <= float(args.initial_joint_tolerance_rad)
+                and max_joint_speed <= float(args.initial_joint_speed_tolerance_rad_s)
             )
-        time.sleep(0.02)
+            now = time.monotonic()
+            if now - last_progress_log >= 1.0:
+                print(
+                    f"[DrdkTargetStreamer] {phase} joint trajectory progress "
+                    f"max_position_error={max_position_error:.6f}rad "
+                    f"max_joint_speed={max_joint_speed:.6f}rad/s",
+                    flush=True,
+                )
+                last_progress_log = now
+            if within_tolerance:
+                settled_since = now if settled_since is None else settled_since
+                if now - settled_since >= float(args.initial_joint_settle_sec):
+                    break
+            else:
+                settled_since = None
+            if now >= deadline:
+                raise TimeoutError(
+                    f"DRDK {phase} joint-position motion timed out: "
+                    f"max_position_error={max_position_error:.6f}rad "
+                    f"max_joint_speed={max_joint_speed:.6f}rad/s"
+                )
+            time.sleep(0.02)
 
     print(
         "[DrdkTargetStreamer] initial_q reached and settled; switching to Cartesian mode",
@@ -384,6 +451,7 @@ def initialize_connected_robot_pair(args: argparse.Namespace, *, robot_pair, fle
         robot_pair=robot_pair,
         flexivrdk=flexivrdk,
         progress_callback=progress_callback,
+        use_startup_waypoints=True,
     )
     return nullspace_postures
 
@@ -407,35 +475,70 @@ def recover_connected_robot_pair_to_initial_q(
     progress_callback=None,
     phase_callback=None,
 ):
-    """Stop, clear fault, enable, then recover a connected pair with NRT joint motion."""
+    """Run a bounded, resumable coordinated reset for an already connected pair."""
 
-    if phase_callback is not None:
-        phase_callback("reset_stopping")
-    try:
-        robot_pair.Stop()
-    except Exception as exc:
-        print(
-            f"[DrdkTargetStreamer] Stop() reported {exc}; "
-            "continuing because the runtime may already be stopped",
-            flush=True,
-        )
-    if phase_callback is not None:
-        phase_callback("reset_clearing_fault")
-    if robot_pair.fault():
-        cleared = robot_pair.ClearFault()
-        if not all(bool(value) for value in cleared):
-            raise RuntimeError(f"DRDK failed to clear both robot faults: {cleared}")
-    # Stop() leaves a healthy simulated robot in a stopped/idle controller
-    # state while operational() may still report true.  Enable explicitly so
-    # the following NRT mode switch is applicable even without an active fault.
-    robot_pair.Enable()
-    _wait_until_operational(robot_pair, float(args.enable_timeout_sec))
-    return move_robot_pair_to_initial_q(
-        args,
-        robot_pair=robot_pair,
-        flexivrdk=flexivrdk,
-        progress_callback=progress_callback,
+    recovery_args = argparse.Namespace(**vars(args))
+    recovery_args.initial_joint_max_vel_rad_s = min(
+        float(args.initial_joint_max_vel_rad_s),
+        float(args.reset_joint_max_vel_rad_s),
     )
+    recovery_args.initial_joint_max_acc_rad_s2 = min(
+        float(args.initial_joint_max_acc_rad_s2),
+        float(args.reset_joint_max_acc_rad_s2),
+    )
+    max_attempts = int(args.reset_max_attempts)
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            if phase_callback is not None:
+                phase_callback("reset_retrying")
+            print(
+                f"[DrdkTargetStreamer] reset recovery retry {attempt}/{max_attempts} "
+                f"after: {last_error}",
+                flush=True,
+            )
+            time.sleep(float(args.reset_retry_delay_sec))
+
+        if not robot_pair.connected():
+            raise RuntimeError("DRDK robot pair disconnected during coordinated reset") from last_error
+        if phase_callback is not None:
+            phase_callback("reset_stopping")
+        try:
+            robot_pair.Stop()
+        except Exception as exc:
+            print(
+                f"[DrdkTargetStreamer] Stop() reported {exc}; "
+                "continuing because the runtime may already be stopped",
+                flush=True,
+            )
+        if phase_callback is not None:
+            phase_callback("reset_clearing_fault")
+        if robot_pair.fault():
+            cleared = robot_pair.ClearFault()
+            if not all(bool(value) for value in cleared):
+                last_error = RuntimeError(f"DRDK failed to clear both robot faults: {cleared}")
+                continue
+        # Stop() leaves a healthy simulated robot in a stopped/idle controller
+        # state while operational() may still report true. Enable explicitly so
+        # the following NRT mode switch is applicable even without an active fault.
+        robot_pair.Enable()
+        try:
+            _wait_until_operational(robot_pair, float(args.enable_timeout_sec))
+            return move_robot_pair_to_initial_q(
+                recovery_args,
+                robot_pair=robot_pair,
+                flexivrdk=flexivrdk,
+                progress_callback=progress_callback,
+            )
+        except Exception as exc:
+            last_error = exc
+            if not robot_pair.connected():
+                break
+
+    raise RuntimeError(
+        f"DRDK coordinated reset exhausted {max_attempts} recovery attempts: {last_error}"
+    ) from last_error
 
 
 def _status_packet(

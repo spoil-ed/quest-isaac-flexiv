@@ -37,16 +37,24 @@ Stage3 scene YAML -> Isaac task objects/camera
 
 ```bash
 python scripts/run_stage3_sim_scene_validation.py \
-  --config configs/pipelines/stage3_pick_place_redblock_dual.yaml
+  --config configs/pipelines/dual_arm_data_collection.yaml \
+  --scene-config configs/scenes/pick_place_redblock_flexiv_dual.yaml \
+  --fake-trajectory-profile pick_place_redblock_dual
 
 python scripts/run_stage3_sim_scene_validation.py \
-  --config configs/pipelines/stage3_pick_redblock_into_drawer_dual.yaml
+  --config configs/pipelines/dual_arm_data_collection.yaml \
+  --scene-config configs/scenes/pick_redblock_into_drawer_flexiv_dual.yaml \
+  --fake-trajectory-profile pick_redblock_into_drawer_dual
 
 python scripts/run_stage3_sim_scene_validation.py \
-  --config configs/pipelines/stage3_stack_rgyblock_dual.yaml
+  --config configs/pipelines/dual_arm_data_collection.yaml \
+  --scene-config configs/scenes/stack_rgyblock_flexiv_dual.yaml \
+  --fake-trajectory-profile stack_rgyblock_dual
 
 python scripts/run_stage3_sim_scene_validation.py \
-  --config configs/pipelines/stage3_move_cylinder_dual.yaml
+  --config configs/pipelines/dual_arm_data_collection.yaml \
+  --scene-config configs/scenes/move_cylinder_flexiv_dual.yaml \
+  --fake-trajectory-profile move_cylinder_dual
 ```
 
 每次成功后报告路径形如：

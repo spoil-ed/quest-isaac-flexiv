@@ -13,6 +13,12 @@ opencv-python>=4.8
 PyYAML>=6.0
 hydra-core>=1.3,<1.4
 
+# Quest publisher. Keep params-proto compatible with the vendored TeleVuer and
+# do not install vuer[all], which pins aiohttp below Isaac Sim 6.0.1's version.
+vuer==0.0.60
+params-proto==2.13.2
+aiohttp-cors>=0.7
+
 # Unitree JSON -> LeRobot-style conversion and validation helpers.
 tqdm>=4.66
 pyarrow>=14.0

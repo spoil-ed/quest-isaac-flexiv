@@ -46,7 +46,7 @@ python3 scripts/run_stage1_data_collection_smoke.py
 python3 scripts/run_stage1_single_rizon4_real_validation.py --serial-number "$ROBOT_SERIAL"
 ```
 
-该脚本默认读取 `configs/pipelines/stage1_single_rizon4_data_collection.yaml`，再引用 `configs/environments/local_flexiv_runtime.yaml` 和 `configs/scenes/single_rizon4_cam_front.yaml`。默认端口为 `5690/5691/55678/55679`，若端口已被占用会直接失败，避免误用已有外部 gateway；端口、路径、serial、scene camera 均可通过 YAML 或 CLI 覆盖。recorder 启动前会探测 sample，必须满足：
+这是归档的单臂验收脚本，默认读取 `configs/stage1_single_rizon4_data_collection.yaml`；当前正式采集使用 `configs/pipelines/dual_arm_data_collection.yaml`。归档脚本默认端口为 `5690/5691/55678/55679`，若端口已被占用会直接失败，避免误用已有外部 gateway。recorder 启动前会探测 sample，必须满足：
 
 - `sim_state.backend == quest_isaac_flexiv_stage1`
 - serial 等于当前配置 serial

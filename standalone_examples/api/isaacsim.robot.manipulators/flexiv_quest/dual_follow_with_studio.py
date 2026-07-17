@@ -1649,6 +1649,7 @@ def run(args: argparse.Namespace) -> int:
                 else quest_target_receiver.latest_input(side)
             )
             quest_target = arm.latest_quest_target
+            relative_reference = arm.mapper.reference
             arm_states[side] = {
                 "serial": arm.serial_number,
                 "q": [float(value) for value in arm.robot.q],
@@ -1682,6 +1683,21 @@ def run(args: argparse.Namespace) -> int:
                         0.0 if quest_input is None else float(quest_input.get("enable_value", 0.0))
                     ),
                     "enabled": bool(quest_input is not None and quest_input.get("enabled", False)),
+                    "calibration_confirmed": bool(
+                        quest_input is not None and quest_input.get("calibration_confirmed", False)
+                    ),
+                    "both_squeeze": bool(
+                        quest_input is not None and quest_input.get("both_squeeze", False)
+                    ),
+                    "calibration_rotation_base_from_mapped": (
+                        None
+                        if quest_input is None
+                        or quest_input.get("calibration_rotation_base_from_mapped") is None
+                        else [
+                            [float(value) for value in row]
+                            for row in quest_input["calibration_rotation_base_from_mapped"]
+                        ]
+                    ),
                     "gripper_button": (
                         "trigger" if quest_input is None else str(quest_input.get("gripper_button", "trigger"))
                     ),
@@ -1740,6 +1756,28 @@ def run(args: argparse.Namespace) -> int:
                         None
                         if arm.quest_goal_pose_base_tcp is None
                         else [float(value) for value in arm.quest_goal_pose_base_tcp]
+                    ),
+                    "command_pose_base_tcp": (
+                        None
+                        if arm.latest_control_pose_base_tcp is None
+                        else [float(value) for value in arm.latest_control_pose_base_tcp]
+                    ),
+                    "relative_reference": (
+                        None
+                        if relative_reference is None
+                        else {
+                            "controller_orientation_base": [
+                                float(value) for value in relative_reference.controller_orientation_base
+                            ],
+                            "tcp_pose_base": [float(value) for value in relative_reference.tcp_pose_base],
+                        }
+                    ),
+                    "control_active": bool(
+                        arm.target_control_requested
+                        and arm.target_control_source == "quest"
+                        and arm.startup_trajectory_complete
+                        and arm.rdk_ready
+                        and arm.effort_control_enabled
                     ),
                 },
             }

@@ -1,60 +1,55 @@
-# Stage3 config-driven sim scene validation: pick/place red block.
+# Unified host-right + Docker-left dual-arm collection pipeline.
+# Select another task with the validation runner's --scene-config option; task
+# geometry and robot initialization belong in configs/scenes, not here.
 
 environment_config: "../environments/local_flexiv_runtime.yaml"
 scene_config: "../scenes/pick_place_redblock_flexiv_dual.yaml"
 
 gateway:
-  sample_endpoint: "tcp://127.0.0.1:5890"
-  bridge_endpoint: "tcp://127.0.0.1:5891"
+  sample_endpoint: "tcp://127.0.0.1:5790"
+  bridge_endpoint: "tcp://127.0.0.1:5791"
   fps: 30
   jpeg_quality: 90
   camera_keys: ["color_0"]
 
-quest_target: {host: "127.0.0.1", port: 58679}
+quest_target: {host: "127.0.0.1", port: 57679}
 target_pose:
-  left: {host: "127.0.0.1", port: 58680}
-  right: {host: "127.0.0.1", port: 58681}
-
+  left: {host: "127.0.0.1", port: 57680}
+  right: {host: "127.0.0.1", port: 57681}
 rdk_status:
-  left: {host: "127.0.0.1", port: 58682}
-  right: {host: "127.0.0.1", port: 58683}
+  left: {host: "127.0.0.1", port: 57682}
+  right: {host: "127.0.0.1", port: 57683}
 
 record:
-  task_name: "quest_isaac_flexiv_stage3_pick_place_redblock_dual"
+  task_name: "pick_place_redblock_dual"
   fps: 30
   image_size: "640x480"
   max_frames: 240
-  task_goal: "Stage3 wall-mounted dual Flexiv pick/place red block scene"
-  task_desc: "Config-driven Isaac scene with fake dual-arm teleop, Unitree JSON, LeRobot-style conversion, and H264 video"
-  task_steps: "load Stage3 scene; fake dual-arm pick/place waypoints; record Unitree JSON; convert; validate MP4"
+  task_goal: "Dual-arm Quest teleoperation data collection"
+  task_desc: "Host-right and Docker-left Flexiv collection in Isaac Sim"
 
 control:
-  # Match the 2 kHz Flexiv SimPlugin loop; rendering/recording stays at 30 Hz.
   physics_hz: 2000
   render_hz: 30
   gpu_dynamics: false
   quest_position_scale: 1.0
   quest_position_deadband_m: 0.0
   quest_relative_orientation_mode: "relative"
-  max_linear_speed_m_s: 0.50
+  max_linear_speed_m_s: 1.0
   max_angular_speed_rad_s: 0.75
-  # max_frames counts rendered frames; 900 frames is 30 s at 30 Hz.
   isaac_max_frames: 900
   target_pose_publish_hz: 30
   target_axis_length: 0.30
   target_axis_radius: 0.010
   rdk_clear_fault: false
   rdk_strict_clear_fault: true
-  rdk_servo_on: false
-  rdk_switch_mode: true
-  rdk_retry_last_pose_sec: 1.0
 
 convert:
-  repo_id: "qiming/quest_isaac_flexiv_stage3_pick_place_redblock_dual"
+  repo_id: "qiming/isaacsim_flexiv_dual_arm"
   action_mode: "qpos"
 
 validation:
-  run_name_prefix: "quest_isaac_flexiv_stage3_pick_place_redblock_dual_real"
+  run_name_prefix: "isaacsim_flexiv_dual_arm"
   probe_timeout_sec: 300
   min_left_q_delta: 0.005
   min_right_q_delta: 0.005
@@ -74,8 +69,6 @@ fake_sender:
   trajectory_profile: "pick_place_redblock_dual"
   restart_before_record: true
   restart_warmup_sec: 1.0
-  # Keep the 8 s validation window clear of the 0.005 rad joint-motion
-  # threshold even when Studio takes a few frames to leave position mode.
   amplitude_m: 0.040
   cycles: 12
   frames: 12000

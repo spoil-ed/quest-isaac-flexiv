@@ -161,6 +161,10 @@ class DrdkTargetStreamerTests(unittest.TestCase):
                 "0,1,2,3,4,5,6",
                 "--right-nullspace-posture",
                 "6,5,4,3,2,1,0",
+                "--left-startup-waypoint",
+                "1,1,1,1,1,1,1",
+                "--right-startup-waypoint",
+                "2,2,2,2,2,2,2",
                 "--initial-joint-settle-sec",
                 "0.001",
                 "--initial-joint-handoff-sec",
@@ -175,7 +179,8 @@ class DrdkTargetStreamerTests(unittest.TestCase):
         self.assertEqual(postures, expected)
         self.assertEqual(pair.switches, ["NRT_JOINT_POSITION", "NRT_CARTESIAN_MOTION_FORCE"])
         self.assertEqual(pair.joint_commands[0][0], ([0.1] * 7, [0.2] * 7))
-        self.assertEqual(pair.joint_commands[1][0], expected)
+        self.assertEqual(pair.joint_commands[1][0], ([1.0] * 7, [2.0] * 7))
+        self.assertEqual(pair.joint_commands[2][0], expected)
         self.assertEqual(pair.postures, [expected])
         self.assertEqual(pair.objectives[0]["ref_positions_tracking"], (0.5, 0.5))
 
@@ -351,6 +356,101 @@ class DrdkTargetStreamerTests(unittest.TestCase):
 
         self.assertEqual(pair.enable_count, 1)
 
+    def test_reset_retries_mid_motion_fault_from_current_q_at_recovery_speed(self):
+        class State:
+            def __init__(self, q):
+                self.q = list(q)
+                self.dq = [0.0] * 7
+                self.tcp_pose = [0.3, 0.0, -0.6, 1.0, 0.0, 0.0, 0.0]
+
+        class Pair:
+            def __init__(self):
+                self.current_q = ([0.1] * 7, [0.2] * 7)
+                self.current_mode = ("IDLE", "IDLE")
+                self.has_fault = True
+                self.target_command_count = 0
+                self.stop_count = 0
+                self.clear_count = 0
+                self.command_velocities = []
+
+            def Stop(self):
+                self.stop_count += 1
+                self.current_mode = ("IDLE", "IDLE")
+
+            def fault(self):
+                return self.has_fault
+
+            def ClearFault(self):
+                self.clear_count += 1
+                self.has_fault = False
+                return True, True
+
+            def operational(self):
+                return not self.has_fault
+
+            def connected(self):
+                return True
+
+            def Enable(self):
+                return None
+
+            def mode(self):
+                return self.current_mode
+
+            def SwitchMode(self, mode):
+                self.current_mode = (mode, mode)
+
+            def states(self):
+                return State(self.current_q[0]), State(self.current_q[1])
+
+            def SendJointPosition(self, positions, _velocities, max_vel, _max_acc):
+                self.command_velocities.append(tuple(max_vel[0]))
+                is_target = list(positions[0]) != list(self.current_q[0])
+                if is_target:
+                    self.target_command_count += 1
+                    if self.target_command_count == 1:
+                        self.has_fault = True
+                        return
+                self.current_q = tuple(list(position) for position in positions)
+
+            def SetNullSpacePosture(self, _postures):
+                return None
+
+            def SetNullSpaceObjectives(self, **_objectives):
+                return None
+
+        class Mode:
+            NRT_JOINT_POSITION = "NRT_JOINT_POSITION"
+            NRT_CARTESIAN_MOTION_FORCE = "NRT_CARTESIAN_MOTION_FORCE"
+
+        class Rdk:
+            pass
+
+        Rdk.Mode = Mode
+        pair = Pair()
+        args = mod.parse_args(
+            [
+                "--left-nullspace-posture",
+                "0,1,2,3,4,5,6",
+                "--right-nullspace-posture",
+                "6,5,4,3,2,1,0",
+                "--initial-joint-settle-sec",
+                "0.001",
+                "--initial-joint-handoff-sec",
+                "0",
+                "--reset-retry-delay-sec",
+                "0",
+            ]
+        )
+
+        mod.recover_connected_robot_pair_to_initial_q(args, robot_pair=pair, flexivrdk=Rdk)
+
+        self.assertEqual(pair.stop_count, 2)
+        self.assertEqual(pair.clear_count, 2)
+        self.assertEqual(pair.target_command_count, 2)
+        self.assertTrue(pair.command_velocities)
+        self.assertTrue(all(max(values) == 0.2 for values in pair.command_velocities))
+
     def test_nullspace_postures_are_required(self):
         with self.assertRaises(SystemExit):
             mod.parse_args([])
@@ -367,6 +467,19 @@ class DrdkTargetStreamerTests(unittest.TestCase):
 
         self.assertEqual(args.left_nullspace_posture, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
         self.assertEqual(args.right_nullspace_posture, [6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0])
+
+    def test_parses_paired_startup_waypoints(self):
+        args = mod.parse_args(
+            [
+                "--left-nullspace-posture", "0,1,2,3,4,5,6",
+                "--right-nullspace-posture", "6,5,4,3,2,1,0",
+                "--left-startup-waypoint", "1,1,1,1,1,1,1",
+                "--right-startup-waypoint", "2,2,2,2,2,2,2",
+            ]
+        )
+
+        self.assertEqual(args.left_startup_waypoint, [[1.0] * 7])
+        self.assertEqual(args.right_startup_waypoint, [[2.0] * 7])
 
     def test_status_packet_exposes_initialization_phase_and_joint_state(self):
         packet = mod._status_packet(

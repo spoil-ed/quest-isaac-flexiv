@@ -243,7 +243,7 @@ python scripts/stop_flexiv_stack.py
 ```bash
 conda activate isaacsim
 python scripts/run_stage3_sim_scene_validation.py \
-  --config configs/pipelines/stage3_pick_place_redblock_dual.yaml \
+  --config configs/pipelines/dual_arm_data_collection.yaml \
   --left-serial-number "$LEFT_ROBOT_SERIAL" \
   --right-serial-number "$RIGHT_ROBOT_SERIAL"
 ```

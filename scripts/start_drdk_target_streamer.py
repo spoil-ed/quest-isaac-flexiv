@@ -40,7 +40,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
         help="Scene YAML whose left/right initial_q values define the DRDK null-space posture.",
     )
-    parser.add_argument("--nullspace-tracking-weight", type=float, default=0.5)
+    parser.add_argument("--nullspace-tracking-weight", type=float, default=1.0)
     parser.add_argument("--network-interface-whitelist", default="")
     parser.add_argument("--max-age-sec", type=float, default=0.5)
     parser.add_argument("--connect-timeout-sec", type=float, default=30.0)
@@ -52,6 +52,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--initial-joint-speed-tolerance-rad-s", type=float, default=0.03)
     parser.add_argument("--initial-joint-max-vel-rad-s", type=float, default=0.5)
     parser.add_argument("--initial-joint-max-acc-rad-s2", type=float, default=1.0)
+    parser.add_argument("--reset-joint-max-vel-rad-s", type=float, default=0.2)
+    parser.add_argument("--reset-joint-max-acc-rad-s2", type=float, default=0.4)
+    parser.add_argument("--reset-max-attempts", type=int, default=3)
+    parser.add_argument("--reset-retry-delay-sec", type=float, default=0.5)
     parser.add_argument("--max-linear-speed-m-s", type=float, default=0.5)
     parser.add_argument("--max-angular-speed-rad-s", type=float, default=0.75)
     parser.add_argument("--max-linear-acc-m-s2", type=float, default=2.0)
@@ -62,14 +66,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     args.python = flexiv_runtime.python_executable_or_current(args.python)
     args.scene_config = args.scene_config.expanduser().resolve()
-    args.left_nullspace_posture, args.right_nullspace_posture = load_initial_q(args.scene_config)
+    (
+        args.left_nullspace_posture,
+        args.right_nullspace_posture,
+        args.left_startup_waypoint,
+        args.right_startup_waypoint,
+    ) = load_initial_q(args.scene_config)
     return args
 
 
-def load_initial_q(scene_config: Path) -> tuple[str, str]:
+def load_initial_q(scene_config: Path) -> tuple[str, str, list[str], list[str]]:
     data = yaml.safe_load(scene_config.read_text(encoding="utf-8")) or {}
     robots = data.get("robots") or []
     postures: dict[str, str] = {}
+    waypoints: dict[str, list[str]] = {}
     for robot in robots:
         side = str(robot.get("side", "")).strip().lower()
         if side not in {"left", "right"}:
@@ -83,10 +93,27 @@ def load_initial_q(scene_config: Path) -> tuple[str, str]:
             raise ValueError(
                 f"{scene_config}: robots[{side}].initial_q must contain only numeric values"
             ) from exc
+        raw_waypoints = robot.get("initial_q_waypoints") or []
+        if not isinstance(raw_waypoints, list):
+            raise ValueError(f"{scene_config}: robots[{side}].initial_q_waypoints must be a list")
+        waypoints[side] = []
+        for index, waypoint in enumerate(raw_waypoints):
+            if not isinstance(waypoint, list) or len(waypoint) != 7:
+                raise ValueError(
+                    f"{scene_config}: robots[{side}].initial_q_waypoints[{index}] must contain 7 values"
+                )
+            try:
+                waypoints[side].append(",".join(str(float(value)) for value in waypoint))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{scene_config}: robots[{side}].initial_q_waypoints[{index}] must contain only numeric values"
+                ) from exc
     missing = [side for side in ("left", "right") if side not in postures]
     if missing:
         raise ValueError(f"{scene_config}: missing robot initial_q for {', '.join(missing)}")
-    return postures["left"], postures["right"]
+    if len(waypoints["left"]) != len(waypoints["right"]):
+        raise ValueError(f"{scene_config}: left and right initial_q_waypoints must have equal length")
+    return postures["left"], postures["right"], waypoints["left"], waypoints["right"]
 
 
 def build_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
@@ -149,6 +176,14 @@ def build_command(args: argparse.Namespace) -> list[str]:
         str(args.initial_joint_max_vel_rad_s),
         "--initial-joint-max-acc-rad-s2",
         str(args.initial_joint_max_acc_rad_s2),
+        "--reset-joint-max-vel-rad-s",
+        str(args.reset_joint_max_vel_rad_s),
+        "--reset-joint-max-acc-rad-s2",
+        str(args.reset_joint_max_acc_rad_s2),
+        "--reset-max-attempts",
+        str(args.reset_max_attempts),
+        "--reset-retry-delay-sec",
+        str(args.reset_retry_delay_sec),
         "--max-linear-speed-m-s",
         str(args.max_linear_speed_m_s),
         "--max-angular-speed-rad-s",
@@ -162,6 +197,15 @@ def build_command(args: argparse.Namespace) -> list[str]:
         "--clear-fault" if args.clear_fault else "--no-clear-fault",
         "--strict-clear-fault" if args.strict_clear_fault else "--no-strict-clear-fault",
     ]
+    for left_waypoint, right_waypoint in zip(
+        args.left_startup_waypoint, args.right_startup_waypoint, strict=True
+    ):
+        command.extend(
+            [
+                f"--left-startup-waypoint={left_waypoint}",
+                f"--right-startup-waypoint={right_waypoint}",
+            ]
+        )
     for option, value in (("--network-interface-whitelist", args.network_interface_whitelist),):
         if value:
             command.extend([option, str(value)])

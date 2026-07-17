@@ -92,9 +92,13 @@
 | `--initial-joint-speed-tolerance-rad-s` | `0.03` | 初始化完成的最大关节速度。 |
 | `--initial-joint-max-vel-rad-s` | `0.5` | `SendJointPosition()` 初始化轨迹的各关节最大速度。 |
 | `--initial-joint-max-acc-rad-s2` | `1.0` | 初始化轨迹的各关节最大加速度。 |
+| `--reset-joint-max-vel-rad-s` | `0.2` | reset 回 `initial_q` 时的各关节最大速度，不影响冷启动和 Cartesian 遥操。 |
+| `--reset-joint-max-acc-rad-s2` | `0.4` | reset 回程的各关节最大加速度。 |
+| `--reset-max-attempts` | `3` | 同一 `reset_seq` 在回程再次 fault 时最多执行的完整恢复次数。 |
+| `--reset-retry-delay-sec` | `0.5` | 两次恢复尝试之间的等待时间。 |
 | `--clear-fault/--no-clear-fault` | 不清故障 | 仅控制首次启动是否清故障；显式协调 reset 始终尝试清除双臂 fault。 |
 
-该脚本启动时短暂使用 `NRT_JOINT_POSITION + SendJointPosition()` 平滑到 scene config 的左右 `initial_q`；到位后固定使用 `NRT_CARTESIAN_MOTION_FORCE`，并重新把 `initial_q` 设置为零空间参考。关节轨迹、IK、动力学和力矩仍由 runtime 处理。任一侧故障会使 RobotPair 两侧同时 not-ready；streamer 保持存活并等待带有更高 `reset_seq` 的显式协调 reset，不会自动清故障。
+该脚本启动时短暂使用 `NRT_JOINT_POSITION + SendJointPosition()` 平滑到 scene config 的左右 `initial_q`；到位后固定使用 `NRT_CARTESIAN_MOTION_FORCE`，并重新把 `initial_q` 设置为零空间参考。关节轨迹、IK、动力学和力矩仍由 runtime 处理。任一侧故障会使 RobotPair 两侧同时 not-ready。显式 reset 回程再次 fault 时，streamer 会从新的实际 q 低速重建 NRT 基准并有界重试；耗尽次数后保持存活，等待更高的 `reset_seq`。
 
 ## Isaac 控制入口
 
@@ -293,7 +297,7 @@ Stage2 双臂 Isaac 启动入口，参数语义与单臂入口一致，差异如
 
 ### `run_stage2_dual_rizon4_real_validation.py`
 
-真实双臂闭环验收：读取 `configs/pipelines/stage2_dual_rizon4_data_collection.yaml`，启动本仓库 gateway、两个 RDK streamer、dual Isaac app、fake dual sender、recorder、converter 和 validator。常用覆盖参数包括 `--left-serial-number`、`--right-serial-number`、`--config`、`--record-frames`、`--keep-running-on-failure`。
+真实双臂闭环验收：默认读取 `configs/pipelines/dual_arm_data_collection.yaml`，启动本仓库 gateway、双臂控制、Isaac app、fake dual sender、recorder、converter 和 validator。任务差异通过 `--scene-config configs/scenes/<task>.yaml` 传入，不再复制 pipeline。常用覆盖参数包括 `--left-serial-number`、`--right-serial-number`、`--config`、`--record-frames`、`--keep-running-on-failure`。
 
 ## 状态与停止
 

@@ -10,7 +10,7 @@ cd "$REPO_ROOT"
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/start.sh
+Usage: ./scripts/start.sh [--task TASK_NAME]
 
 Starts everything needed for dual-arm Quest teleoperation except the recorder:
   Docker left Studio, host right Studio, RobotControlApp, FlexivSimulation,
@@ -21,15 +21,20 @@ container, while leaving any recorder process untouched. It then starts a clean
 control stack without creating another recorder, so code and configuration
 changes always take effect.
 
+Options:
+  --task TASK_NAME         Select a configs/scenes YAML by its task.name.
+                           Default: the currently tuned pick/place scene in
+                           standalone_examples/.../flexiv_quest/app_config.yaml
+  -h, --help               Show this help and exit.
+
 Optional environment variables:
   STUDIO_ROOT              Host Elements Studio root.
                            Default: ../elements_studio/FlexivElementsStudio
   ISAAC_PYTHON             Isaac Sim Python executable.
                            Default: Python from conda env "isaacsim"
   QUEST_PYTHON             Python containing TeleVuer/Quest dependencies.
-                           Default: .venv-quest/bin/python, or conda env "tv"
+                           Default: the same Python as ISAAC_PYTHON.
   ISAAC_CONDA_ENV          Isaac conda environment name (default: isaacsim)
-  QUEST_CONDA_ENV          Quest conda environment name (default: tv)
   HOST_IP                  IPv4 reachable by Quest (default: route source IP)
   LEFT_ROBOT_SERIAL        Docker/left alias (default: Rizon4-qSaFLh)
   RIGHT_ROBOT_SERIAL       Host/right alias (default: Rizon4-I0LIRN)
@@ -41,14 +46,28 @@ Optional environment variables:
 EOF
 }
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  usage
-  exit 0
-fi
-if [[ $# -ne 0 ]]; then
-  usage >&2
-  exit 2
-fi
+TASK_NAME=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --task)
+      [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || {
+        printf '[start] ERROR: --task requires a task name\n' >&2
+        exit 2
+      }
+      TASK_NAME="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf '[start] ERROR: unknown argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
 
 die() {
   printf '[start] ERROR: %s\n' "$*" >&2
@@ -112,12 +131,31 @@ wait_for_file_pattern() {
   done
 }
 
+wait_for_process_log_pattern() {
+  local description="$1"
+  local pid="$2"
+  local pattern="$3"
+  local timeout_sec="$4"
+  local deadline=$((SECONDS + timeout_sec))
+  local stdout_log=""
+  while true; do
+    [[ -d "/proc/$pid" ]] || die "$description failed because process $pid exited"
+    stdout_log="$(readlink -f "/proc/$pid/fd/1" 2>/dev/null || true)"
+    if [[ -f "$stdout_log" ]] && grep -Fq -- "$pattern" "$stdout_log"; then
+      break
+    fi
+    (( SECONDS >= deadline )) \
+      && die "timed out waiting for $description in ${stdout_log:-Isaac stdout}"
+    sleep 1
+  done
+  info "$description ready"
+}
+
 require_command docker
 require_command pgrep
 require_command setsid
 
 ISAAC_CONDA_ENV="${ISAAC_CONDA_ENV:-isaacsim}"
-QUEST_CONDA_ENV="${QUEST_CONDA_ENV:-tv}"
 STARTUP_TIMEOUT_SEC="${STARTUP_TIMEOUT_SEC:-120}"
 [[ "$STARTUP_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || die "STARTUP_TIMEOUT_SEC must be an integer"
 
@@ -132,12 +170,7 @@ fi
 [[ -x "$ISAAC_PYTHON" ]] || die "ISAAC_PYTHON is not executable: $ISAAC_PYTHON"
 
 if [[ -z "${QUEST_PYTHON:-}" ]]; then
-  if [[ -x "$REPO_ROOT/.venv-quest/bin/python" ]]; then
-    QUEST_PYTHON="$REPO_ROOT/.venv-quest/bin/python"
-  else
-    require_command conda
-    QUEST_PYTHON="$(conda run -n "$QUEST_CONDA_ENV" python -c 'import sys; print(sys.executable)' 2>/dev/null)"
-  fi
+  QUEST_PYTHON="$ISAAC_PYTHON"
 fi
 [[ -x "$QUEST_PYTHON" ]] || die "QUEST_PYTHON is not executable: $QUEST_PYTHON"
 
@@ -146,7 +179,15 @@ STUDIO_ROOT="${STUDIO_ROOT:-$REPO_ROOT/../elements_studio/FlexivElementsStudio}"
 
 LEFT_ROBOT_SERIAL="${LEFT_ROBOT_SERIAL:-Rizon4-qSaFLh}"
 RIGHT_ROBOT_SERIAL="${RIGHT_ROBOT_SERIAL:-Rizon4-I0LIRN}"
-SCENE_CONFIG="$(resolve_from_repo "${SCENE_CONFIG:-standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/app_config.yaml}")"
+if [[ -n "$TASK_NAME" ]]; then
+  [[ -z "${SCENE_CONFIG:-}" ]] \
+    || die "--task and SCENE_CONFIG cannot be used together; choose one scene selector"
+  if ! SCENE_CONFIG="$("$ISAAC_PYTHON" "$REPO_ROOT/scripts/resolve_scene_task.py" "$TASK_NAME")"; then
+    die "could not resolve --task '$TASK_NAME'"
+  fi
+else
+  SCENE_CONFIG="$(resolve_from_repo "${SCENE_CONFIG:-standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/app_config.yaml}")"
+fi
 [[ -f "$SCENE_CONFIG" ]] || die "SCENE_CONFIG does not exist: $SCENE_CONFIG"
 
 if [[ -z "${HOST_IP:-}" ]]; then
@@ -163,6 +204,9 @@ FLEXIV_SHM_ROOT="${FLEXIV_SHM_ROOT:-/dev/shm}"
 export FLEXIV_ARM_SERIAL FLEXIV_STUDIO_VNC_PORT
 
 info "repository=$REPO_ROOT"
+if [[ -n "$TASK_NAME" ]]; then
+  info "task=$TASK_NAME"
+fi
 info "scene=$SCENE_CONFIG"
 info "left=$LEFT_ROBOT_SERIAL (Docker), right=$RIGHT_ROBOT_SERIAL (host)"
 info "Quest host=https://$HOST_IP:8012"
@@ -235,29 +279,6 @@ start_detached \
   --image-size 640x480 \
   --camera-keys color_0
 
-# DRDK discovery and Isaac/SimPlugin must overlap: FlexivSimulation cannot
-# advance until Isaac starts supplying the 2 kHz physics state stream.
-INDEPENDENT_RDK_PID="$(first_matching_pid '(^|[[:space:]/])scripts/rdk_target_streamer\.py([[:space:]]|$)')"
-if [[ -n "$INDEPENDENT_RDK_PID" ]]; then
-  die "independent RDK streamer is running (pid=$INDEPENDENT_RDK_PID); stop it before starting DRDK RobotPair"
-fi
-if [[ -n "$(first_matching_pid '(^|[[:space:]/])scripts/drdk_target_streamer\.py([[:space:]]|$)')" ]]; then
-  info "DRDK RobotPair already running"
-else
-  "$ISAAC_PYTHON" "$REPO_ROOT/scripts/start_drdk_target_streamer.py" \
-    --python "$ISAAC_PYTHON" \
-    --scene-config "$SCENE_CONFIG" \
-    --left-serial-number "$LEFT_ROBOT_SERIAL" \
-    --right-serial-number "$RIGHT_ROBOT_SERIAL" \
-    --left-port 57680 \
-    --right-port 57681 \
-    --left-status-port 57682 \
-    --right-status-port 57683 \
-    --connect-timeout-sec 120 \
-    --max-linear-speed-m-s 0.5 \
-    --max-angular-speed-rad-s 0.75
-fi
-
 ISAAC_DUAL_PID="$(first_matching_pid 'dual_follow_with_studio\.py([[:space:]]|$)')"
 if [[ -n "$ISAAC_DUAL_PID" ]]; then
   ISAAC_DUAL_COMMAND="$(tr '\0' ' ' <"/proc/$ISAAC_DUAL_PID/cmdline" 2>/dev/null || true)"
@@ -285,7 +306,7 @@ else
     --left-rdk-status-udp-port 57682 \
     --right-rdk-status-udp-port 57683 \
     --target-pose-publish-hz 30 \
-    --max-linear-speed-m-s 0.5 \
+    --max-linear-speed-m-s 1.0 \
     --max-angular-speed-rad-s 0.75 \
     --gateway-endpoint tcp://127.0.0.1:5791 \
     --gateway-fps 30 \
@@ -296,6 +317,42 @@ else
     --coordinated-reset \
     --reset-settle-sec 2 \
     --reset-timeout-sec 90
+fi
+
+# RobotPair discovery is reliable only after both SimPlugins have joined their
+# 2 kHz loops. Starting DRDK earlier can make its native constructor exit before
+# the Studio aliases become discoverable, leaving both arms at bootstrap_q.
+ISAAC_DUAL_PID="$(first_matching_pid 'dual_follow_with_studio\.py([[:space:]]|$)')"
+[[ -n "$ISAAC_DUAL_PID" ]] || die "Isaac dual-arm app did not stay running"
+wait_for_process_log_pattern \
+  "left Isaac/SimPlugin" "$ISAAC_DUAL_PID" \
+  "SimPlugin connected left $LEFT_ROBOT_SERIAL" "$STARTUP_TIMEOUT_SEC"
+wait_for_process_log_pattern \
+  "right Isaac/SimPlugin" "$ISAAC_DUAL_PID" \
+  "SimPlugin connected right $RIGHT_ROBOT_SERIAL" "$STARTUP_TIMEOUT_SEC"
+
+INDEPENDENT_RDK_PID="$(first_matching_pid '(^|[[:space:]/])scripts/rdk_target_streamer\.py([[:space:]]|$)')"
+if [[ -n "$INDEPENDENT_RDK_PID" ]]; then
+  die "independent RDK streamer is running (pid=$INDEPENDENT_RDK_PID); stop it before starting DRDK RobotPair"
+fi
+if [[ -n "$(first_matching_pid '(^|[[:space:]/])scripts/drdk_target_streamer\.py([[:space:]]|$)')" ]]; then
+  info "DRDK RobotPair already running"
+else
+  "$ISAAC_PYTHON" "$REPO_ROOT/scripts/start_drdk_target_streamer.py" \
+    --python "$ISAAC_PYTHON" \
+    --scene-config "$SCENE_CONFIG" \
+    --left-serial-number "$LEFT_ROBOT_SERIAL" \
+    --right-serial-number "$RIGHT_ROBOT_SERIAL" \
+    --left-port 57680 \
+    --right-port 57681 \
+    --left-status-port 57682 \
+    --right-status-port 57683 \
+    --connect-timeout-sec 120 \
+    --nullspace-tracking-weight 1.0 \
+    --initial-joint-max-vel-rad-s 0.5 \
+    --initial-joint-max-acc-rad-s2 1.0 \
+    --max-linear-speed-m-s 1.0 \
+    --max-angular-speed-rad-s 0.75
 fi
 
 start_detached \

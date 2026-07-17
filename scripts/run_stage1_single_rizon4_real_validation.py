@@ -19,7 +19,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FLEXIV_PYTHON = Path(sys.executable)
-DEFAULT_CONFIG = REPO_ROOT / "configs/pipelines/stage1_single_rizon4_data_collection.yaml"
+DEFAULT_CONFIG = REPO_ROOT / "configs/stage1_single_rizon4_data_collection.yaml"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "datasets/stage1_records"
 DEFAULT_LEROBOT_OUTPUT_ROOT = REPO_ROOT / "datasets/lerobot"
 DEFAULT_SAMPLE_ENDPOINT = os.environ.get("FLEXIV_STAGE1_SAMPLE_ENDPOINT", "tcp://127.0.0.1:5690")
