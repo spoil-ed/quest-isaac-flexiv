@@ -258,6 +258,7 @@ class QuestSharedFrameCalibration:
         direction_tolerance_deg: float = DEFAULT_HAND_DIRECTION_TOLERANCE_DEG,
         strict_geometry: bool = False,
         spacing_gate: bool = False,
+        require_live_separation: bool = False,
         min_separation_m: float = DEFAULT_MIN_HAND_SEPARATION_M,
         reference_tcp_poses: dict[str, Iterable[float]] | None = None,
     ) -> None:
@@ -269,6 +270,9 @@ class QuestSharedFrameCalibration:
         self.direction_tolerance_deg = max(0.0, float(direction_tolerance_deg))
         self.strict_geometry = bool(strict_geometry)
         self.spacing_gate = bool(spacing_gate)
+        self.require_live_separation = bool(require_live_separation)
+        self.separation_target_ready = not self.require_live_separation
+        self.separation_target_source = "configured"
         self.min_separation_m = max(1e-3, float(min_separation_m))
         self.reference_tcp_poses = (
             None
@@ -282,6 +286,9 @@ class QuestSharedFrameCalibration:
             left = self.reference_tcp_poses["left"]
             right = self.reference_tcp_poses["right"]
             self.separation_m = norm3([right[index] - left[index] for index in range(3)])
+            self.separation_target_source = "scene_reference"
+        if self.require_live_separation:
+            self.separation_target_source = "waiting_live_robot_tcp"
         self.rotation_calibrated_from_mapped: list[list[float]] | None = None
         self._pending_since: float | None = None
         self._require_release = False
@@ -296,6 +303,25 @@ class QuestSharedFrameCalibration:
         self.rotation_calibrated_from_mapped = None
         self._pending_since = None
         self._require_release = bool(require_release)
+        if self.require_live_separation:
+            self.separation_target_ready = False
+            self.separation_target_source = "waiting_live_robot_tcp"
+
+    def set_live_separation_target(self, separation_m: float) -> bool:
+        """Continuously update the spacing reference from the current robot TCP pair."""
+
+        value = float(separation_m)
+        if not math.isfinite(value) or value < self.min_separation_m:
+            return False
+        changed = (
+            not self.separation_target_ready
+            or self.separation_target_source != "live_robot_tcp"
+            or abs(value - self.separation_m) > 1e-6
+        )
+        self.separation_m = value
+        self.separation_target_ready = True
+        self.separation_target_source = "live_robot_tcp"
+        return changed
 
     def _mapped_position(self, pose: list[list[float]]) -> list[float]:
         return apply_axis_map(pose_matrix_position(pose), self.axis_map)
@@ -375,7 +401,17 @@ class QuestSharedFrameCalibration:
         """Measure the live two-controller geometry used by the strict gate."""
 
         if left_pose is None or right_pose is None:
-            return {"available": False, "spacing_ok": False, "direction_ok": False, "ok": False}
+            return {
+                "available": False,
+                "separation_target_m": (
+                    float(self.separation_m) if self.separation_target_ready else None
+                ),
+                "separation_target_source": str(self.separation_target_source),
+                "separation_tolerance_m": float(self.separation_tolerance_m),
+                "spacing_ok": False,
+                "direction_ok": False,
+                "ok": False,
+            }
         left_position = self._mapped_position(left_pose)
         right_position = self._mapped_position(right_pose)
         delta = [right_position[index] - left_position[index] for index in range(3)]
@@ -400,7 +436,10 @@ class QuestSharedFrameCalibration:
                 left_reference[3:7],
                 right_reference[3:7],
             )
-            spacing_ok = abs(separation - self.separation_m) <= self.separation_tolerance_m
+            spacing_ok = bool(
+                self.separation_target_ready
+                and abs(separation - self.separation_m) <= self.separation_tolerance_m
+            )
             direction_ok = (
                 max(left_error, right_error, relative_orientation_error)
                 <= self.direction_tolerance_deg
@@ -409,7 +448,10 @@ class QuestSharedFrameCalibration:
                 "available": True,
                 "reference_mode": "robot_tcp_relative_pose",
                 "separation_m": float(separation),
-                "separation_target_m": float(self.separation_m),
+                "separation_target_m": (
+                    float(self.separation_m) if self.separation_target_ready else None
+                ),
+                "separation_target_source": str(self.separation_target_source),
                 "separation_tolerance_m": float(self.separation_tolerance_m),
                 "spacing_ok": bool(spacing_ok),
                 "left_direction_error_deg": float(left_error),
@@ -428,7 +470,10 @@ class QuestSharedFrameCalibration:
         left_error = abs(vector_angle_deg(left_xy, line_xy) - 90.0)
         right_error = abs(vector_angle_deg(right_xy, line_xy) - 90.0)
         mutual_error = vector_angle_deg(left_xy, right_xy)
-        spacing_ok = abs(separation - self.separation_m) <= self.separation_tolerance_m
+        spacing_ok = bool(
+            self.separation_target_ready
+            and abs(separation - self.separation_m) <= self.separation_tolerance_m
+        )
         direction_ok = bool(
             horizontal_valid
             and max(left_error, right_error, mutual_error) <= self.direction_tolerance_deg
@@ -436,7 +481,10 @@ class QuestSharedFrameCalibration:
         return {
             "available": True,
             "separation_m": float(separation),
-            "separation_target_m": float(self.separation_m),
+            "separation_target_m": (
+                float(self.separation_m) if self.separation_target_ready else None
+            ),
+            "separation_target_source": str(self.separation_target_source),
             "separation_tolerance_m": float(self.separation_tolerance_m),
             "spacing_ok": bool(spacing_ok),
             "left_direction_error_deg": float(left_error),
@@ -797,7 +845,9 @@ class CalibrationResetUdpReceiver:
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.bind((str(host), int(port)))
         self._socket.setblocking(False)
+        self.address = self._socket.getsockname()
         self.last_seq = 0
+        self.latest_separation_m: float | None = None
 
     def poll_new_seq(self) -> int | None:
         newest = self.last_seq
@@ -808,9 +858,18 @@ class CalibrationResetUdpReceiver:
                 break
             try:
                 packet = json.loads(payload.decode("utf-8"))
-                if packet.get("schema") != "flexiv_quest_calibration_reset.v1":
+                schema = packet.get("schema")
+                if schema == "flexiv_quest_calibration_reference.v1":
+                    separation_m = float(packet.get("separation_m"))
+                    if math.isfinite(separation_m) and separation_m > 0.0:
+                        self.latest_separation_m = separation_m
                     continue
-                newest = max(newest, int(packet.get("reset_seq", 0)))
+                if schema != "flexiv_quest_calibration_reset.v1":
+                    continue
+                reset_seq = int(packet.get("reset_seq", 0))
+                if reset_seq > self.last_seq:
+                    self.latest_separation_m = None
+                newest = max(newest, reset_seq)
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
                 continue
         if newest <= self.last_seq:
@@ -878,7 +937,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--shared-calibration-spacing-gate",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Require controller separation to match the configured robot TCP separation.",
+        help="Require controller separation to match the robot TCP separation.",
+    )
+    parser.add_argument(
+        "--calibration-live-robot-separation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Wait for the live Isaac robot TCP separation instead of using the scene reference.",
     )
     parser.add_argument(
         "--calibration-reference-scene-config",
@@ -972,6 +1037,7 @@ def main(argv: list[str] | None = None) -> int:
             separation_tolerance_m=args.calibration_separation_tolerance_m,
             strict_geometry=args.strict_shared_calibration,
             spacing_gate=args.shared_calibration_spacing_gate,
+            require_live_separation=args.calibration_live_robot_separation,
             min_separation_m=args.calibration_min_separation_m,
             reference_tcp_poses=reference_tcp_poses,
         )
@@ -1009,6 +1075,15 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             now = time.monotonic()
             reset_seq = reset_receiver.poll_new_seq()
+            if (
+                shared_calibration is not None
+                and args.calibration_live_robot_separation
+                and reset_receiver.latest_separation_m is not None
+                and not args.strict_shared_calibration
+            ):
+                shared_calibration.set_live_separation_target(
+                    reset_receiver.latest_separation_m
+                )
             if reset_seq is not None:
                 if shared_calibration is not None:
                     shared_calibration.reset(require_release=True)

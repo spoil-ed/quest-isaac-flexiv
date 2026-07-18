@@ -45,7 +45,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--quest-position-deadband-m", type=float, default=None)
     parser.add_argument("--quest-workspace-min", default=None)
     parser.add_argument("--quest-workspace-max", default=None)
-    parser.add_argument("--quest-workspace-clipping", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--quest-workspace-clipping", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--left-target-pose-udp-host", default=None)
     parser.add_argument("--left-target-pose-udp-port", type=int, default=None)
     parser.add_argument("--right-target-pose-udp-host", default=None)
@@ -142,7 +142,8 @@ def build_command(args: argparse.Namespace) -> list[str]:
         _maybe_extend(command, option, value)
     if args.enable_quest_target_udp:
         command.append("--enable-quest-target-udp")
-    command.append("--quest-workspace-clipping" if args.quest_workspace_clipping else "--no-quest-workspace-clipping")
+    if args.quest_workspace_clipping is not None:
+        command.append("--quest-workspace-clipping" if args.quest_workspace_clipping else "--no-quest-workspace-clipping")
     if args.gateway_endpoint:
         command.extend(["--gateway-endpoint", str(args.gateway_endpoint)])
     command.append("--coordinated-reset" if args.coordinated_reset else "--no-coordinated-reset")

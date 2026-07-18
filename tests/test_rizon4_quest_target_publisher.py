@@ -1,5 +1,7 @@
 import importlib.util
+import json
 import math
+import socket
 import unittest
 from pathlib import Path
 
@@ -68,6 +70,39 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertEqual(args.calibration_separation_tolerance_m, 0.03)
         self.assertFalse(args.strict_shared_calibration)
         self.assertFalse(args.shared_calibration_spacing_gate)
+        self.assertFalse(args.calibration_live_robot_separation)
+
+    def test_calibration_receiver_accepts_live_robot_tcp_separation(self):
+        receiver = mod.CalibrationResetUdpReceiver("127.0.0.1", 0)
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sender.sendto(
+                json.dumps(
+                    {
+                        "schema": "flexiv_quest_calibration_reference.v1",
+                        "separation_m": 0.437,
+                    }
+                ).encode("utf-8"),
+                receiver.address,
+            )
+
+            self.assertIsNone(receiver.poll_new_seq())
+            self.assertAlmostEqual(receiver.latest_separation_m, 0.437)
+
+            sender.sendto(
+                json.dumps(
+                    {
+                        "schema": "flexiv_quest_calibration_reset.v1",
+                        "reset_seq": 1,
+                    }
+                ).encode("utf-8"),
+                receiver.address,
+            )
+            self.assertEqual(receiver.poll_new_seq(), 1)
+            self.assertIsNone(receiver.latest_separation_m)
+        finally:
+            sender.close()
+            receiver.close()
 
     def test_cli_supports_one_televuer_session_for_both_controllers(self):
         scene = Path("configs/scenes/pick_place_redblock_flexiv_dual.yaml")
@@ -224,6 +259,46 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         too_close = _rot_z_pose(math.radians(70.0), 0.0, 0.0, 0.0)
         self.assertFalse(rejected.update(left, too_close, both_squeeze=True, now=1.0))
 
+
+    def test_spacing_gate_waits_for_and_tracks_live_robot_separation(self):
+        references = {
+            "left": [0.0, 0.3, 0.0, 1.0, 0.0, 0.0, 0.0],
+            "right": [0.0, -0.3, 0.0, 1.0, 0.0, 0.0, 0.0],
+        }
+        calibration = mod.QuestSharedFrameCalibration(
+            axis_map="x,y,z",
+            tcp_rot_offset_wxyz=[1.0, 0.0, 0.0, 0.0],
+            settle_sec=0.0,
+            spacing_gate=True,
+            require_live_separation=True,
+            strict_geometry=False,
+            reference_tcp_poses=references,
+        )
+        left = _pose(0.0, 0.21, 0.0)
+        right = _pose(0.0, -0.21, 0.0)
+
+        waiting = calibration.geometry_status(left, right)
+        self.assertFalse(waiting["spacing_ok"])
+        self.assertIsNone(waiting["separation_target_m"])
+        self.assertFalse(calibration.update(left, right, both_squeeze=True, now=1.0))
+
+        self.assertTrue(calibration.set_live_separation_target(0.42))
+        ready = calibration.geometry_status(left, right)
+        self.assertTrue(ready["spacing_ok"])
+        self.assertEqual(ready["separation_target_source"], "live_robot_tcp")
+        self.assertTrue(calibration.update(left, right, both_squeeze=True, now=1.1))
+        self.assertTrue(calibration.set_live_separation_target(0.50))
+        self.assertAlmostEqual(calibration.separation_m, 0.50)
+        self.assertTrue(calibration.confirmed)
+
+        calibration.reset(require_release=True)
+        reset_status = calibration.geometry_status(left, right)
+        self.assertFalse(reset_status["spacing_ok"])
+        self.assertIsNone(reset_status["separation_target_m"])
+        self.assertEqual(
+            reset_status["separation_target_source"],
+            "waiting_live_robot_tcp",
+        )
 
     def test_shared_frame_stays_frozen_after_squeeze_release(self):
         calibration = mod.QuestSharedFrameCalibration(settle_sec=0.0)

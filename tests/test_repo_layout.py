@@ -75,6 +75,7 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn('QUEST_PYTHON="$ISAAC_PYTHON"', text)
         self.assertIn("--no-strict-shared-calibration", text)
         self.assertIn("--shared-calibration-spacing-gate", text)
+        self.assertIn("--calibration-live-robot-separation", text)
         self.assertIn('--calibration-reference-scene-config "$SCENE_CONFIG"', text)
         self.assertIn("--calibration-separation-tolerance-m 0.03", text)
         self.assertNotIn("QUEST_CONDA_ENV", text)

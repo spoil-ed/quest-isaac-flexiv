@@ -192,7 +192,8 @@ Quest 输入参数：
 | `--quest-axis-map` | app 默认 | OpenXR 到机器人基座轴映射，例如 `-z,-x,y`。 |
 | `--quest-position-scale` | `1.0` | Quest 位移缩放。 |
 | `--quest-position-deadband-m` | app 默认 | Isaac 端平移死区，单位米。 |
-| `--quest-workspace-min/max` | app 默认 | 基座坐标系 TCP 工作空间下限/上限，格式 `x,y,z`。 |
+| `--quest-workspace-min/max` | app 默认 | 旧场景兼容：RDK 基座坐标系 TCP 下限/上限，格式 `x,y,z`。 |
+| `--quest-workspace-clipping/--no-quest-workspace-clipping` | 场景配置 | 覆盖 scene 中每条机械臂的 `workspace.enabled`；未指定时使用场景值。 |
 
 输出、控制与安全参数：
 
@@ -276,8 +277,9 @@ Stage2 双臂 Isaac 启动入口，参数语义与单臂入口一致，差异如
 | `--engage-settle-sec` | `0` | 按下使能的当前帧立即建立相对参考点。 |
 | `--strict-shared-calibration/--no-strict-shared-calibration` | 关闭严格模式 | 严格模式要求双手距离、局部连线方向和相对旋转与参考双 TCP 相对位姿一致；`start.sh` 默认关闭。 |
 | `--shared-calibration-spacing-gate/--no-shared-calibration-spacing-gate` | 关闭 | 仅要求双手间距匹配参考双 TCP 间距；`start.sh` 默认开启。 |
-| `--calibration-reference-scene-config` | 无 | 从 scene `robots[].target` 读取首次接管的双 TCP 相对位姿；`start.sh` 为距离门控自动传入当前 scene。 |
-| `--calibration-separation-tolerance-m` | `0.03` | 双手间距与 scene 初始双 TCP 间距允许相差 3 cm。 |
+| `--calibration-reference-scene-config` | 无 | 从 scene `robots[].target` 读取严格姿态调试模式使用的双 TCP 相对位姿。 |
+| `--calibration-live-robot-separation/--no-calibration-live-robot-separation` | 关闭 | 等待 Isaac 上报双臂当前实际 TCP 间距；`start.sh` 默认开启。 |
+| `--calibration-separation-tolerance-m` | `0.03` | 双手间距与标定当下实际双 TCP 间距允许相差 3 cm。 |
 | `--calibration-min-separation-m` | `0.05` | 定义双手三维横向轴所需的最小欧氏间距。 |
 | `--right-tcp-rot-offset` | 固定 wxyz | 右手控制器到 TCP 的姿态偏移。 |
 | `--enable-threshold` | `0.15` | squeeze/trigger 等模拟量使能阈值。 |

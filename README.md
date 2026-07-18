@@ -96,6 +96,17 @@ SELF_COLLISION_MONITOR=false ./scripts/start_all.sh
 SCENE_CONFIG=configs/scenes/move_cylinder_flexiv_dual.yaml ./scripts/start_all.sh
 ```
 
+每条机械臂的矩形 TCP 工作区直接在 scene YAML 的 `robots[].workspace` 中设置，坐标单位为米、坐标系为 Isaac world。启动后 Isaac 视口会显示对应颜色的 12 边线框，Quest 原始目标越界时，实际命令目标会被裁剪到边界：
+
+```yaml
+workspace:
+  enabled: true
+  frame: world
+  min: {x: 0.20, y: -0.05, z: 0.25}
+  max: {x: 0.85, y: 0.65, z: 1.05}
+  visualize: true
+```
+
 启动后确认两套 Studio 的模拟机器人均已启动。Docker Studio GUI 默认地址为 `127.0.0.1:5902`：
 
 ```bash
@@ -112,7 +123,7 @@ https://<HOST_IP>:8012/?ws=wss://<HOST_IP>:8012
 
 Quest tracking、双手按键、共享坐标系状态和录制状态直接显示在 Web 页面的“采集门控”区域。
 
-两只手柄均出现 tracking 数据后，先把双手距离调整到 scene 初始双 TCP 间距的 ±3 cm；姿态不检查。距离显示 `PASS` 后同时按住双手 `squeeze` 0.25 s 即可锁定共享坐标系。系统在锁定坐标系的同一帧分别建立手柄和当前 TCP 零点，第一帧增量严格为零，随后无需松手即可直接相对跟随。
+两只手柄均出现 tracking 数据后，先把双手距离调整到标定当下两条机械臂实际 TCP 间距的 ±3 cm；姿态不检查。Isaac 仅在双臂 READY 时实时提供该距离，距离显示 `PASS` 后同时按住双手 `squeeze` 0.25 s 即可锁定共享坐标系。系统在锁定坐标系的同一帧分别建立手柄和当前 TCP 零点，第一帧增量严格为零，随后无需松手即可直接相对跟随。
 
 - 按住单侧 `squeeze`：该侧机械臂按相对位置和相对姿态跟随；
 - 松开 `squeeze`：保持最后目标，不回初始位置；

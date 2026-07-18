@@ -18,6 +18,15 @@ robots:
     examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
     position: {x: -0.06, y: 0.20, z: 1.08}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
+    # Axis-aligned TCP workspace in Isaac world coordinates, meters.
+    workspace:
+      enabled: true
+      frame: world
+      min: {x: 0.50, y: -0.05, z: 0.25}
+      max: {x: 1.00, y: 0.65, z: 1.05}
+      visualize: true
+      color: [0.20, 0.90, 0.35]
+      line_width_m: 0.008
     # Safe Studio/SimPlugin handshake posture. initial_q is reached afterward
     # through a rate-limited Cartesian target trajectory.
     bootstrap_q: [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
@@ -41,6 +50,15 @@ robots:
     examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
     position: {x: -0.06, y: -0.20, z: 1.08}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
+    # Axis-aligned TCP workspace in Isaac world coordinates, meters.
+    workspace:
+      enabled: true
+      frame: world
+      min: {x: 0.50, y: -0.65, z: 0.25}
+      max: {x: 1.00, y: 0.05, z: 1.05}
+      visualize: true
+      color: [0.20, 0.55, 1.00]
+      line_width_m: 0.008
     bootstrap_q: [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
     # Task-tuned ready posture; DRDK reaches it through NRT joint position.
     initial_q_waypoints: []

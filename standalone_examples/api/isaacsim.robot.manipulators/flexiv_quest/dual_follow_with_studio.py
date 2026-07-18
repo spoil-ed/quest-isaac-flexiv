@@ -88,6 +88,14 @@ DEFAULT_LEFT_COMMAND_PRIM_PATH = "/World/CommandFrameLeft"
 DEFAULT_RIGHT_COMMAND_PRIM_PATH = "/World/CommandFrameRight"
 DEFAULT_LEFT_COMMAND_NAME = "command_frame_left"
 DEFAULT_RIGHT_COMMAND_NAME = "command_frame_right"
+DEFAULT_WORLD_WORKSPACE = {
+    "left": ((0.20, -0.05, 0.25), (0.85, 0.65, 1.05)),
+    "right": ((0.20, -0.65, 0.25), (0.85, 0.05, 1.05)),
+}
+DEFAULT_WORKSPACE_COLOR = {
+    "left": (0.20, 0.90, 0.35),
+    "right": (0.20, 0.55, 1.00),
+}
 DEFAULT_LEFT_TARGET_POSE_UDP_PORT = 57680
 DEFAULT_RIGHT_TARGET_POSE_UDP_PORT = 57681
 DEFAULT_LEFT_RDK_STATUS_UDP_PORT = 57682
@@ -218,8 +226,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--quest-workspace-clipping",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Clamp Quest TCP goals to --quest-workspace-min/max (disabled for wall-mounted dual arms).",
+        default=None,
+        help="Override scene workspace.enabled; legacy scenes use --quest-workspace-min/max in RDK base xyz.",
     )
     parser.add_argument("--max-linear-speed-m-s", type=float, default=0.10)
     parser.add_argument("--max-angular-speed-rad-s", type=float, default=0.75)
@@ -471,6 +479,17 @@ def _finite_status_pose(packet: dict[str, Any] | None, key: str) -> list[float] 
 
 
 @dataclass
+class WorkspaceConfig:
+    enabled: bool
+    frame: str
+    minimum: tuple[float, float, float]
+    maximum: tuple[float, float, float]
+    visualize: bool
+    color: tuple[float, float, float]
+    line_width_m: float
+
+
+@dataclass
 class ArmRuntime:
     side: str
     serial_number: str
@@ -489,6 +508,8 @@ class ArmRuntime:
     bootstrap_q: list[float]
     base_position: tuple[float, float, float]
     base_orientation: tuple[float, float, float, float]
+    workspace: WorkspaceConfig
+    workspace_clipped: bool = False
     latest_quest_target: QuestTargetPacket | None = None
     latest_target_drives: list[float] | None = None
     last_connected: bool = False
@@ -517,6 +538,106 @@ class ArmRuntime:
 
 def _scene_robot_config(args: argparse.Namespace, side: str) -> dict[str, Any]:
     return _robot_by_side(args.scene_data, side) if isinstance(args.scene_data, dict) else {}
+
+
+def _workspace_config(args: argparse.Namespace, robot_cfg: dict[str, Any], side: str) -> WorkspaceConfig:
+    raw = robot_cfg.get("workspace")
+    if raw is None:
+        return WorkspaceConfig(
+            enabled=bool(args.quest_workspace_clipping),
+            frame="rdk_base",
+            minimum=tuple(parse_float_list(args.quest_workspace_min, expected=3, name="quest_workspace_min")),
+            maximum=tuple(parse_float_list(args.quest_workspace_max, expected=3, name="quest_workspace_max")),
+            visualize=False,
+            color=DEFAULT_WORKSPACE_COLOR[side],
+            line_width_m=0.008,
+        )
+    if not isinstance(raw, dict):
+        raise ValueError(f"{side} workspace must be a YAML/JSON object")
+    frame = str(raw.get("frame", "world")).strip().lower()
+    if frame != "world":
+        raise ValueError(f"{side} workspace.frame must be 'world'")
+    default_minimum, default_maximum = DEFAULT_WORLD_WORKSPACE[side]
+    minimum = _xyz(raw.get("min", default_minimum), name=f"{side} workspace min")
+    maximum = _xyz(raw.get("max", default_maximum), name=f"{side} workspace max")
+    if not all(math.isfinite(value) for value in (*minimum, *maximum)):
+        raise ValueError(f"{side} workspace bounds must be finite")
+    if any(lower >= upper for lower, upper in zip(minimum, maximum)):
+        raise ValueError(f"{side} workspace min must be smaller than max on every axis")
+    color = _xyz(raw.get("color", DEFAULT_WORKSPACE_COLOR[side]), name=f"{side} workspace color")
+    if not all(0.0 <= value <= 1.0 for value in color):
+        raise ValueError(f"{side} workspace color values must be within [0, 1]")
+    line_width_m = float(raw.get("line_width_m", 0.008))
+    if not math.isfinite(line_width_m) or line_width_m <= 0.0:
+        raise ValueError(f"{side} workspace.line_width_m must be positive")
+    enabled = bool(raw.get("enabled", True))
+    if args.quest_workspace_clipping is not None:
+        enabled = bool(args.quest_workspace_clipping)
+    return WorkspaceConfig(
+        enabled=enabled,
+        frame=frame,
+        minimum=minimum,
+        maximum=maximum,
+        visualize=bool(raw.get("visualize", True)),
+        color=color,
+        line_width_m=line_width_m,
+    )
+
+
+def _create_workspace_wireframe(stage, side: str, workspace: WorkspaceConfig) -> None:
+    """Draw a non-physical 12-edge world-axis workspace box in the Isaac stage."""
+
+    if not workspace.enabled or not workspace.visualize or workspace.frame != "world":
+        return
+    from pxr import Gf, UsdGeom, Vt
+
+    lower = workspace.minimum
+    upper = workspace.maximum
+    corners = [
+        (x, y, z)
+        for z in (lower[2], upper[2])
+        for y in (lower[1], upper[1])
+        for x in (lower[0], upper[0])
+    ]
+    edges = (
+        (0, 1), (1, 3), (3, 2), (2, 0),
+        (4, 5), (5, 7), (7, 6), (6, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    )
+    points = [Gf.Vec3f(*corners[index]) for edge in edges for index in edge]
+    UsdGeom.Xform.Define(stage, "/World/WorkspaceLimits")
+    curves = UsdGeom.BasisCurves.Define(stage, f"/World/WorkspaceLimits/{side.title()}")
+    curves.CreateTypeAttr(UsdGeom.Tokens.linear)
+    curves.CreateWrapAttr(UsdGeom.Tokens.nonperiodic)
+    curves.CreateCurveVertexCountsAttr(Vt.IntArray([2] * len(edges)))
+    curves.CreatePointsAttr(Vt.Vec3fArray(points))
+    curves.CreateWidthsAttr(Vt.FloatArray([workspace.line_width_m]))
+    curves.SetWidthsInterpolation(UsdGeom.Tokens.constant)
+    curves.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*workspace.color)]))
+    curves.CreateDisplayOpacityAttr(Vt.FloatArray([0.85]))
+
+
+def _clamp_pose_to_world_workspace(
+    arm: ArmRuntime,
+    pose_base_tcp: list[float],
+) -> tuple[list[float], bool]:
+    workspace = arm.workspace
+    calibration = arm.rdk_world_calibration
+    if not workspace.enabled or workspace.frame != "world" or calibration is None:
+        return list(pose_base_tcp), False
+    world_position, world_orientation = calibration.rdk_pose_to_world(pose_base_tcp)
+    clamped_position = [
+        min(max(float(value), lower), upper)
+        for value, lower, upper in zip(world_position, workspace.minimum, workspace.maximum)
+    ]
+    clipped = any(abs(actual - limited) > 1e-9 for actual, limited in zip(world_position, clamped_position))
+    if not clipped:
+        return list(pose_base_tcp), False
+    clamped_pose = calibration.world_pose_to_rdk(
+        world_position=clamped_position,
+        world_orientation_wxyz=world_orientation,
+    )
+    return [float(value) for value in clamped_pose], True
 
 
 def _robot_position_orientation(robot_cfg: dict[str, Any]) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
@@ -626,7 +747,7 @@ def run(args: argparse.Namespace) -> int:
     import numpy as np
     import omni.timeline
     from isaacsim.core.api import World
-    from isaacsim.core.utils.stage import add_reference_to_stage
+    from isaacsim.core.utils.stage import add_reference_to_stage, get_current_stage
     from isaacsim.sensors.camera import Camera
     from isaacsim.robot.manipulators.examples.flexiv import FlexivSerial
     from isaacsim.robot.manipulators.grippers.parallel_gripper import ParallelGripper
@@ -706,6 +827,7 @@ def run(args: argparse.Namespace) -> int:
         robot_name = str(robot_cfg.get("name") or default_name)
         end_effector = str(robot_cfg.get("end_effector_prim_name") or DEFAULT_END_EFFECTOR_PRIM_NAME)
         base_position, base_orientation = _robot_position_orientation(robot_cfg)
+        workspace = _workspace_config(args, robot_cfg, side)
         target_prim, target_name, initial_pose = _target_pose_config(robot_cfg, default_position=default_target_position)
         target_prim = target_prim or default_target_prim
         target_name = target_name or default_target_name
@@ -764,18 +886,18 @@ def run(args: argparse.Namespace) -> int:
             mapper=QuestRelativeTargetMapper(
                 axis_map=parse_quest_axis_map(args.quest_axis_map),
                 scale=float(args.quest_position_scale),
-                workspace_min=parse_float_list(args.quest_workspace_min, expected=3, name="quest_workspace_min"),
-                workspace_max=parse_float_list(args.quest_workspace_max, expected=3, name="quest_workspace_max"),
+                workspace_min=workspace.minimum,
+                workspace_max=workspace.maximum,
                 position_deadband_m=float(args.quest_position_deadband_m),
                 orientation_mode=str(args.quest_relative_orientation_mode),
-                clamp_workspace=bool(args.quest_workspace_clipping),
+                clamp_workspace=bool(workspace.enabled and workspace.frame == "rdk_base"),
             ),
             limiter=CartesianTargetLimiter(
-                workspace_min=parse_float_list(args.quest_workspace_min, expected=3, name="quest_workspace_min"),
-                workspace_max=parse_float_list(args.quest_workspace_max, expected=3, name="quest_workspace_max"),
+                workspace_min=workspace.minimum,
+                workspace_max=workspace.maximum,
                 max_linear_speed_m_s=float(args.max_linear_speed_m_s),
                 max_angular_speed_rad_s=float(args.max_angular_speed_rad_s),
-                clamp_workspace=bool(args.quest_workspace_clipping),
+                clamp_workspace=bool(workspace.enabled and workspace.frame == "rdk_base"),
             ),
             target_pose_gate=TargetPosePublishGate.from_hz(float(args.target_pose_publish_hz), physics_freq=physics_hz),
             configured_initial_pose=initial_pose,
@@ -783,7 +905,14 @@ def run(args: argparse.Namespace) -> int:
             bootstrap_q=_bootstrap_q_config(robot_cfg, initial_q=initial_q),
             base_position=base_position,
             base_orientation=base_orientation,
+            workspace=workspace,
             latest_target_drives=[0.0] * 7,
+        )
+        _create_workspace_wireframe(get_current_stage(), side, workspace)
+        print(
+            f"[FlexivDualTargetFrame] {side} workspace enabled={workspace.enabled} "
+            f"frame={workspace.frame} min={list(workspace.minimum)} max={list(workspace.maximum)}",
+            flush=True,
         )
 
     quest_target_receiver = (
@@ -836,6 +965,7 @@ def run(args: argparse.Namespace) -> int:
         else None
     )
     state_monitor_last_publish = 0.0
+    calibration_reference_last_publish = 0.0
     pending_reset_control = None
     last_reset_seq = 0
     reset_state = "idle"
@@ -1148,6 +1278,42 @@ def run(args: argparse.Namespace) -> int:
             flush=True,
         )
 
+    def publish_quest_calibration_reference() -> None:
+        """Send the current actual world-TCP spacing to the Quest calibration gate."""
+
+        nonlocal calibration_reference_last_publish
+        if quest_calibration_reset_publisher is None:
+            return
+        now = time.monotonic()
+        if now - calibration_reference_last_publish < 0.1:
+            return
+        if not all(
+            arm.startup_trajectory_complete
+            and arm.rdk_ready
+            and arm.rdk_phase == "ready"
+            for arm in arms.values()
+        ):
+            return
+        calibration_reference_last_publish = now
+        left_position, _ = arms["left"].robot.end_effector.get_world_pose()
+        right_position, _ = arms["right"].robot.end_effector.get_world_pose()
+        separation_m = math.sqrt(
+            sum(
+                (float(right_position[index]) - float(left_position[index])) ** 2
+                for index in range(3)
+            )
+        )
+        quest_calibration_reset_publisher.publish(
+            {
+                "schema": "flexiv_quest_calibration_reference.v1",
+                "servo_cycle": int(servo_cycle),
+                "monotonic_time": now,
+                "left_tcp_world": [float(value) for value in left_position],
+                "right_tcp_world": [float(value) for value in right_position],
+                "separation_m": float(separation_m),
+            }
+        )
+
     def publish_quest_calibration_reset() -> None:
         if (
             quest_calibration_reset_publisher is None
@@ -1301,11 +1467,16 @@ def run(args: argparse.Namespace) -> int:
                 )
                 if limiter_seed is not None:
                     arm.limiter.reset(limiter_seed)
-            control_pose_base_tcp = arm.limiter.limit(
+            workspace_goal, arm.workspace_clipped = _clamp_pose_to_world_workspace(
+                arm,
                 arm.quest_goal_pose_base_tcp,
+            )
+            control_pose_base_tcp = arm.limiter.limit(
+                workspace_goal,
                 dt=float(target_dt),
             )
         elif not reset_hold_active:
+            arm.workspace_clipped = False
             arm.limiter.reset()
 
         arm.latest_control_pose_base_tcp = [float(value) for value in control_pose_base_tcp]
@@ -1910,7 +2081,14 @@ def run(args: argparse.Namespace) -> int:
                     ),
                     "position_mode": str(args.quest_target_mode),
                     "orientation_mode": str(args.quest_relative_orientation_mode),
-                    "workspace_clipping": bool(args.quest_workspace_clipping),
+                    "workspace_clipping": bool(arm.workspace.enabled),
+                    "workspace": {
+                        "enabled": bool(arm.workspace.enabled),
+                        "frame": str(arm.workspace.frame),
+                        "min_xyz": [float(value) for value in arm.workspace.minimum],
+                        "max_xyz": [float(value) for value in arm.workspace.maximum],
+                        "clipped": bool(arm.workspace_clipped),
+                    },
                     "tcp_rot_offset_wxyz": (
                         None
                         if quest_input is None or quest_input.get("tcp_rot_offset_wxyz") is None
@@ -2039,6 +2217,7 @@ def run(args: argparse.Namespace) -> int:
                 pending_reset_control = None
                 begin_coordinated_reset(control)
                 reset_needed = False
+            publish_quest_calibration_reference()
             publish_quest_calibration_reset()
             if world.is_stopped() and not reset_needed:
                 reset_needed = True

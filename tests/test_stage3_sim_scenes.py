@@ -65,6 +65,25 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
                         robot["orientation"],
                         {"w": 0.70710678, "x": 0.0, "y": 0.70710678, "z": 0.0},
                     )
+                    workspace = robot["workspace"]
+                    self.assertTrue(workspace["enabled"])
+                    self.assertEqual(workspace["frame"], "world")
+                    self.assertTrue(workspace["visualize"])
+                    expected_min = (
+                        {"x": 0.20, "y": -0.05, "z": 0.25}
+                        if robot["side"] == "left"
+                        else {"x": 0.20, "y": -0.65, "z": 0.25}
+                    )
+                    expected_max = (
+                        {"x": 0.85, "y": 0.65, "z": 1.05}
+                        if robot["side"] == "left"
+                        else {"x": 0.85, "y": 0.05, "z": 1.05}
+                    )
+                    self.assertEqual(workspace["min"], expected_min)
+                    self.assertEqual(workspace["max"], expected_max)
+                    for axis in ("x", "y", "z"):
+                        self.assertLessEqual(workspace["min"][axis], robot["target"]["position"][axis])
+                        self.assertGreaterEqual(workspace["max"][axis], robot["target"]["position"][axis])
                 left_q = next(robot["initial_q"] for robot in data["robots"] if robot["side"] == "left")
                 right_q = next(robot["initial_q"] for robot in data["robots"] if robot["side"] == "right")
                 symmetry_residual = [

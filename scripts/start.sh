@@ -473,6 +473,7 @@ start_detached_pty \
   --gripper-button trigger \
   --no-strict-shared-calibration \
   --shared-calibration-spacing-gate \
+  --calibration-live-robot-separation \
   --calibration-reference-scene-config "$SCENE_CONFIG" \
   --calibration-separation-tolerance-m 0.03 \
   --calibration-min-separation-m 0.05 \

@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -313,6 +314,18 @@ class Stage2RealValidationConfigTests(unittest.TestCase):
         self.assertNotIn("sync_target_to_base_tcp_pose", quest_branch)
         self.assertNotIn("arm.target_frame.set_world_pose", quest_branch)
 
+    def test_isaac_publishes_current_tcp_spacing_for_quest_calibration(self):
+        source = DUAL_APP.read_text(encoding="utf-8")
+        publisher = source.split(
+            "def publish_quest_calibration_reference() -> None:",
+            maxsplit=1,
+        )[1].split("def publish_quest_calibration_reset()", maxsplit=1)[0]
+
+        self.assertIn('"flexiv_quest_calibration_reference.v1"', publisher)
+        self.assertIn('arms["left"].robot.end_effector.get_world_pose()', publisher)
+        self.assertIn('arms["right"].robot.end_effector.get_world_pose()', publisher)
+        self.assertIn('"separation_m": float(separation_m)', publisher)
+
     def test_quest_target_frame_is_updated_on_the_render_loop(self):
         source = DUAL_APP.read_text(encoding="utf-8")
         render_update = source.split(
@@ -347,7 +360,51 @@ class Stage2RealValidationConfigTests(unittest.TestCase):
 
         self.assertIn('arm.target_control_source == "quest"', source)
         self.assertIn("control_pose_base_tcp = list(arm.quest_goal_pose_base_tcp)", source)
-        self.assertIn("arm.limiter.limit(\n                arm.quest_goal_pose_base_tcp", source)
+        self.assertIn("_clamp_pose_to_world_workspace(", source)
+        self.assertIn("arm.limiter.limit(\n                workspace_goal", source)
+
+    def test_world_workspace_clamps_rdk_goal_through_identity_calibration(self):
+        dual_app = load_dual_app()
+        args = dual_app.parse_args([])
+        workspace = dual_app._workspace_config(
+            args,
+            {
+                "workspace": {
+                    "enabled": True,
+                    "frame": "world",
+                    "min": {"x": 0.20, "y": -0.05, "z": 0.25},
+                    "max": {"x": 0.85, "y": 0.65, "z": 1.05},
+                    "visualize": True,
+                }
+            },
+            "left",
+        )
+        calibration = dual_app.RdkWorldFrameCalibration.from_reference_pair(
+            reference_world_pose=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            reference_pose_base_tcp=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        )
+        arm = SimpleNamespace(workspace=workspace, rdk_world_calibration=calibration)
+
+        limited, clipped = dual_app._clamp_pose_to_world_workspace(
+            arm,
+            [1.20, -0.40, 0.10, 1.0, 0.0, 0.0, 0.0],
+        )
+
+        self.assertTrue(clipped)
+        self.assertEqual(limited[:3], [0.85, -0.05, 0.25])
+        self.assertEqual(limited[3:], [1.0, 0.0, 0.0, 0.0])
+
+    def test_workspace_wireframe_uses_twelve_non_physical_edges(self):
+        source = DUAL_APP.read_text(encoding="utf-8")
+        wireframe = source.split(
+            "def _create_workspace_wireframe",
+            maxsplit=1,
+        )[1].split("def _clamp_pose_to_world_workspace", maxsplit=1)[0]
+
+        self.assertIn("UsdGeom.BasisCurves.Define", wireframe)
+        self.assertIn('"/World/WorkspaceLimits"', wireframe)
+        self.assertIn("[2] * len(edges)", wireframe)
+        self.assertNotIn("UsdPhysics.CollisionAPI", wireframe)
 
 
 if __name__ == "__main__":
