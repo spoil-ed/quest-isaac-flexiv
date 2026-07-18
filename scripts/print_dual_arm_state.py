@@ -19,7 +19,7 @@ DEFAULT_FORWARD_HOST = "127.0.0.1"
 TCP_FORWARD_LOCAL = [0.0, 0.0, 1.0]
 DEFAULT_TCP_FORWARD_BASE = [1.0, 0.0, 0.0]
 HAND_SEPARATION_M = 0.40
-HAND_SEPARATION_TOLERANCE_M = 0.01
+HAND_SEPARATION_TOLERANCE_M = 0.03
 POSITION_ERROR_TOLERANCE_M = 0.03
 ORIENTATION_ERROR_TOLERANCE_DEG = 10.0
 FORWARD_DIRECTION_TOLERANCE_DEG = 15.0
@@ -304,22 +304,42 @@ def quest_hand_match_lines(packet: dict[str, Any], *, color: bool = False) -> tu
             "DIRECTION WAIT | both tracked controller poses are required",
         ], False
 
+    geometry = left.get("calibration_geometry") or right.get("calibration_geometry")
+    robot_reference = bool(
+        isinstance(geometry, dict)
+        and geometry.get("available", False)
+        and geometry.get("reference_mode") == "robot_tcp_relative_pose"
+    )
     try:
         left_position = mapped_controller_position(left)
         right_position = mapped_controller_position(right)
         delta = [right_position[index] - left_position[index] for index in range(3)]
         separation = math.sqrt(sum(value * value for value in delta))
-        spacing_ok = abs(separation - HAND_SEPARATION_M) <= HAND_SEPARATION_TOLERANCE_M
-        left_forward = mapped_controller_forward(left)
-        right_forward = mapped_controller_forward(right)
-        left_angle = horizontal_perpendicular_error_deg(left_forward, delta)
-        right_angle = horizontal_perpendicular_error_deg(right_forward, delta)
-        mutual_angle = horizontal_mutual_angle_deg(left_forward, right_forward)
-        direction_ok = (
-            left_angle <= FORWARD_DIRECTION_TOLERANCE_DEG
-            and right_angle <= FORWARD_DIRECTION_TOLERANCE_DEG
-            and mutual_angle <= FORWARD_DIRECTION_TOLERANCE_DEG
-        )
+        if robot_reference:
+            separation_target = float(geometry["separation_target_m"])
+            separation_tolerance = float(geometry["separation_tolerance_m"])
+            spacing_ok = bool(geometry["spacing_ok"])
+            left_angle = float(geometry["left_direction_error_deg"])
+            right_angle = float(geometry["right_direction_error_deg"])
+            mutual_angle = float(
+                geometry.get(
+                    "relative_orientation_error_deg",
+                    geometry.get("mutual_direction_error_deg", 180.0),
+                )
+            )
+            direction_tolerance = float(geometry["direction_tolerance_deg"])
+            direction_ok = bool(geometry["direction_ok"])
+        else:
+            separation_target = HAND_SEPARATION_M
+            separation_tolerance = HAND_SEPARATION_TOLERANCE_M
+            left_forward = mapped_controller_forward(left)
+            right_forward = mapped_controller_forward(right)
+            left_angle = horizontal_perpendicular_error_deg(left_forward, delta)
+            right_angle = horizontal_perpendicular_error_deg(right_forward, delta)
+            mutual_angle = horizontal_mutual_angle_deg(left_forward, right_forward)
+            direction_tolerance = FORWARD_DIRECTION_TOLERANCE_DEG
+            spacing_ok = abs(separation - separation_target) <= separation_tolerance
+            direction_ok = max(left_angle, right_angle, mutual_angle) <= direction_tolerance
     except ValueError:
         return [
             "SPACING WAIT | invalid controller pose or axis map",
@@ -344,12 +364,19 @@ def quest_hand_match_lines(packet: dict[str, Any], *, color: bool = False) -> tu
     gate_mode = "STRICT" if strict_geometry else "ADVISORY"
     lines = [
         f"SPACING {_status(spacing_ok)} | delta_base_xyz={_numbers(delta, 3)}m "
-        f"distance={separation:.3f}m target={HAND_SEPARATION_M:.2f}±{HAND_SEPARATION_TOLERANCE_M:.2f}m "
+        f"distance={separation:.3f}m target={separation_target:.3f}±{separation_tolerance:.2f}m "
         f"gate={gate_mode} frame={frame_state}",
-        f"DIRECTION {_status(direction_ok)} | target=perpendicular-to-line-in-XY,same-way "
-        f"left_perp_error={left_angle:.1f}deg right_perp_error={right_angle:.1f}deg "
-        f"mutual_error={mutual_angle:.1f}deg"
-        f"<={FORWARD_DIRECTION_TOLERANCE_DEG:.0f}deg",
+        (
+            f"DIRECTION {_status(direction_ok)} | target=current-robot-relative-pose "
+            f"left_line_error={left_angle:.1f}deg right_line_error={right_angle:.1f}deg "
+            f"relative_orientation_error={mutual_angle:.1f}deg<={direction_tolerance:.0f}deg "
+            f"z_branch=L{180 if geometry.get('left_tcp_z180_equivalent', False) else 0}deg/"
+            f"R{180 if geometry.get('right_tcp_z180_equivalent', False) else 0}deg"
+            if robot_reference
+            else f"DIRECTION {_status(direction_ok)} | target=perpendicular-to-line-in-XY,same-way "
+            f"left_perp_error={left_angle:.1f}deg right_perp_error={right_angle:.1f}deg "
+            f"mutual_error={mutual_angle:.1f}deg<={direction_tolerance:.0f}deg"
+        ),
     ]
     if color:
         lines = [

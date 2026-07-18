@@ -19,8 +19,8 @@ STAGE3_SCENES = {
 }
 STUDIO_HOME_Q = [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
 TASK_INITIAL_Q = {
-    "left": [-2.76749928, 1.60589571, -0.10185033, 2.13409496, 2.94157208, 1.03397210, -0.20519636],
-    "right": [-0.77857750, -1.41308403, -0.30362110, -1.84063396, -0.63279176, 1.04804090, 1.39382554],
+    "left": [-1.64741995, 1.54859907, 0.76728963, 1.87202577, 2.14803061, 1.47715997, 0.63020754],
+    "right": [-1.41133392, -1.47221452, -0.84874996, -1.69582841, -0.32155028, 1.58311903, 0.66627366],
 }
 ORIGINAL_INITIAL_Q = {
     "left": [-1.8879, 1.7997, 0.5862, 1.9189, 2.1874, 1.8322, -0.1244],
@@ -56,7 +56,7 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
                 self.assertEqual(len(data["robots"]), 2)
                 for robot in data["robots"]:
                     self.assertEqual(robot["bootstrap_q"], STUDIO_HOME_Q)
-                    self.assertEqual(robot["initial_q_waypoints"], [ORIGINAL_INITIAL_Q[robot["side"]]])
+                    self.assertEqual(robot["initial_q_waypoints"], [])
                     self.assertEqual(robot["initial_q"], TASK_INITIAL_Q[robot["side"]])
                     self.assertTrue(str(robot["usd"]).endswith("/Rizon4_with_Grav.usd"))
                     expected_y = 0.20 if robot["side"] == "left" else -0.20
@@ -72,7 +72,7 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
                     left_q[1] + right_q[1],
                     left_q[2] + right_q[2],
                 ]
-                self.assertLess(sum(value * value for value in symmetry_residual) ** 0.5, 0.61)
+                self.assertLess(sum(value * value for value in symmetry_residual) ** 0.5, 0.37)
                 joint_delta = [
                     value - reference
                     for side in ("left", "right")
@@ -84,14 +84,19 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
                 self.assertLess(sum(value * value for value in joint_delta) ** 0.5, 2.50)
                 self.assertLess(max(abs(value) for value in joint_delta), 1.50)
                 for robot in data["robots"]:
-                    self.assertEqual(robot["target"]["euler_deg"], {"x": 0.0, "y": 90.0, "z": 0.0})
+                    expected_euler = (
+                        {"x": 142.74600614, "y": 27.68557028, "z": 94.99443205}
+                        if robot["side"] == "left"
+                        else {"x": -142.74600614, "y": 27.68557028, "z": -94.99443205}
+                    )
+                    self.assertEqual(robot["target"]["euler_deg"], expected_euler)
                 self.assertEqual(
                     next(robot["target"]["position"] for robot in data["robots"] if robot["side"] == "left"),
-                    {"x": 0.75348038, "y": 0.20, "z": 0.98},
+                    {"x": 0.61510761, "y": 0.30584618, "z": 0.80234595},
                 )
                 self.assertEqual(
                     next(robot["target"]["position"] for robot in data["robots"] if robot["side"] == "right"),
-                    {"x": 0.75348038, "y": -0.20, "z": 0.98},
+                    {"x": 0.61510761, "y": -0.30584618, "z": 0.80234595},
                 )
                 specs = parse_scene_objects(data, config_path=scene_path, validate_assets=True)
                 self.assertEqual({spec.name for spec in specs}, expected_objects[task_name])

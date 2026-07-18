@@ -228,6 +228,38 @@ class DualArmStatePrinterTests(unittest.TestCase):
             ],
         )
 
+    def test_concise_gate_uses_robot_relative_pose_geometry_from_publisher(self):
+        raw = state_packet()
+        geometry = {
+            "available": True,
+            "reference_mode": "robot_tcp_relative_pose",
+            "separation_m": 0.400,
+            "separation_target_m": 0.612,
+            "separation_tolerance_m": 0.03,
+            "spacing_ok": False,
+            "left_direction_error_deg": 4.0,
+            "right_direction_error_deg": 5.0,
+            "relative_orientation_error_deg": 6.0,
+            "left_tcp_z180_equivalent": False,
+            "right_tcp_z180_equivalent": True,
+            "direction_tolerance_deg": 15.0,
+            "direction_ok": True,
+            "ok": False,
+        }
+        for arm in raw["arms"].values():
+            arm["quest"]["calibration_geometry"] = copy.deepcopy(geometry)
+
+        output = MODULE.format_concise_state(
+            MODULE.parse_state_packet(json.dumps(raw).encode("utf-8"))
+        )
+
+        self.assertIn("SPACING FAIL", output)
+        self.assertIn("target=0.612±0.03m", output)
+        self.assertIn("DIRECTION PASS", output)
+        self.assertIn("target=current-robot-relative-pose", output)
+        self.assertIn("relative_orientation_error=6.0deg", output)
+        self.assertIn("z_branch=L0deg/R180deg", output)
+
 
 if __name__ == "__main__":
     unittest.main()

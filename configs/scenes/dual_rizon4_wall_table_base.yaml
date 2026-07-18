@@ -20,14 +20,13 @@ robots:
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
     # Bootstrap at Studio home, pass through the original safe q0, then move slowly to task initq.
     bootstrap_q: [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
-    initial_q_waypoints:
-      - [-1.8879, 1.7997, 0.5862, 1.9189, 2.1874, 1.8322, -0.1244]
-    initial_q: [-2.76749928, 1.60589571, -0.10185033, 2.13409496, 2.94157208, 1.03397210, -0.20519636]
+    initial_q_waypoints: []
+    initial_q: [-1.64741995, 1.54859907, 0.76728963, 1.87202577, 2.14803061, 1.47715997, 0.63020754]
     target:
       prim_path: "/World/TargetFrameLeft"
       name: "target_frame_left"
-      position: {x: 0.75348038, y: 0.20, z: 0.98000}
-      euler_deg: {x: 0.0, y: 90.0, z: 0.0}
+      position: {x: 0.61510761, y: 0.30584618, z: 0.80234595}
+      euler_deg: {x: 142.74600614, y: 27.68557028, z: 94.99443205}
     target_pose:
       host: "127.0.0.1"
       port: 58680
@@ -43,14 +42,13 @@ robots:
     position: {x: -0.06, y: -0.20, z: 1.08}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
     bootstrap_q: [0.0, -0.698132, 0.0, 1.5708, 0.0, 0.698132, 0.0]
-    initial_q_waypoints:
-      - [-1.18, -1.7187, -0.6799, -1.7503, -0.1607, 1.9371, -0.0858]
-    initial_q: [-0.77857750, -1.41308403, -0.30362110, -1.84063396, -0.63279176, 1.04804090, 1.39382554]
+    initial_q_waypoints: []
+    initial_q: [-1.41133392, -1.47221452, -0.84874996, -1.69582841, -0.32155028, 1.58311903, 0.66627366]
     target:
       prim_path: "/World/TargetFrameRight"
       name: "target_frame_right"
-      position: {x: 0.75348038, y: -0.20, z: 0.98000}
-      euler_deg: {x: 0.0, y: 90.0, z: 0.0}
+      position: {x: 0.61510761, y: -0.30584618, z: 0.80234595}
+      euler_deg: {x: -142.74600614, y: 27.68557028, z: -94.99443205}
     target_pose:
       host: "127.0.0.1"
       port: 58681

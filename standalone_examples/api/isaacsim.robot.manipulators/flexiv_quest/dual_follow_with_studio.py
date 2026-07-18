@@ -1858,6 +1858,10 @@ def run(args: argparse.Namespace) -> int:
                         quest_input is not None
                         and quest_input.get("calibration_strict_geometry", False)
                     ),
+                    "calibration_spacing_gate": bool(
+                        quest_input is not None
+                        and quest_input.get("calibration_spacing_gate", False)
+                    ),
                     "calibration_rotation_base_from_mapped": (
                         None
                         if quest_input is None

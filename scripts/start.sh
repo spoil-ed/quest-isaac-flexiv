@@ -471,7 +471,10 @@ start_detached_pty \
   --right-serial-number "$RIGHT_ROBOT_SERIAL" \
   --enable-button squeeze \
   --gripper-button trigger \
-  --strict-shared-calibration \
+  --no-strict-shared-calibration \
+  --shared-calibration-spacing-gate \
+  --calibration-reference-scene-config "$SCENE_CONFIG" \
+  --calibration-separation-tolerance-m 0.03 \
   --calibration-min-separation-m 0.05 \
   --shared-calibration-settle-sec 0.25 \
   --engage-settle-sec 0 \

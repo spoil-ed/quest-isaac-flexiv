@@ -274,8 +274,11 @@ Stage2 双臂 Isaac 启动入口，参数语义与单臂入口一致，差异如
 | `--position-delta-scale` | `1.0` | publisher 侧位移缩放；推荐保持 1，由 Isaac/Hydra 统一缩放。 |
 | `--position-deadband` | `0.0` | publisher 侧平移死区；默认不重复过滤，由 Isaac/Hydra 的 `quest.position_deadband_m` 统一处理。 |
 | `--engage-settle-sec` | `0` | 按下使能的当前帧立即建立相对参考点。 |
-| `--strict-shared-calibration/--no-strict-shared-calibration` | 关闭严格模式 | 严格模式要求 40 cm/方向匹配；默认只把它们作为诊断指标。 |
-| `--calibration-min-separation-m` | `0.05` | 宽松模式下用于定义双手横向轴的最小水平间距。 |
+| `--strict-shared-calibration/--no-strict-shared-calibration` | 关闭严格模式 | 严格模式要求双手距离、局部连线方向和相对旋转与参考双 TCP 相对位姿一致；`start.sh` 默认关闭。 |
+| `--shared-calibration-spacing-gate/--no-shared-calibration-spacing-gate` | 关闭 | 仅要求双手间距匹配参考双 TCP 间距；`start.sh` 默认开启。 |
+| `--calibration-reference-scene-config` | 无 | 从 scene `robots[].target` 读取首次接管的双 TCP 相对位姿；`start.sh` 为距离门控自动传入当前 scene。 |
+| `--calibration-separation-tolerance-m` | `0.03` | 双手间距与 scene 初始双 TCP 间距允许相差 3 cm。 |
+| `--calibration-min-separation-m` | `0.05` | 定义双手三维横向轴所需的最小欧氏间距。 |
 | `--right-tcp-rot-offset` | 固定 wxyz | 右手控制器到 TCP 的姿态偏移。 |
 | `--enable-threshold` | `0.15` | squeeze/trigger 等模拟量使能阈值。 |
 | `--televuer-root` | 仓库 `third_party/televuer` | TeleVuer 源码目录。 |

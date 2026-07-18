@@ -73,8 +73,10 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("Usage: ./scripts/start.sh [--task TASK_NAME]", text)
         self.assertIn('TASK_NAME="$2"', text)
         self.assertIn('QUEST_PYTHON="$ISAAC_PYTHON"', text)
-        self.assertIn("--strict-shared-calibration", text)
-        self.assertNotIn("--no-strict-shared-calibration", text)
+        self.assertIn("--no-strict-shared-calibration", text)
+        self.assertIn("--shared-calibration-spacing-gate", text)
+        self.assertIn('--calibration-reference-scene-config "$SCENE_CONFIG"', text)
+        self.assertIn("--calibration-separation-tolerance-m 0.03", text)
         self.assertNotIn("QUEST_CONDA_ENV", text)
         self.assertIn('--task and SCENE_CONFIG cannot be used together', text)
         self.assertIn("Starting DRDK earlier can make its native constructor exit", text)
@@ -212,6 +214,7 @@ class RepoLayoutTests(unittest.TestCase):
             "stop_flexiv_stack.py",
             "teleop_sdg.py",
             "validate_data_artifacts.py",
+            "validate_initial_q_symmetry.py",
             "web_control_dashboard.py",
         }
 
@@ -313,21 +316,15 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn("--left-serial-number", command)
         self.assertIn("--right-serial-number", command)
         self.assertIn(
-                "--left-nullspace-posture=-2.76749928,1.60589571,-0.10185033,2.13409496,2.94157208,1.0339721,-0.20519636",
+                "--left-nullspace-posture=-1.64741995,1.54859907,0.76728963,1.87202577,2.14803061,1.47715997,0.63020754",
             command,
         )
         self.assertIn(
-                "--right-nullspace-posture=-0.7785775,-1.41308403,-0.3036211,-1.84063396,-0.63279176,1.0480409,1.39382554",
+                "--right-nullspace-posture=-1.41133392,-1.47221452,-0.84874996,-1.69582841,-0.32155028,1.58311903,0.66627366",
             command,
         )
-        self.assertIn(
-            "--left-startup-waypoint=-1.8879,1.7997,0.5862,1.9189,2.1874,1.8322,-0.1244",
-            command,
-        )
-        self.assertIn(
-            "--right-startup-waypoint=-1.18,-1.7187,-0.6799,-1.7503,-0.1607,1.9371,-0.0858",
-            command,
-        )
+        self.assertFalse(any(item.startswith("--left-startup-waypoint=") for item in command))
+        self.assertFalse(any(item.startswith("--right-startup-waypoint=") for item in command))
         self.assertEqual(
             command[command.index("--nullspace-linear-manipulability-weight") + 1],
             "0.2",

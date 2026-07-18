@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+import yaml
+
 
 DEFAULT_SERIAL_NUMBER = "Rizon4-I0LIRN"
 DEFAULT_JOINT_GROUP = "ARM_1"
@@ -26,9 +28,10 @@ DEFAULT_RESET_UDP_PORT = 57686
 DEFAULT_TCP_ROT_OFFSET_WXYZ = (0.0, 0.70710678, 0.0, 0.70710678)
 DEFAULT_AXIS_MAP = "-z,-x,y"
 DEFAULT_HAND_SEPARATION_M = 0.40
-DEFAULT_HAND_SEPARATION_TOLERANCE_M = 0.01
+DEFAULT_HAND_SEPARATION_TOLERANCE_M = 0.03
 DEFAULT_HAND_DIRECTION_TOLERANCE_DEG = 15.0
 DEFAULT_MIN_HAND_SEPARATION_M = 0.05
+TCP_Z_HALF_TURN_WXYZ = (0.0, 0.0, 0.0, 1.0)
 
 
 def _as_float_list(values: Iterable[float], expected_len: int, name: str) -> list[float]:
@@ -161,6 +164,28 @@ def rotate_vector_wxyz(quaternion: Iterable[float], vector: Iterable[float]) -> 
     return multiply_matrix3_vector(quat_to_rotation_matrix(quaternion), vector)
 
 
+def quaternion_angle_deg(left: Iterable[float], right: Iterable[float]) -> float:
+    left_q = normalize_quat_wxyz(left)
+    right_q = normalize_quat_wxyz(right)
+    dot = abs(sum(a * b for a, b in zip(left_q, right_q)))
+    return math.degrees(2.0 * math.acos(max(-1.0, min(1.0, dot))))
+
+
+def euler_xyz_deg_to_quat_wxyz(euler_deg: Iterable[float]) -> list[float]:
+    roll, pitch, yaw = (math.radians(value) for value in _as_float_list(euler_deg, 3, "Euler XYZ"))
+    cr, sr = math.cos(roll * 0.5), math.sin(roll * 0.5)
+    cp, sp = math.cos(pitch * 0.5), math.sin(pitch * 0.5)
+    cy, sy = math.cos(yaw * 0.5), math.sin(yaw * 0.5)
+    return normalize_quat_wxyz(
+        [
+            cr * cp * cy + sr * sp * sy,
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+        ]
+    )
+
+
 def rotation_matrix_to_quat_wxyz(matrix: list[list[float]]) -> list[float]:
     m00, m01, m02 = matrix[0][:3]
     m10, m11, m12 = matrix[1][:3]
@@ -195,6 +220,30 @@ def pose_matrix_quat_wxyz(matrix: list[list[float]], axis_map: list[tuple[int, f
     return rotation_matrix_to_quat_wxyz(rotation)
 
 
+def load_scene_tcp_reference(scene_path: Path) -> dict[str, list[float]]:
+    """Load the initial world TCP pair that Quest must reproduce up to one rigid transform."""
+
+    data = yaml.safe_load(scene_path.read_text(encoding="utf-8")) or {}
+    references: dict[str, list[float]] = {}
+    for robot in data.get("robots") or []:
+        side = str(robot.get("side", "")).strip().lower()
+        if side not in {"left", "right"}:
+            continue
+        target = robot.get("target") or {}
+        position = target.get("position") or {}
+        euler = target.get("euler_deg") or {}
+        references[side] = [
+            float(position["x"]),
+            float(position["y"]),
+            float(position["z"]),
+            *euler_xyz_deg_to_quat_wxyz([euler["x"], euler["y"], euler["z"]]),
+        ]
+    missing = [side for side in ("left", "right") if side not in references]
+    if missing:
+        raise ValueError(f"{scene_path}: missing initial TCP target for {', '.join(missing)}")
+    return references
+
+
 class QuestSharedFrameCalibration:
     """Freeze a shared dual-controller frame on a simultaneous squeeze."""
 
@@ -208,7 +257,9 @@ class QuestSharedFrameCalibration:
         separation_tolerance_m: float = DEFAULT_HAND_SEPARATION_TOLERANCE_M,
         direction_tolerance_deg: float = DEFAULT_HAND_DIRECTION_TOLERANCE_DEG,
         strict_geometry: bool = False,
+        spacing_gate: bool = False,
         min_separation_m: float = DEFAULT_MIN_HAND_SEPARATION_M,
+        reference_tcp_poses: dict[str, Iterable[float]] | None = None,
     ) -> None:
         self.axis_map = parse_axis_map(axis_map)
         self.tcp_rot_offset_wxyz = normalize_quat_wxyz(tcp_rot_offset_wxyz)
@@ -217,7 +268,20 @@ class QuestSharedFrameCalibration:
         self.separation_tolerance_m = max(0.0, float(separation_tolerance_m))
         self.direction_tolerance_deg = max(0.0, float(direction_tolerance_deg))
         self.strict_geometry = bool(strict_geometry)
+        self.spacing_gate = bool(spacing_gate)
         self.min_separation_m = max(1e-3, float(min_separation_m))
+        self.reference_tcp_poses = (
+            None
+            if reference_tcp_poses is None
+            else {
+                side: _as_float_list(reference_tcp_poses[side], 7, f"{side} reference TCP pose")
+                for side in ("left", "right")
+            }
+        )
+        if self.reference_tcp_poses is not None:
+            left = self.reference_tcp_poses["left"]
+            right = self.reference_tcp_poses["right"]
+            self.separation_m = norm3([right[index] - left[index] for index in range(3)])
         self.rotation_calibrated_from_mapped: list[list[float]] | None = None
         self._pending_since: float | None = None
         self._require_release = False
@@ -237,9 +301,71 @@ class QuestSharedFrameCalibration:
         return apply_axis_map(pose_matrix_position(pose), self.axis_map)
 
     def _mapped_forward(self, pose: list[list[float]]) -> list[float]:
+        return rotate_vector_wxyz(self._mapped_tcp_quat(pose), [0.0, 0.0, 1.0])
+
+    def _mapped_tcp_quat(self, pose: list[list[float]]) -> list[float]:
         hand_quat = pose_matrix_quat_wxyz(pose, axis_map=self.axis_map)
-        tcp_quat = quat_multiply_wxyz(hand_quat, self.tcp_rot_offset_wxyz)
-        return rotate_vector_wxyz(tcp_quat, [0.0, 0.0, 1.0])
+        return quat_multiply_wxyz(hand_quat, self.tcp_rot_offset_wxyz)
+
+    @staticmethod
+    def _relative_line_error(
+        delta: list[float],
+        left_quat: list[float],
+        right_quat: list[float],
+        reference_delta: list[float],
+        reference_left_quat: list[float],
+        reference_right_quat: list[float],
+    ) -> tuple[float, float, float, bool, bool]:
+        """Return the best errors modulo each gripper's 180-degree local-Z symmetry."""
+
+        live_relative = quat_multiply_wxyz(quat_inverse_wxyz(left_quat), right_quat)
+        best: tuple[
+            tuple[float, float, int, int, int],
+            tuple[float, float, float],
+            bool,
+            bool,
+        ] | None = None
+        for left_z180 in (False, True):
+            branch_left = (
+                quat_multiply_wxyz(reference_left_quat, TCP_Z_HALF_TURN_WXYZ)
+                if left_z180
+                else normalize_quat_wxyz(reference_left_quat)
+            )
+            for right_z180 in (False, True):
+                branch_right = (
+                    quat_multiply_wxyz(reference_right_quat, TCP_Z_HALF_TURN_WXYZ)
+                    if right_z180
+                    else normalize_quat_wxyz(reference_right_quat)
+                )
+                left_error = vector_angle_deg(
+                    rotate_vector_wxyz(quat_inverse_wxyz(left_quat), delta),
+                    rotate_vector_wxyz(quat_inverse_wxyz(branch_left), reference_delta),
+                )
+                right_error = vector_angle_deg(
+                    rotate_vector_wxyz(quat_inverse_wxyz(right_quat), [-value for value in delta]),
+                    rotate_vector_wxyz(
+                        quat_inverse_wxyz(branch_right),
+                        [-value for value in reference_delta],
+                    ),
+                )
+                reference_relative = quat_multiply_wxyz(
+                    quat_inverse_wxyz(branch_left), branch_right
+                )
+                relative_error = quaternion_angle_deg(live_relative, reference_relative)
+                errors = (left_error, right_error, relative_error)
+                score = (
+                    max(errors),
+                    sum(errors),
+                    int(left_z180) + int(right_z180),
+                    int(left_z180),
+                    int(right_z180),
+                )
+                candidate = (score, errors, left_z180, right_z180)
+                if best is None or score < best[0]:
+                    best = candidate
+        assert best is not None
+        _, errors, left_z180, right_z180 = best
+        return errors[0], errors[1], errors[2], left_z180, right_z180
 
     def geometry_status(
         self,
@@ -256,6 +382,45 @@ class QuestSharedFrameCalibration:
         separation = norm3(delta)
         left_forward = self._mapped_forward(left_pose)
         right_forward = self._mapped_forward(right_pose)
+        if self.reference_tcp_poses is not None:
+            left_reference = self.reference_tcp_poses["left"]
+            right_reference = self.reference_tcp_poses["right"]
+            reference_delta = [right_reference[index] - left_reference[index] for index in range(3)]
+            (
+                left_error,
+                right_error,
+                relative_orientation_error,
+                left_z180,
+                right_z180,
+            ) = self._relative_line_error(
+                delta,
+                self._mapped_tcp_quat(left_pose),
+                self._mapped_tcp_quat(right_pose),
+                reference_delta,
+                left_reference[3:7],
+                right_reference[3:7],
+            )
+            spacing_ok = abs(separation - self.separation_m) <= self.separation_tolerance_m
+            direction_ok = (
+                max(left_error, right_error, relative_orientation_error)
+                <= self.direction_tolerance_deg
+            )
+            return {
+                "available": True,
+                "reference_mode": "robot_tcp_relative_pose",
+                "separation_m": float(separation),
+                "separation_target_m": float(self.separation_m),
+                "separation_tolerance_m": float(self.separation_tolerance_m),
+                "spacing_ok": bool(spacing_ok),
+                "left_direction_error_deg": float(left_error),
+                "right_direction_error_deg": float(right_error),
+                "relative_orientation_error_deg": float(relative_orientation_error),
+                "left_tcp_z180_equivalent": bool(left_z180),
+                "right_tcp_z180_equivalent": bool(right_z180),
+                "direction_tolerance_deg": float(self.direction_tolerance_deg),
+                "direction_ok": bool(direction_ok),
+                "ok": bool(spacing_ok and direction_ok),
+            }
         line_xy = [delta[0], delta[1], 0.0]
         left_xy = [left_forward[0], left_forward[1], 0.0]
         right_xy = [right_forward[0], right_forward[1], 0.0]
@@ -282,12 +447,39 @@ class QuestSharedFrameCalibration:
             "ok": bool(spacing_ok and direction_ok),
         }
 
+    @staticmethod
+    def _frame_basis(
+        left_position: list[float],
+        right_position: list[float],
+        left_forward: list[float],
+        right_forward: list[float],
+    ) -> list[list[float]] | None:
+        lateral = [left_position[index] - right_position[index] for index in range(3)]
+        if norm3(lateral) <= 1e-6:
+            return None
+        y_axis = normalize3(lateral)
+        average_forward = [left_forward[index] + right_forward[index] for index in range(3)]
+        projection = dot3(average_forward, y_axis)
+        x_candidate = [
+            average_forward[index] - projection * y_axis[index] for index in range(3)
+        ]
+        if norm3(x_candidate) <= 1e-6:
+            fallback = [0.0, 0.0, 1.0] if abs(y_axis[2]) < 0.9 else [1.0, 0.0, 0.0]
+            x_candidate = cross3(y_axis, fallback)
+        x_axis = normalize3(x_candidate)
+        z_axis = normalize3(cross3(x_axis, y_axis))
+        return transpose_matrix3([x_axis, y_axis, z_axis])
+
     def candidate_rotation(
         self,
         left_pose: list[list[float]],
         right_pose: list[list[float]],
     ) -> list[list[float]] | None:
         geometry = self.geometry_status(left_pose, right_pose)
+        if self.spacing_gate and not geometry.get("spacing_ok", False):
+            return None
+        if self.strict_geometry and not geometry.get("ok", False):
+            return None
         left_position = self._mapped_position(left_pose)
         right_position = self._mapped_position(right_pose)
         delta = [right_position[index] - left_position[index] for index in range(3)]
@@ -297,12 +489,24 @@ class QuestSharedFrameCalibration:
 
         left_forward = self._mapped_forward(left_pose)
         right_forward = self._mapped_forward(right_pose)
+        if self.reference_tcp_poses is not None:
+            live_basis = self._frame_basis(
+                left_position, right_position, left_forward, right_forward
+            )
+            left_reference = self.reference_tcp_poses["left"]
+            right_reference = self.reference_tcp_poses["right"]
+            reference_basis = self._frame_basis(
+                left_reference[:3],
+                right_reference[:3],
+                rotate_vector_wxyz(left_reference[3:7], [0.0, 0.0, 1.0]),
+                rotate_vector_wxyz(right_reference[3:7], [0.0, 0.0, 1.0]),
+            )
+            if live_basis is None or reference_basis is None:
+                return None
+            return multiply_matrix3(reference_basis, transpose_matrix3(live_basis))
         left_xy = [left_forward[0], left_forward[1], 0.0]
         right_xy = [right_forward[0], right_forward[1], 0.0]
         left_from_right = [-line_xy[0], -line_xy[1], 0.0]
-        if self.strict_geometry and not geometry["ok"]:
-            return None
-
         # The controller line always defines lateral +Y. Average controller
         # forward is projected orthogonally to it for +X. In relaxed mode this
         # accepts any ordinary two-hand pose instead of requiring exactly
@@ -444,6 +648,7 @@ def build_quest_input_packet(
     calibration_confirmed: bool = False,
     both_squeeze: bool = False,
     calibration_strict_geometry: bool = False,
+    calibration_spacing_gate: bool = False,
     calibration_rotation_base_from_mapped: list[list[float]] | None = None,
     calibration_geometry: dict[str, Any] | None = None,
     serial_number: str = DEFAULT_SERIAL_NUMBER,
@@ -479,6 +684,7 @@ def build_quest_input_packet(
         "calibration_confirmed": bool(calibration_confirmed),
         "both_squeeze": bool(both_squeeze),
         "calibration_strict_geometry": bool(calibration_strict_geometry),
+        "calibration_spacing_gate": bool(calibration_spacing_gate),
         "calibration_rotation_base_from_mapped": calibration_rotation_base_from_mapped,
         "calibration_geometry": calibration_geometry,
         "monotonic_time": float(now),
@@ -666,13 +872,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--strict-shared-calibration",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Require the legacy 40 cm spacing and direction checks before dual-squeeze calibration.",
+        help="Require the controller pair to match the configured robot TCP relative pose.",
+    )
+    parser.add_argument(
+        "--shared-calibration-spacing-gate",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Require controller separation to match the configured robot TCP separation.",
+    )
+    parser.add_argument(
+        "--calibration-reference-scene-config",
+        type=Path,
+        default=None,
+        help="Scene YAML whose initial target pair defines the strict Quest calibration geometry.",
     )
     parser.add_argument(
         "--calibration-min-separation-m",
         type=float,
         default=DEFAULT_MIN_HAND_SEPARATION_M,
         help="Minimum horizontal controller separation needed to define the shared lateral axis.",
+    )
+    parser.add_argument(
+        "--calibration-separation-tolerance-m",
+        type=float,
+        default=DEFAULT_HAND_SEPARATION_TOLERANCE_M,
+        help="Maximum controller-to-reference separation error accepted by the strict gate.",
     )
     parser.add_argument("--right-tcp-rot-offset", default="0.0,0.70710678,0.0,0.70710678")
     parser.add_argument("--enable-threshold", type=float, default=0.15)
@@ -685,6 +909,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if float(args.calibration_min_separation_m) <= 0.0:
         parser.error("--calibration-min-separation-m must be positive")
+    if float(args.calibration_separation_tolerance_m) < 0.0:
+        parser.error("--calibration-separation-tolerance-m must be non-negative")
     if float(args.shared_calibration_settle_sec) < 0.0:
         parser.error("--shared-calibration-settle-sec must be non-negative")
     if not 0.0 <= float(args.enable_threshold) <= 1.0:
@@ -730,6 +956,11 @@ def main(argv: list[str] | None = None) -> int:
     }
     shared_calibration = None
     if args.side == "both":
+        reference_tcp_poses = (
+            None
+            if args.calibration_reference_scene_config is None
+            else load_scene_tcp_reference(args.calibration_reference_scene_config.expanduser().resolve())
+        )
         shared_calibration = QuestSharedFrameCalibration(
             axis_map=args.axis_map,
             tcp_rot_offset_wxyz=parse_csv_floats(
@@ -738,8 +969,11 @@ def main(argv: list[str] | None = None) -> int:
                 "right-tcp-rot-offset",
             ),
             settle_sec=args.shared_calibration_settle_sec,
+            separation_tolerance_m=args.calibration_separation_tolerance_m,
             strict_geometry=args.strict_shared_calibration,
+            spacing_gate=args.shared_calibration_spacing_gate,
             min_separation_m=args.calibration_min_separation_m,
+            reference_tcp_poses=reference_tcp_poses,
         )
     publisher = UdpJsonPublisher(args.udp_host, args.udp_port)
     reset_receiver = CalibrationResetUdpReceiver(args.reset_udp_host, args.reset_udp_port)
@@ -750,14 +984,16 @@ def main(argv: list[str] | None = None) -> int:
         "[Rizon4QuestTargetPublisher] Enter VR and allow controller tracking. "
         + (
             (
-                "Align both controllers to 0.40+/-0.01 m and parallel forward directions, then "
-                "hold squeeze on BOTH controllers to lock the shared Quest-to-Isaac frame. "
-                "Geometry mismatch blocks control. The confirming squeeze also starts relative "
-                "motion from an exact zero-delta first frame."
+                "Match both controllers to the current robot TCP relative pose, then hold "
+                "squeeze on BOTH controllers. Geometry mismatch blocks control."
                 if args.strict_shared_calibration
-                else "Hold squeeze on BOTH tracked controllers once to lock the current shared "
-                "Quest-to-Isaac frame. Release pauses; the next squeeze resumes relative motion "
-                "without a jump."
+                else (
+                    "Match the controller separation to the current robot TCP separation, then "
+                    "hold squeeze on BOTH controllers. Orientation is not checked."
+                    if args.shared_calibration_spacing_gate
+                    else "Hold squeeze on BOTH tracked controllers once to lock the current "
+                    "shared Quest-to-Isaac frame."
+                )
             )
             if args.side == "both"
             else f"Hold {args.enable_button} on the {args.side} controller, then move it."
@@ -897,6 +1133,7 @@ def main(argv: list[str] | None = None) -> int:
                         ),
                         both_squeeze=both_squeeze,
                         calibration_strict_geometry=bool(args.strict_shared_calibration),
+                        calibration_spacing_gate=bool(args.shared_calibration_spacing_gate),
                         calibration_rotation_base_from_mapped=(
                             None
                             if shared_calibration is None

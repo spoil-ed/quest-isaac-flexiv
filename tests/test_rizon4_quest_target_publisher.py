@@ -65,15 +65,82 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertEqual(args.position_deadband, 0.0)
         self.assertEqual(args.engage_settle_sec, 0.0)
         self.assertEqual(args.enable_threshold, 0.15)
+        self.assertEqual(args.calibration_separation_tolerance_m, 0.03)
         self.assertFalse(args.strict_shared_calibration)
+        self.assertFalse(args.shared_calibration_spacing_gate)
 
     def test_cli_supports_one_televuer_session_for_both_controllers(self):
-        args = mod.parse_args(["--side", "both"])
+        scene = Path("configs/scenes/pick_place_redblock_flexiv_dual.yaml")
+        args = mod.parse_args(
+            ["--side", "both", "--calibration-reference-scene-config", str(scene)]
+        )
 
         self.assertEqual(args.side, "both")
         self.assertEqual(args.left_serial_number, "Rizon4-qSaFLh")
         self.assertEqual(args.right_serial_number, "Rizon4-I0LIRN")
+        self.assertEqual(args.calibration_reference_scene_config, scene)
 
+    def test_strict_geometry_matches_robot_relative_pose_under_common_rotation(self):
+        references = {
+            "left": [0.0, 0.3, 0.0, 1.0, 0.0, 0.0, 0.0],
+            "right": [0.0, -0.3, 0.0, 1.0, 0.0, 0.0, 0.0],
+        }
+        calibration = mod.QuestSharedFrameCalibration(
+            axis_map="x,y,z",
+            tcp_rot_offset_wxyz=[1.0, 0.0, 0.0, 0.0],
+            settle_sec=0.0,
+            strict_geometry=True,
+            reference_tcp_poses=references,
+        )
+        angle = math.radians(30.0)
+        left = _rot_z_pose(angle, -0.15, 0.3 * math.cos(angle), 0.0)
+        right = _rot_z_pose(angle, 0.15, -0.3 * math.cos(angle), 0.0)
+
+        status = calibration.geometry_status(left, right)
+
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["reference_mode"], "robot_tcp_relative_pose")
+        self.assertAlmostEqual(status["separation_target_m"], 0.6)
+        self.assertAlmostEqual(status["left_direction_error_deg"], 0.0, places=6)
+        self.assertAlmostEqual(status["right_direction_error_deg"], 0.0, places=6)
+        self.assertAlmostEqual(status["relative_orientation_error_deg"], 0.0, places=6)
+        self.assertTrue(calibration.update(left, right, both_squeeze=True, now=1.0))
+
+        mismatch = _rot_z_pose(math.radians(55.0), 0.15, -0.3 * math.cos(angle), 0.0)
+        mismatch_status = mod.QuestSharedFrameCalibration(
+            axis_map="x,y,z",
+            tcp_rot_offset_wxyz=[1.0, 0.0, 0.0, 0.0],
+            strict_geometry=True,
+            reference_tcp_poses=references,
+        ).geometry_status(left, mismatch)
+        self.assertFalse(mismatch_status["direction_ok"])
+
+
+    def test_strict_geometry_accepts_parallel_jaw_180_degree_roll_symmetry(self):
+        references = {
+            "left": [0.0, 0.3, 0.0, 1.0, 0.0, 0.0, 0.0],
+            "right": [0.0, -0.3, 0.0, 1.0, 0.0, 0.0, 0.0],
+        }
+        calibration = mod.QuestSharedFrameCalibration(
+            axis_map="x,y,z",
+            tcp_rot_offset_wxyz=[1.0, 0.0, 0.0, 0.0],
+            settle_sec=0.0,
+            strict_geometry=True,
+            reference_tcp_poses=references,
+        )
+        angle = math.radians(30.0)
+        left = _rot_z_pose(angle, -0.15, 0.3 * math.cos(angle), 0.0)
+        right = _rot_z_pose(angle + math.pi, 0.15, -0.3 * math.cos(angle), 0.0)
+
+        status = calibration.geometry_status(left, right)
+
+        self.assertTrue(status["ok"])
+        self.assertAlmostEqual(status["left_direction_error_deg"], 0.0, places=6)
+        self.assertAlmostEqual(status["right_direction_error_deg"], 0.0, places=6)
+        self.assertAlmostEqual(status["relative_orientation_error_deg"], 0.0, places=6)
+        self.assertFalse(status["left_tcp_z180_equivalent"])
+        self.assertTrue(status["right_tcp_z180_equivalent"])
+        self.assertTrue(calibration.update(left, right, both_squeeze=True, now=1.0))
     def test_shared_frame_requires_valid_geometry_and_both_squeeze(self):
         calibration = mod.QuestSharedFrameCalibration(settle_sec=0.0, strict_geometry=True)
         left = _pose(-0.2, 1.2, -0.3)
@@ -122,6 +189,41 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertIsNotNone(rotation)
         for row in rotation:
             self.assertAlmostEqual(math.sqrt(sum(value * value for value in row)), 1.0)
+    def test_spacing_only_gate_ignores_orientation_but_requires_reference_distance(self):
+        references = {
+            "left": [0.0, 0.3, 0.0, 1.0, 0.0, 0.0, 0.0],
+            "right": [0.0, -0.3, 0.0, 1.0, 0.0, 0.0, 0.0],
+        }
+        calibration = mod.QuestSharedFrameCalibration(
+            axis_map="x,y,z",
+            tcp_rot_offset_wxyz=[1.0, 0.0, 0.0, 0.0],
+            settle_sec=0.0,
+            spacing_gate=True,
+            strict_geometry=False,
+            reference_tcp_poses=references,
+        )
+        left = _pose(0.0, 0.3, 0.0)
+        wrong_orientation = _rot_z_pose(math.radians(70.0), 0.0, -0.3, 0.0)
+
+        status = calibration.geometry_status(left, wrong_orientation)
+
+        self.assertTrue(status["spacing_ok"])
+        self.assertFalse(status["direction_ok"])
+        self.assertTrue(
+            calibration.update(left, wrong_orientation, both_squeeze=True, now=1.0)
+        )
+
+        rejected = mod.QuestSharedFrameCalibration(
+            axis_map="x,y,z",
+            tcp_rot_offset_wxyz=[1.0, 0.0, 0.0, 0.0],
+            settle_sec=0.0,
+            spacing_gate=True,
+            strict_geometry=False,
+            reference_tcp_poses=references,
+        )
+        too_close = _rot_z_pose(math.radians(70.0), 0.0, 0.0, 0.0)
+        self.assertFalse(rejected.update(left, too_close, both_squeeze=True, now=1.0))
+
 
     def test_shared_frame_stays_frozen_after_squeeze_release(self):
         calibration = mod.QuestSharedFrameCalibration(settle_sec=0.0)
@@ -377,6 +479,7 @@ class Rizon4QuestTargetPublisherTests(unittest.TestCase):
         self.assertTrue(packet["calibration_confirmed"])
         self.assertTrue(packet["both_squeeze"])
         self.assertFalse(packet["calibration_strict_geometry"])
+        self.assertFalse(packet["calibration_spacing_gate"])
         self.assertEqual(packet["calibration_rotation_base_from_mapped"][0], [1.0, 0.0, 0.0])
         self.assertTrue(packet["calibration_geometry"]["ok"])
 
