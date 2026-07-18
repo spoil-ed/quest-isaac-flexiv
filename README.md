@@ -75,6 +75,14 @@ DRDK 接触、关节力矩与碰撞参数由 `configs/pipelines/dual_arm_data_co
 export FLEXIV_SAFETY_PASSWORD='<Elements 安全密码>'
 ```
 
+也可以仅在本机创建不会提交的 `.deps/runtime.env`：
+
+```bash
+FLEXIV_SAFETY_PASSWORD='<Elements 安全密码>'
+```
+
+`scripts/start.sh` 会自动加载该文件；若力矩调节器已启用但密码缺失，启动器会直接报错，不再进入只能手动 Reset 的半初始化状态。
+
 启动器在两臂 IDLE 时把官方输出力矩调节因子设为 `0.85`，使 A3/A4 的指令饱和值从 `83.2 Nm` 降为 `54.4 Nm`；Studio 的最终 `64 Nm` 安全上限保持不变。
 
 ```bash
@@ -126,7 +134,7 @@ Quest tracking、双手按键、共享坐标系状态和录制状态直接显示
 两只手柄均出现 tracking 数据后，先把双手距离调整到标定当下两条机械臂实际 TCP 间距的 ±3 cm；姿态不检查。Isaac 仅在双臂 READY 时实时提供该距离，距离显示 `PASS` 后同时按住双手 `squeeze` 0.25 s 即可锁定共享坐标系。系统在锁定坐标系的同一帧分别建立手柄和当前 TCP 零点，第一帧增量严格为零，随后无需松手即可直接相对跟随。
 
 - 按住单侧 `squeeze`：该侧机械臂按相对位置和相对姿态跟随；
-- 松开 `squeeze`：保持最后目标，不回初始位置；
+- 松开 `squeeze`：立即 hold 松开时实测 TCP，不继续追旧目标，也不回初始位置；
 - 按住 `trigger`：对应 Isaac 夹爪闭合；松开后张开。
 
 ### 3. 开始采集

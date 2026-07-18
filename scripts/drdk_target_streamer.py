@@ -43,6 +43,48 @@ class TargetCommand(NamedTuple):
     control_active: bool
 
 
+def target_command_poses(
+    commands,
+    states,
+    *,
+    previous_control_active: dict[str, bool] | None = None,
+    inactive_hold_poses: dict[str, list[float]] | None = None,
+) -> tuple[list[float], list[float]]:
+    """Latch measured TCP once when control becomes inactive, then hold it."""
+
+    previous = previous_control_active or {"left": False, "right": False}
+    holds = inactive_hold_poses if inactive_hold_poses is not None else {}
+    poses = []
+    for side, command, state in zip(("left", "right"), commands, states, strict=True):
+        if command.control_active:
+            source = command.pose
+        else:
+            if bool(previous.get(side, False)) or side not in holds:
+                holds[side] = [float(value) for value in state.tcp_pose]
+            source = holds[side]
+        pose = [float(value) for value in source]
+        if len(pose) != 7 or not all(math.isfinite(value) for value in pose):
+            raise ValueError("target/current TCP pose must contain seven finite values")
+        poses.append(pose)
+    return poses[0], poses[1]
+
+
+def target_stream_hold_required(
+    last_pair_time: float | None,
+    *,
+    now: float,
+    max_age_sec: float,
+    control_active: dict[str, bool],
+) -> bool:
+    """Return true when an active upstream command stream has gone stale."""
+
+    return bool(
+        any(control_active.values())
+        and last_pair_time is not None
+        and float(now) - float(last_pair_time) > float(max_age_sec)
+    )
+
+
 def _normalize_quat_wxyz(quaternion) -> list[float]:
     values = [float(value) for value in quaternion]
     norm = math.sqrt(sum(value * value for value in values))
@@ -1566,27 +1608,40 @@ def recover_connected_robot_pair_to_initial_q(
 
         if not robot_pair.connected():
             raise RuntimeError("DRDK robot pair disconnected during coordinated reset") from last_error
-        if phase_callback is not None:
-            phase_callback("reset_stopping")
-        try:
-            robot_pair.Stop()
-        except Exception as exc:
-            print(
-                f"[DrdkTargetStreamer] Stop() reported {exc}; "
-                "continuing because the runtime may already be stopped",
-                flush=True,
+        healthy_cartesian = bool(
+            robot_pair.operational()
+            and not robot_pair.fault()
+            and all(
+                mode == flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE
+                for mode in robot_pair.mode()
             )
-        if phase_callback is not None:
-            phase_callback("reset_clearing_fault")
-        if robot_pair.fault():
-            cleared = robot_pair.ClearFault()
-            if not all(bool(value) for value in cleared):
-                last_error = RuntimeError(f"DRDK failed to clear both robot faults: {cleared}")
-                continue
-        # Stop() leaves a healthy simulated robot in a stopped/idle controller
-        # state while operational() may still report true. Enable explicitly so
-        # the following NRT mode switch is applicable even without an active fault.
-        robot_pair.Enable()
+        )
+        if healthy_cartesian:
+            # Preserve controller torque during a normal Reset. The subsequent
+            # mode switch is seeded from measured q, so stopping in IDLE first
+            # only creates an unnecessary gravity/sag window.
+            if phase_callback is not None:
+                phase_callback("reset_handoff")
+        else:
+            if phase_callback is not None:
+                phase_callback("reset_stopping")
+            try:
+                robot_pair.Stop()
+            except Exception as exc:
+                print(
+                    f"[DrdkTargetStreamer] Stop() reported {exc}; "
+                    "continuing because the runtime may already be stopped",
+                    flush=True,
+                )
+            if phase_callback is not None:
+                phase_callback("reset_clearing_fault")
+            if robot_pair.fault():
+                cleared = robot_pair.ClearFault()
+                if not all(bool(value) for value in cleared):
+                    last_error = RuntimeError(f"DRDK failed to clear both robot faults: {cleared}")
+                    continue
+            # A stopped or faulted pair must be enabled before mode handoff.
+            robot_pair.Enable()
         try:
             _wait_until_operational(robot_pair, float(args.enable_timeout_sec))
             if use_movej_fallback:
@@ -1622,6 +1677,45 @@ def recover_connected_robot_pair_to_initial_q(
     raise RuntimeError(
         f"DRDK coordinated reset exhausted {max_attempts} recovery attempts: {last_error}"
     ) from last_error
+
+
+def initialize_connected_robot_pair_with_recovery(
+    args: argparse.Namespace,
+    *,
+    robot_pair,
+    flexivrdk,
+    progress_callback=None,
+    phase_callback=None,
+):
+    """Initialize once, then automatically use bounded reset recovery on fault."""
+
+    try:
+        return initialize_connected_robot_pair(
+            args,
+            robot_pair=robot_pair,
+            flexivrdk=flexivrdk,
+            progress_callback=progress_callback,
+        )
+    except Exception as exc:
+        # Recover controller/motion faults automatically, but do not bypass a
+        # configuration error (for example a missing safety password) while
+        # an otherwise healthy pair is still operational.
+        if not robot_pair.fault() and robot_pair.operational():
+            raise
+        print(
+            f"[DrdkTargetStreamer] startup initialization failed: {exc}; "
+            "starting automatic recovery to initial_q",
+            flush=True,
+        )
+        if phase_callback is not None:
+            phase_callback("startup_recovering")
+        return recover_connected_robot_pair_to_initial_q(
+            args,
+            robot_pair=robot_pair,
+            flexivrdk=flexivrdk,
+            progress_callback=progress_callback,
+            phase_callback=phase_callback,
+        )
 
 
 def _status_packet(
@@ -1701,6 +1795,9 @@ def main(argv: list[str] | None = None) -> int:
     reference_poses: dict[str, list[float]] = {}
     latest_input_poses: dict[str, list[float]] = {}
     latest_control_active = {"left": False, "right": False}
+    inactive_hold_poses: dict[str, list[float]] = {}
+    last_target_pair_time: float | None = None
+    target_stream_stale = False
     target_resamplers = {
         side: Se3TargetResampler(
             prediction_horizon_sec=float(args.target_prediction_horizon_sec),
@@ -1803,6 +1900,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def latch_cartesian_references() -> None:
         nonlocal reference_poses, latest_input_poses, latest_control_active, next_resample_time
+        nonlocal inactive_hold_poses, last_target_pair_time, target_stream_stale
         states = robot_pair.states()
         reference_poses = {
             "left": [float(value) for value in states[0].tcp_pose],
@@ -1812,7 +1910,12 @@ def main(argv: list[str] | None = None) -> int:
             side: list(pose) for side, pose in reference_poses.items()
         }
         latest_control_active = {"left": False, "right": False}
+        inactive_hold_poses = {
+            side: list(pose) for side, pose in reference_poses.items()
+        }
         now = time.monotonic()
+        last_target_pair_time = now
+        target_stream_stale = False
         for side in ("left", "right"):
             target_resamplers[side].reset(reference_poses[side], now=now, active=False)
         next_resample_time = now
@@ -1829,8 +1932,11 @@ def main(argv: list[str] | None = None) -> int:
     def recover_to_initial_q(reset_seq: int) -> None:
         nonlocal robot_pair, collision_monitor, last_sent_cycle
         nonlocal joint_guard, recovery_required, recovery_phase, status_error
-        print(f"[DrdkTargetStreamer] reset seq={reset_seq}: stopping both robots", flush=True)
-        publish_status(False, phase="reset_stopping", reset_seq=reset_seq)
+        print(
+            f"[DrdkTargetStreamer] reset seq={reset_seq}: starting controller-preserving recovery",
+            flush=True,
+        )
+        publish_status(False, phase="reset_handoff", reset_seq=reset_seq)
         # A triggered SelfCollisionMonitor leaves RobotPair stopped while the
         # arms are still inside its distance threshold. Temporarily stop the
         # monitor so the coordinated NRT joint trajectory can separate both
@@ -1921,11 +2027,12 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
         try:
-            nullspace_postures = initialize_connected_robot_pair(
+            nullspace_postures = initialize_connected_robot_pair_with_recovery(
                 args,
                 robot_pair=robot_pair,
                 flexivrdk=flexivrdk,
                 progress_callback=publish_joint_initialization,
+                phase_callback=lambda phase: publish_status(False, phase=phase),
             )
             latch_cartesian_references()
             # The home -> initial_q trajectory is deterministic and may pass
@@ -1960,8 +2067,8 @@ def main(argv: list[str] | None = None) -> int:
             recovery_phase = "fault"
             status_error = str(exc)
             print(
-                f"[DrdkTargetStreamer] startup initialization not ready: {status_error}; "
-                "waiting for coordinated reset",
+                f"[DrdkTargetStreamer] startup initialization and automatic recovery failed: "
+                f"{status_error}; waiting for coordinated reset",
                 flush=True,
             )
             publish_status(False, phase=recovery_phase, error=status_error)
@@ -2051,11 +2158,19 @@ def main(argv: list[str] | None = None) -> int:
             synchronized = pop_synchronized_target_pair(command_buffers, after_cycle=last_sent_cycle)
             raw_command_poses = None
             synchronized_cycle = None
+            states = robot_pair.states()
+            now = time.monotonic()
+            current_tcp_poses = {
+                "left": [float(value) for value in states[0].tcp_pose],
+                "right": [float(value) for value in states[1].tcp_pose],
+            }
             if synchronized is not None and synchronized[0].servo_cycle > last_sent_cycle:
                 left, right = synchronized
-                raw_command_poses = (
-                    list(left.pose if left.control_active else reference_poses["left"]),
-                    list(right.pose if right.control_active else reference_poses["right"]),
+                raw_command_poses = target_command_poses(
+                    synchronized,
+                    states,
+                    previous_control_active=latest_control_active,
+                    inactive_hold_poses=inactive_hold_poses,
                 )
                 latest_input_poses = {
                     "left": list(raw_command_poses[0]),
@@ -2066,8 +2181,36 @@ def main(argv: list[str] | None = None) -> int:
                     "right": bool(right.control_active),
                 }
                 synchronized_cycle = left.servo_cycle
-            states = robot_pair.states()
-            now = time.monotonic()
+                last_target_pair_time = now
+                if target_stream_stale:
+                    print("[DrdkTargetStreamer] synchronized target stream resumed", flush=True)
+                target_stream_stale = False
+            elif target_stream_hold_required(
+                last_target_pair_time,
+                now=now,
+                max_age_sec=float(args.max_age_sec),
+                control_active=latest_control_active,
+            ):
+                # The bridge disappeared while an arm was pursuing a target.
+                # Cancel that endpoint and reset both resamplers at measured TCP.
+                raw_command_poses = (
+                    list(current_tcp_poses["left"]),
+                    list(current_tcp_poses["right"]),
+                )
+                latest_input_poses = {
+                    side: list(pose) for side, pose in current_tcp_poses.items()
+                }
+                inactive_hold_poses = {
+                    side: list(pose) for side, pose in current_tcp_poses.items()
+                }
+                latest_control_active = {"left": False, "right": False}
+                if not target_stream_stale:
+                    print(
+                        "[DrdkTargetStreamer] synchronized target stream stale; "
+                        "holding both arms at measured TCP",
+                        flush=True,
+                    )
+                target_stream_stale = True
             guard_events = contact_guard.update(states, latest_input_poses, now=now)
             for side, event in guard_events:
                 print(
@@ -2101,7 +2244,8 @@ def main(argv: list[str] | None = None) -> int:
                     joint_guard.command_pose("left", contact_command_poses[0]),
                     joint_guard.command_pose("right", contact_command_poses[1]),
                 )
-                last_sent_cycle = int(synchronized_cycle)
+                if synchronized_cycle is not None:
+                    last_sent_cycle = int(synchronized_cycle)
             elif guard_events or torque_guard_events:
                 contact_command_poses = (
                     contact_guard.command_pose("left", latest_input_poses["left"]),

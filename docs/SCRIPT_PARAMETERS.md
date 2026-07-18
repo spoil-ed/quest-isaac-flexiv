@@ -203,8 +203,6 @@ Quest 输入参数：
 | `--target-pose-publish-hz` | app 默认 | 目标位姿 UDP 发布频率，不等于机器人速度。 |
 | `--rdk-target-hz` | app 默认 | RDK 目标更新频率。 |
 | `--command-timeout-ms` | app 默认 | 等待 SimPlugin 命令的单周期超时。 |
-| `--max-linear-speed-m-s` | app 默认 | TCP 平移命令速度上限。 |
-| `--max-angular-speed-rad-s` | app 默认 | TCP 旋转命令速度上限。 |
 | `--max-target-drive-abs` | app 默认 | 单关节 target drive 绝对值上限。 |
 | `--max-target-drive-norm` | app 默认 | target drive 向量范数上限。 |
 | `--gateway-endpoint` | 空 | 非空时创建 scene 相机并向 gateway 推送数据。 |

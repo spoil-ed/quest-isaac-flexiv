@@ -18,6 +18,77 @@ spec.loader.exec_module(mod)
 
 
 class DrdkTargetStreamerTests(unittest.TestCase):
+    def test_startup_fault_automatically_runs_bounded_initial_q_recovery(self):
+        class Pair:
+            @staticmethod
+            def fault():
+                return True
+
+            @staticmethod
+            def operational():
+                return False
+
+        args = object()
+        pair = Pair()
+        rdk = object()
+        expected = ([0.1] * 7, [0.2] * 7)
+        phases = []
+
+        with unittest.mock.patch.object(
+            mod,
+            "initialize_connected_robot_pair",
+            side_effect=RuntimeError("startup fault"),
+        ) as initialize, unittest.mock.patch.object(
+            mod,
+            "recover_connected_robot_pair_to_initial_q",
+            return_value=expected,
+        ) as recover:
+            result = mod.initialize_connected_robot_pair_with_recovery(
+                args,
+                robot_pair=pair,
+                flexivrdk=rdk,
+                progress_callback="progress",
+                phase_callback=phases.append,
+            )
+
+        self.assertEqual(result, expected)
+        self.assertEqual(phases, ["startup_recovering"])
+        initialize.assert_called_once()
+        recover.assert_called_once_with(
+            args,
+            robot_pair=pair,
+            flexivrdk=rdk,
+            progress_callback="progress",
+            phase_callback=phases.append,
+        )
+
+    def test_startup_configuration_error_is_not_misreported_as_motion_recovery(self):
+        class Pair:
+            @staticmethod
+            def fault():
+                return False
+
+            @staticmethod
+            def operational():
+                return True
+
+        with unittest.mock.patch.object(
+            mod,
+            "initialize_connected_robot_pair",
+            side_effect=RuntimeError("missing safety password"),
+        ), unittest.mock.patch.object(
+            mod,
+            "recover_connected_robot_pair_to_initial_q",
+        ) as recover:
+            with self.assertRaisesRegex(RuntimeError, "missing safety password"):
+                mod.initialize_connected_robot_pair_with_recovery(
+                    object(),
+                    robot_pair=Pair(),
+                    flexivrdk=object(),
+                )
+
+        recover.assert_not_called()
+
     def test_configures_output_torque_regulator_for_both_idle_robots(self):
         class Pair:
             def __init__(self):
@@ -571,6 +642,89 @@ class DrdkTargetStreamerTests(unittest.TestCase):
         self.assertEqual(pair[0].servo_cycle, 100)
         self.assertFalse(pair[0].control_active)
 
+    def test_inactive_target_holds_measured_tcp_while_active_target_passes_through(self):
+        class State:
+            def __init__(self, tcp_pose):
+                self.tcp_pose = tcp_pose
+
+        left_target = [0.9, 0.2, 0.7, 1.0, 0.0, 0.0, 0.0]
+        right_target = [0.8, -0.2, 0.7, 1.0, 0.0, 0.0, 0.0]
+        left_current = [0.5, 0.2, 0.6, 1.0, 0.0, 0.0, 0.0]
+        right_current = [0.5, -0.2, 0.6, 1.0, 0.0, 0.0, 0.0]
+
+        poses = mod.target_command_poses(
+            (
+                mod.TargetCommand(100, left_target, False),
+                mod.TargetCommand(100, right_target, True),
+            ),
+            (State(left_current), State(right_current)),
+        )
+
+        self.assertEqual(poses[0], left_current)
+        self.assertEqual(poses[1], right_target)
+
+    def test_inactive_target_latches_once_instead_of_following_tcp_sag(self):
+        class State:
+            def __init__(self, tcp_pose):
+                self.tcp_pose = tcp_pose
+
+        inactive = (
+            mod.TargetCommand(100, [0.0] * 7, False),
+            mod.TargetCommand(100, [0.0] * 7, False),
+        )
+        initial = (
+            State([0.5, 0.2, 0.6, 1.0, 0.0, 0.0, 0.0]),
+            State([0.5, -0.2, 0.6, 1.0, 0.0, 0.0, 0.0]),
+        )
+        sagged = (
+            State([0.5, 0.2, 0.5, 1.0, 0.0, 0.0, 0.0]),
+            State([0.5, -0.2, 0.5, 1.0, 0.0, 0.0, 0.0]),
+        )
+        holds = {}
+
+        first = mod.target_command_poses(
+            inactive,
+            initial,
+            previous_control_active={"left": True, "right": True},
+            inactive_hold_poses=holds,
+        )
+        second = mod.target_command_poses(
+            inactive,
+            sagged,
+            previous_control_active={"left": False, "right": False},
+            inactive_hold_poses=holds,
+        )
+
+        self.assertEqual(second, first)
+        self.assertEqual(second[0][2], 0.6)
+        self.assertEqual(second[1][2], 0.6)
+
+    def test_target_stream_timeout_only_holds_an_active_stream(self):
+        self.assertTrue(
+            mod.target_stream_hold_required(
+                10.0,
+                now=10.6,
+                max_age_sec=0.5,
+                control_active={"left": True, "right": False},
+            )
+        )
+        self.assertFalse(
+            mod.target_stream_hold_required(
+                10.0,
+                now=10.6,
+                max_age_sec=0.5,
+                control_active={"left": False, "right": False},
+            )
+        )
+        self.assertFalse(
+            mod.target_stream_hold_required(
+                10.0,
+                now=10.4,
+                max_age_sec=0.5,
+                control_active={"left": True, "right": True},
+            )
+        )
+
     def test_rejects_mismatched_servo_cycles(self):
         left = mod.TargetCommand(100, [0.0] * 7, False)
         right = mod.TargetCommand(101, [0.0] * 7, False)
@@ -802,7 +956,7 @@ class DrdkTargetStreamerTests(unittest.TestCase):
         )
         self.assertLess(pair.events.index("mode:NRT_CARTESIAN_MOTION_FORCE"), pair.events.index("set_nullspace"))
 
-    def test_reset_enables_even_when_stop_does_not_clear_operational_flag(self):
+    def test_healthy_cartesian_reset_handoffs_without_stop_or_enable(self):
         class State:
             q = [0.0] * 7
             dq = [0.0] * 7
@@ -811,9 +965,14 @@ class DrdkTargetStreamerTests(unittest.TestCase):
         class Pair:
             def __init__(self):
                 self.enable_count = 0
-                self.current_mode = ("CARTESIAN", "CARTESIAN")
+                self.stop_count = 0
+                self.current_mode = (
+                    "NRT_CARTESIAN_MOTION_FORCE",
+                    "NRT_CARTESIAN_MOTION_FORCE",
+                )
 
             def Stop(self):
+                self.stop_count += 1
                 self.current_mode = ("IDLE", "IDLE")
 
             def fault(self):
@@ -871,9 +1030,17 @@ class DrdkTargetStreamerTests(unittest.TestCase):
             ]
         )
 
-        mod.recover_connected_robot_pair_to_initial_q(args, robot_pair=pair, flexivrdk=Rdk)
+        phases = []
+        mod.recover_connected_robot_pair_to_initial_q(
+            args,
+            robot_pair=pair,
+            flexivrdk=Rdk,
+            phase_callback=phases.append,
+        )
 
-        self.assertEqual(pair.enable_count, 1)
+        self.assertEqual(phases, ["reset_handoff"])
+        self.assertEqual(pair.stop_count, 0)
+        self.assertEqual(pair.enable_count, 0)
 
     def test_reset_can_use_movej_without_entering_nrt_joint_mode(self):
         class State:

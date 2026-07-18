@@ -731,6 +731,11 @@ def build_command(args: argparse.Namespace) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.output_torque_regulator and not os.environ.get(args.safety_password_env):
+        raise RuntimeError(
+            "output torque regulator is enabled but its safety password is missing; "
+            f"export {args.safety_password_env} or set it in .deps/runtime.env"
+        )
     pid, stdout_path, stderr_path = flexiv_runtime.start_background(
         build_command(args),
         cwd=flexiv_runtime.REPO_ROOT,

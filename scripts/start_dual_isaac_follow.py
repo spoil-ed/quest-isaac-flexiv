@@ -59,8 +59,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--target-activation-position-tolerance-m", type=float, default=None)
     parser.add_argument("--target-activation-orientation-tolerance-rad", type=float, default=None)
     parser.add_argument("--command-timeout-ms", type=int, default=None)
-    parser.add_argument("--max-linear-speed-m-s", type=float, default=None)
-    parser.add_argument("--max-angular-speed-rad-s", type=float, default=None)
     parser.add_argument("--gateway-endpoint", default="")
     parser.add_argument("--gateway-fps", type=float, default=None)
     parser.add_argument("--gateway-jpeg-quality", type=int, default=None)
@@ -131,8 +129,6 @@ def build_command(args: argparse.Namespace) -> list[str]:
         ("--target-activation-position-tolerance-m", args.target_activation_position_tolerance_m),
         ("--target-activation-orientation-tolerance-rad", args.target_activation_orientation_tolerance_rad),
         ("--command-timeout-ms", args.command_timeout_ms),
-        ("--max-linear-speed-m-s", args.max_linear_speed_m_s),
-        ("--max-angular-speed-rad-s", args.max_angular_speed_rad_s),
         ("--gateway-fps", args.gateway_fps),
         ("--gateway-jpeg-quality", args.gateway_jpeg_quality),
         ("--state-monitor-udp-host", args.state_monitor_udp_host),

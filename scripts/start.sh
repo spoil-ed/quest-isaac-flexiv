@@ -8,6 +8,16 @@ set -Eeuo pipefail
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Load machine-local runtime secrets without putting them in the repository or
+# command line. Explicitly exported variables still override file defaults.
+RUNTIME_ENV_FILE="${RUNTIME_ENV_FILE:-$REPO_ROOT/.deps/runtime.env}"
+if [[ -f "$RUNTIME_ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$RUNTIME_ENV_FILE"
+  set +a
+fi
+
 usage() {
   cat <<'EOF'
 Usage: ./scripts/start.sh [--task TASK_NAME]
@@ -46,6 +56,8 @@ Optional environment variables:
   STARTUP_TIMEOUT_SEC      Runtime readiness timeout (default: 120)
   FLEXIV_STUDIO_VNC_PORT   Docker Studio VNC port (default: 5902)
   SELF_COLLISION_MONITOR   Optional true/false override of the pipeline setting.
+  RUNTIME_ENV_FILE         Optional local environment file for runtime secrets.
+                           Default: .deps/runtime.env (not committed).
 EOF
 }
 
@@ -403,8 +415,6 @@ else
     --left-rdk-status-udp-port 57682 \
     --right-rdk-status-udp-port 57683 \
     --target-pose-publish-hz 30 \
-    --max-linear-speed-m-s "$FLEXIV_MAX_LINEAR_SPEED_M_S" \
-    --max-angular-speed-rad-s "$FLEXIV_MAX_ANGULAR_SPEED_RAD_S" \
     --gateway-endpoint tcp://127.0.0.1:5791 \
     --gateway-fps 30 \
     --gateway-jpeg-quality 90 \

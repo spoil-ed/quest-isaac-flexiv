@@ -355,13 +355,16 @@ class Stage2RealValidationConfigTests(unittest.TestCase):
         self.assertIn('if args.quest_target_mode == "relative":', relative_branch)
         self.assertNotIn("_current_pose_base_tcp(arm)", relative_branch)
 
-    def test_quest_release_holds_the_last_raw_goal_and_keeps_limiting_toward_it(self):
+    def test_quest_release_holds_current_rdk_tcp_and_delegates_rate_limits(self):
         source = DUAL_APP.read_text(encoding="utf-8")
 
         self.assertIn('arm.target_control_source == "quest"', source)
-        self.assertIn("control_pose_base_tcp = list(arm.quest_goal_pose_base_tcp)", source)
+        self.assertIn("arm.rdk_current_pose_base_tcp", source)
         self.assertIn("_clamp_pose_to_world_workspace(", source)
-        self.assertIn("arm.limiter.limit(\n                workspace_goal", source)
+        self.assertIn("control_pose_base_tcp = list(workspace_goal)", source)
+        self.assertIn('quest_input.get("enabled", False)', source)
+        self.assertNotIn("CartesianTargetLimiter", source)
+        self.assertNotIn("arm.limiter", source)
 
     def test_world_workspace_clamps_rdk_goal_through_identity_calibration(self):
         dual_app = load_dual_app()

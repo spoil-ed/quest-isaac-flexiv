@@ -50,7 +50,6 @@ from follow_ball_with_studio import (  # noqa: E402
     create_xyz_target_frame,
 )
 from targeting import (  # noqa: E402
-    CartesianTargetLimiter,
     QuestRelativeTargetMapper,
     QuestTargetPacket,
     RdkWorldFrameCalibration,
@@ -229,8 +228,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Override scene workspace.enabled; legacy scenes use --quest-workspace-min/max in RDK base xyz.",
     )
-    parser.add_argument("--max-linear-speed-m-s", type=float, default=0.10)
-    parser.add_argument("--max-angular-speed-rad-s", type=float, default=0.75)
     parser.add_argument("--left-target-pose-udp-host", default="127.0.0.1")
     parser.add_argument("--left-target-pose-udp-port", type=int, default=DEFAULT_LEFT_TARGET_POSE_UDP_PORT)
     parser.add_argument("--right-target-pose-udp-host", default="127.0.0.1")
@@ -501,7 +498,6 @@ class ArmRuntime:
     sim_node: Any
     target_pose_publisher: TargetPoseUdpPublisher
     mapper: QuestRelativeTargetMapper
-    limiter: CartesianTargetLimiter
     target_pose_gate: TargetPosePublishGate
     configured_initial_pose: TargetPose
     initial_q: list[float]
@@ -892,13 +888,6 @@ def run(args: argparse.Namespace) -> int:
                 orientation_mode=str(args.quest_relative_orientation_mode),
                 clamp_workspace=bool(workspace.enabled and workspace.frame == "rdk_base"),
             ),
-            limiter=CartesianTargetLimiter(
-                workspace_min=workspace.minimum,
-                workspace_max=workspace.maximum,
-                max_linear_speed_m_s=float(args.max_linear_speed_m_s),
-                max_angular_speed_rad_s=float(args.max_angular_speed_rad_s),
-                clamp_workspace=bool(workspace.enabled and workspace.frame == "rdk_base"),
-            ),
             target_pose_gate=TargetPosePublishGate.from_hz(float(args.target_pose_publish_hz), physics_freq=physics_hz),
             configured_initial_pose=initial_pose,
             initial_q=initial_q,
@@ -1063,7 +1052,6 @@ def run(args: argparse.Namespace) -> int:
         arm.latest_quest_target = None
         arm.latest_target_drives = [0.0] * 7
         arm.mapper.reset()
-        arm.limiter.reset(arm.reset_hold_pose_base_tcp)
         arm.last_connected = False
         arm.effort_control_enabled = False
         arm.articulation_ready = True
@@ -1260,7 +1248,6 @@ def run(args: argparse.Namespace) -> int:
             arm.quest_goal_pose_base_tcp = None
             arm.latest_control_pose_base_tcp = None
             arm.mapper.reset()
-            arm.limiter.reset()
             arm.startup_trajectory_complete = False
             arm.rdk_reference_pose_base_tcp = None
             arm.rdk_reference_world_pose = None
@@ -1338,7 +1325,22 @@ def run(args: argparse.Namespace) -> int:
         for side, closed in quest_target_receiver.take_latest_grippers().items():
             arms[side].pending_gripper_closed = bool(closed)
         for arm in arms.values():
-            if not quest_target_is_fresh(arm.latest_quest_target, max_age_sec=float(args.quest_target_max_age_sec)):
+            quest_input = quest_target_receiver.latest_input(arm.side)
+            input_allows_control = (
+                quest_input is None
+                or bool(
+                    quest_input.get("motion_data_ready", False)
+                    and quest_input.get("enabled", False)
+                    and quest_input.get("calibration_confirmed", False)
+                )
+            )
+            if (
+                not input_allows_control
+                or not quest_target_is_fresh(
+                    arm.latest_quest_target,
+                    max_age_sec=float(args.quest_target_max_age_sec),
+                )
+            ):
                 arm.latest_quest_target = None
                 arm.mapper.reset()
 
@@ -1361,7 +1363,7 @@ def run(args: argparse.Namespace) -> int:
             flush=True,
         )
 
-    def _update_arm_target(arm: ArmRuntime, target_dt: float) -> None:
+    def _update_arm_target(arm: ArmRuntime) -> None:
         """Sample and publish one target pose at the low-rate target clock."""
 
         base_position, base_orientation = arm.robot.get_world_pose()
@@ -1382,15 +1384,6 @@ def run(args: argparse.Namespace) -> int:
                 world_orientation_wxyz=target_orientation,
             )
         control_pose_base_tcp = pose_base_tcp_des
-        if (
-            arm.latest_quest_target is None
-            and arm.target_control_source == "quest"
-            and arm.quest_goal_pose_base_tcp is not None
-        ):
-            # Releasing squeeze stops Quest packets. Keep the last raw Quest
-            # goal instead of falling back to the startup TargetFrame pose.
-            # The limiter below may continue moving toward this fixed goal.
-            control_pose_base_tcp = list(arm.quest_goal_pose_base_tcp)
         current_pose_base_tcp = None
         reset_hold_active = arm.reset_hold_pose_base_tcp is not None and arm.reset_hold_cycles_remaining > 0
         if reset_hold_active:
@@ -1404,7 +1397,6 @@ def run(args: argparse.Namespace) -> int:
                 base_orientation_wxyz=base_orientation,
             )
             arm.mapper.reset()
-            arm.limiter.reset(control_pose_base_tcp)
         elif arm.latest_quest_target is not None:
             if arm.startup_trajectory_complete:
                 # Quest deltas are commands in Flexiv's RDK base frame. The
@@ -1455,29 +1447,26 @@ def run(args: argparse.Namespace) -> int:
 
         quest_goal_active = bool(
             arm.target_control_source == "quest"
+            and arm.latest_quest_target is not None
             and arm.quest_goal_pose_base_tcp is not None
         )
         if quest_goal_active and not reset_hold_active:
-            if arm.limiter.last_pose is None:
-                limiter_seed = (
-                    current_pose_base_tcp
-                    or arm.latest_control_pose_base_tcp
-                    or arm.rdk_current_pose_base_tcp
-                    or arm.rdk_reference_pose_base_tcp
-                )
-                if limiter_seed is not None:
-                    arm.limiter.reset(limiter_seed)
             workspace_goal, arm.workspace_clipped = _clamp_pose_to_world_workspace(
                 arm,
                 arm.quest_goal_pose_base_tcp,
             )
-            control_pose_base_tcp = arm.limiter.limit(
-                workspace_goal,
-                dt=float(target_dt),
-            )
+            # DRDK/runtime is the single velocity and acceleration authority.
+            # Isaac only maps Quest coordinates and clamps the absolute workspace.
+            control_pose_base_tcp = list(workspace_goal)
         elif not reset_hold_active:
             arm.workspace_clipped = False
-            arm.limiter.reset()
+            if arm.target_control_source == "quest":
+                control_pose_base_tcp = list(
+                    arm.rdk_current_pose_base_tcp
+                    or arm.latest_control_pose_base_tcp
+                    or arm.rdk_reference_pose_base_tcp
+                    or control_pose_base_tcp
+                )
 
         arm.latest_control_pose_base_tcp = [float(value) for value in control_pose_base_tcp]
 
@@ -1488,6 +1477,10 @@ def run(args: argparse.Namespace) -> int:
                 and arm.rdk_ready
                 and arm.effort_control_enabled
                 and arm.rdk_reference_pose_base_tcp is not None
+                and (
+                    arm.target_control_source != "quest"
+                    or arm.latest_quest_target is not None
+                )
             )
             publish_pose_base_tcp = control_pose_base_tcp
             if not user_target_active:
@@ -1534,7 +1527,7 @@ def run(args: argparse.Namespace) -> int:
                 )
 
     def _update_quest_target_frames() -> None:
-        """Render raw Quest goals and limited command poses outside the 2 kHz loop."""
+        """Render raw Quest goals and DRDK-bound command poses outside the 2 kHz loop."""
 
         if not args.enable_quest_target_udp:
             return
@@ -1624,7 +1617,6 @@ def run(args: argparse.Namespace) -> int:
                         )
                         if max(isaac_joint_error, rdk_joint_error) <= float(args.startup_joint_tolerance_rad):
                             arm.startup_trajectory_complete = True
-                            arm.limiter.reset(reference_pose)
                             print(
                                 f"[FlexivDualTargetFrame] {side} task initial_q reached "
                                 f"isaac_max_error_rad={isaac_joint_error:.6f} "
@@ -1733,7 +1725,6 @@ def run(args: argparse.Namespace) -> int:
         arm.robot.apply_torques(target_drives)
 
     target_update_gate = arms["left"].target_pose_gate
-    target_update_dt = target_update_gate.period_cycles / physics_hz
 
     def on_physics_step(_dt):
         nonlocal servo_cycle
@@ -1756,8 +1747,8 @@ def run(args: argparse.Namespace) -> int:
             _update_quest_targets()
             _apply_quest_gripper(arms["left"])
             _apply_quest_gripper(arms["right"])
-            _update_arm_target(arms["left"], target_update_dt)
-            _update_arm_target(arms["right"], target_update_dt)
+            _update_arm_target(arms["left"])
+            _update_arm_target(arms["right"])
             _update_rdk_statuses()
         for arm in arms.values():
             _apply_arm_studio_torque(arm)

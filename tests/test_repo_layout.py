@@ -71,6 +71,7 @@ class RepoLayoutTests(unittest.TestCase):
         self.assertIn('--reset-joint-max-vel-rad-s "$FLEXIV_RESET_JOINT_MAX_VEL_RAD_S"', text)
         self.assertIn('--max-linear-speed-m-s "$FLEXIV_MAX_LINEAR_SPEED_M_S"', text)
         self.assertIn("Usage: ./scripts/start.sh [--task TASK_NAME]", text)
+        self.assertIn('RUNTIME_ENV_FILE="${RUNTIME_ENV_FILE:-$REPO_ROOT/.deps/runtime.env}"', text)
         self.assertIn('TASK_NAME="$2"', text)
         self.assertIn('QUEST_PYTHON="$ISAAC_PYTHON"', text)
         self.assertIn("--no-strict-shared-calibration", text)
