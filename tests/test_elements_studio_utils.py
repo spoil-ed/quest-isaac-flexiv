@@ -205,7 +205,7 @@ class ElementsStudioUtilsTests(unittest.TestCase):
                 self.calls = []
 
             def StreamCartesianMotionForce(self, _commands):
-                raise AssertionError("30 Hz target transport must not use the RT stream API")
+                raise AssertionError("90 Hz target transport must not use the RT stream API")
 
             def SendCartesianMotionForce(self, *command):
                 self.calls.append(command)

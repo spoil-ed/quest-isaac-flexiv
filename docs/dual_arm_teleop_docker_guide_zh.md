@@ -176,7 +176,7 @@ python scripts/start_dual_isaac_follow.py \
   --no-manual-play \
   --physics-hz 2000 \
   --render-hz 30 \
-  --target-pose-publish-hz 30 \
+  --target-pose-publish-hz 90 \
   --left-target-pose-udp-port 57680 \
   --right-target-pose-udp-port 57681 \
   --left-rdk-status-udp-port 57682 \

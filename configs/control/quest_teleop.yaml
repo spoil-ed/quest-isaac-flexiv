@@ -20,8 +20,8 @@ scene:
 control:
   physics_hz: 2000
   render_hz: 60
-  rdk_target_hz: 60
-  target_pose_publish_hz: 60
+  rdk_target_hz: 90
+  target_pose_publish_hz: 90
   command_timeout_ms: 10
   rdk_packet_max_age_sec: 0.25
   rdk_log_hz: 2.0

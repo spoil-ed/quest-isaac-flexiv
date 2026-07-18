@@ -14,7 +14,7 @@ TargetFrameRight ── 宿主机 right RDK streamer ── 宿主机右臂 Stud
 - 左臂使用 Docker Elements Studio。
 - 右臂使用宿主机 Elements Studio。
 - Docker 仅隔离左臂 Studio、RobotControlApp、FlexivSimulation 和 GUI；Isaac、RDK streamer、action、gateway、recorder 及 Quest/fake sender 均运行于宿主机。
-- Studio、SimPlugin 与 Isaac 的物理闭环频率为 `2000 Hz`；TargetFrame、Quest、GUI、相机及数据流约为 `30 Hz`。
+- Studio、SimPlugin 与 Isaac 的物理闭环频率为 `2000 Hz`；TargetFrame 与 Quest 目标层约为 `90 Hz`，GUI、相机及数据流约为 `30 Hz`。
 
 ## 1. 双 Studio 运行隔离
 

@@ -377,12 +377,12 @@ class RepoLayoutTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index("--joint-torque-rollback-sec") + 1], "0.05")
         self.assertIn("--target-resampling-control", command)
-        self.assertEqual(command[command.index("--target-resample-rate-hz") + 1], "500.0")
+        self.assertEqual(command[command.index("--target-resample-rate-hz") + 1], "1000.0")
         self.assertEqual(
             command[command.index("--target-prediction-horizon-sec") + 1],
-            "0.012",
+            "0.01",
         )
-        self.assertEqual(command[command.index("--target-velocity-filter-alpha") + 1], "0.65")
+        self.assertEqual(command[command.index("--target-velocity-filter-alpha") + 1], "0.9")
         self.assertEqual(command[command.index("--target-feedforward-scale") + 1], "1.0")
         self.assertEqual(
             command[command.index("--target-max-linear-feedforward-m-s") + 1],

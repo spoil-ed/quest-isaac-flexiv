@@ -43,8 +43,8 @@ control:
   # Match the normal-mode TCP safety limits loaded by both Studios.
   max_linear_speed_m_s: 3.0
   max_angular_speed_rad_s: 12.0
-  max_linear_acc_m_s2: 8.0
-  max_angular_acc_rad_s2: 30.0
+  max_linear_acc_m_s2: 12.0
+  max_angular_acc_rad_s2: 45.0
   # The joint command currently applies one common scalar. 2.0944 rad/s is
   # the slowest J1/J2 dq_max in both generated Rizon4 models.
   initial_joint_max_vel_rad_s: 2.0944
@@ -52,7 +52,7 @@ control:
   reset_joint_max_vel_rad_s: 2.0944
   reset_joint_max_acc_rad_s2: 3.0
   isaac_max_frames: 900
-  target_pose_publish_hz: 30
+  target_pose_publish_hz: 90
   target_axis_length: 0.30
   target_axis_radius: 0.010
   rdk_clear_fault: false
@@ -117,18 +117,18 @@ control:
       rollback_sec: 0.05
     target_resampling:
       enabled: true
-      # Responsive NRT profile. Quest/Isaac remains 30 Hz; DRDK sends bounded
-      # pose/velocity targets at 500 Hz while keeping impact headroom.
-      rate_hz: 500.0
-      prediction_horizon_sec: 0.012
-      velocity_filter_alpha: 0.65
+      # High-response NRT profile. Quest/Isaac runs at 90 Hz; DRDK sends bounded
+      # pose/velocity targets at 1000 Hz while the existing guards retain impact headroom.
+      rate_hz: 1000.0
+      prediction_horizon_sec: 0.010
+      velocity_filter_alpha: 0.90
       feedforward_scale: 1.0
       max_linear_feedforward_m_s: 3.0
       max_angular_feedforward_rad_s: 12.0
       torque_soft_ratio: 0.58
       min_motion_scale: 0.20
-      linear_velocity_deadband_m_s: 0.005
-      angular_velocity_deadband_rad_s: 0.02
+      linear_velocity_deadband_m_s: 0.002
+      angular_velocity_deadband_rad_s: 0.01
 
 convert:
   repo_id: "qiming/isaacsim_flexiv_dual_arm"

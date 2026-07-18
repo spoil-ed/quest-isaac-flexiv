@@ -414,7 +414,7 @@ else
     --right-target-pose-udp-port 57681 \
     --left-rdk-status-udp-port 57682 \
     --right-rdk-status-udp-port 57683 \
-    --target-pose-publish-hz 30 \
+    --target-pose-publish-hz 90 \
     --gateway-endpoint tcp://127.0.0.1:5791 \
     --gateway-fps 30 \
     --gateway-jpeg-quality 90 \
@@ -493,7 +493,7 @@ start_detached_pty \
   --axis-map=-z,-x,y \
   --position-delta-scale 1 \
   --position-deadband 0 \
-  --rate-hz 30 \
+  --rate-hz 90 \
   --log-hz 2
 
 wait_for_tcp_listener "Quest HTTPS/WSS server" 8012 15

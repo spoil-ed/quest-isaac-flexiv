@@ -83,7 +83,7 @@
 | `--clear-fault/--no-clear-fault` | 不清故障 | 默认保留故障现场，不自动清除 Studio/RDK fault。 |
 | `--reconnect-on-error/--no-reconnect-on-error` | 不重连 | 默认故障锁存退出；仅诊断时显式允许重连。 |
 
-该脚本固定使用 `NRT_CARTESIAN_MOTION_FORCE` 和 `SendCartesianMotionForce()`；30 Hz 客户端不使用 RT streaming API，轨迹生成与控制解算由 Flexiv runtime 完成。
+该脚本固定使用 `NRT_CARTESIAN_MOTION_FORCE` 和 `SendCartesianMotionForce()`；90 Hz 客户端不使用 RT streaming API，轨迹生成与控制解算由 Flexiv runtime 完成。
 
 ### `start_drdk_target_streamer.py`
 
@@ -124,19 +124,19 @@
 | `--nullspace-tracking-weight` | pipeline：`0.8` | 两臂参考关节姿态跟踪权重，范围 `[0.1, 1.0]`。 |
 | `--max-linear-speed-m-s` | 当前启动栈：`3.0` | 两套 Studio normal safety 的 TCP 线速度上限。 |
 | `--max-angular-speed-rad-s` | 当前启动栈：`12.0` | 两套 Studio normal safety 的 TCP 角速度上限。 |
-| `--max-linear-acc-m-s2` | 当前启动栈：`8.0` | 最大线加速度。 |
-| `--max-angular-acc-rad-s2` | 当前启动栈：`30.0` | 最大角加速度。 |
-| `--target-resampling-control` | pipeline：启用 | 对 30 Hz Cartesian target 做有界 SE(3) 重采样并发送速度前馈。 |
-| `--target-resample-rate-hz` | pipeline：`500` | NRT pose/velocity 命令循环目标频率；不改变 2000 Hz 物理闭环。 |
-| `--target-prediction-horizon-sec` | pipeline：`0.012` | 最长短时预测窗口；超过后保持 pose 并把速度前馈归零。 |
-| `--target-velocity-filter-alpha` | pipeline：`0.65` | 新速度估计权重，范围 `[0,1]`。 |
+| `--max-linear-acc-m-s2` | 当前启动栈：`12.0` | 最大线加速度。 |
+| `--max-angular-acc-rad-s2` | 当前启动栈：`45.0` | 最大角加速度。 |
+| `--target-resampling-control` | pipeline：启用 | 对 90 Hz Cartesian target 做有界 SE(3) 重采样并发送速度前馈。 |
+| `--target-resample-rate-hz` | pipeline：`1000` | NRT pose/velocity 命令循环目标频率；不改变 2000 Hz 物理闭环。 |
+| `--target-prediction-horizon-sec` | pipeline：`0.010` | 最长短时预测窗口；超过后保持 pose 并把速度前馈归零。 |
+| `--target-velocity-filter-alpha` | pipeline：`0.90` | 新速度估计权重，范围 `[0,1]`。 |
 | `--target-feedforward-scale` | pipeline：`1.0` | 估计速度进入 NRT velocity feed-forward 前的比例。 |
 | `--target-max-linear-feedforward-m-s` | pipeline：`3.0` | 不超过 Studio normal safety 的线速度前馈上限。 |
 | `--target-max-angular-feedforward-rad-s` | pipeline：`12.0` | 不超过 Studio normal safety 的角速度前馈上限。 |
 | `--target-torque-soft-ratio` | pipeline：`0.58` | 峰值关节力矩风险比达到该值后开始连续降低预测、前馈和 NRT 速度/加速度。 |
 | `--target-min-motion-scale` | pipeline：`0.20` | 到达关节力矩冻结阈值前允许的最小运动倍率。 |
-| `--target-linear-velocity-deadband-m-s` | `0.005` | 低于该值的线速度估计归零。 |
-| `--target-angular-velocity-deadband-rad-s` | `0.02` | 低于该值的角速度估计归零。 |
+| `--target-linear-velocity-deadband-m-s` | `0.002` | 低于该值的线速度估计归零。 |
+| `--target-angular-velocity-deadband-rad-s` | `0.01` | 低于该值的角速度估计归零。 |
 | `--network-interface-whitelist` | 空 | DRDK 发现允许使用的本机 IPv4，逗号分隔。 |
 | `--connect-timeout-sec` | `30` | 仅启动阶段等待 SimPlugin 使两套 runtime 可发现；连接成功后不用于故障重连。 |
 | `--initial-joint-timeout-sec` | `45` | NRT joint-position 初始化总超时。 |
@@ -255,7 +255,7 @@ Stage2 双臂 Isaac 启动入口，参数语义与单臂入口一致，差异如
 | `--quest-target-udp-port` | `57679` | 一个 Quest/fake UDP endpoint，通过 packet `side` 字段分流左右臂。 |
 | `--gateway-endpoint` | 空 | 非空时发布 Stage2 dual gateway sample。 |
 
-双臂入口固定采用多速率执行：`--physics-hz 2000` 是 Studio/SimPlugin 状态—力矩闭环，`--render-hz 30` 和 `--target-pose-publish-hz 30` 是 GUI/目标更新。每侧 scene 用 `bootstrap_q` 对齐 Studio home，用 `initial_q` 定义任务初始关节姿态。DRDK 的 `joint_initializing` 阶段允许 Studio 力矩闭环驱动 NRT 关节轨迹，但禁止 Quest/Frame 接管；切换 Cartesian 并锁存 initq TCP 后才进入任务 `ready`。
+双臂入口固定采用多速率执行：`--physics-hz 2000` 是 Studio/SimPlugin 状态—力矩闭环，`--render-hz 30` 是 GUI 更新，`--target-pose-publish-hz 90` 是目标更新。每侧 scene 用 `bootstrap_q` 对齐 Studio home，用 `initial_q` 定义任务初始关节姿态。DRDK 的 `joint_initializing` 阶段允许 Studio 力矩闭环驱动 NRT 关节轨迹，但禁止 Quest/Frame 接管；切换 Cartesian 并锁存 initq TCP 后才进入任务 `ready`。
 
 ## Quest publisher
 

@@ -5,7 +5,7 @@
 当前双臂拓扑：
 
 ```text
-Quest ──30 Hz──> Isaac TargetFrame ──30 Hz──> DRDK RobotPair
+Quest ──90 Hz──> Isaac TargetFrame ──90 Hz──> DRDK RobotPair
                                                    │
                            ┌───────────────────────┴───────────────────────┐
                            │                                               │
@@ -205,15 +205,15 @@ configs/scenes/<task>.yaml
 | 场景资产初始状态 | scene 的 `scene_objects` | reset 时恢复位置、姿态和关节状态 |
 | Quest/TargetFrame 线速度 | pipeline 的 `control.max_linear_speed_m_s` | Studio normal safety 上限 `3.0 m/s` |
 | 角速度 | pipeline 的 `control.max_angular_speed_rad_s` | Studio normal safety 上限 `12.0 rad/s` |
-| 线/角加速度 | pipeline 的 `control.max_*_acc_*` | `8.0 m/s²` / `30 rad/s²` |
-| 目标重采样 | pipeline 的 `control.drdk.target_resampling` | 30 Hz 输入、500 Hz NRT 输出、12 ms 预测、全量有界前馈 |
+| 线/角加速度 | pipeline 的 `control.max_*_acc_*` | `12.0 m/s²` / `45 rad/s²` |
+| 目标重采样 | pipeline 的 `control.drdk.target_resampling` | 90 Hz 输入、1000 Hz NRT 输出、10 ms 预测、全量有界前馈 |
 | 初始化关节速度/加速度 | pipeline 的 `control.initial_joint_*` | 统一速度 `2.0944 rad/s` / `2.0 rad/s²` |
 | reset 关节速度/加速度 | pipeline 的 `control.reset_joint_*` | 统一速度 `2.0944 rad/s` / `3.0 rad/s²` |
 | reset 重试 | `--reset-max-attempts` / `--reset-retry-delay-sec` | `3` 次 / `0.5 s` |
 | Isaac 关节力矩上限 | pipeline 的 `control.joint_effort_limits_nm` | 匹配 Studio 已有配置：`150,150,80,80,49,49,49 Nm` |
 | TCP 接触 wrench | pipeline 的 `control.drdk.contact_wrench` | 每侧 `20 N / 3 Nm`，独立于关节硬上限 |
 | 物理/渲染频率 | `--physics-hz` / `--render-hz` | `2000 Hz` / `30 Hz` |
-| 目标/采集频率 | `--target-pose-publish-hz` / `FPS` | `30 Hz` / `30 FPS` |
+| 目标/采集频率 | `--target-pose-publish-hz` / `FPS` | `90 Hz` / `30 FPS` |
 
 DRDK 参数由 `scripts/start_drdk_target_streamer.py` 传给 streamer；Isaac 参数由 `scripts/start_dual_isaac_follow.py` 传入。修改启动参数后必须重新执行 `scripts/start.sh`。
 
