@@ -383,7 +383,7 @@ start_detached \
   --bridge-endpoint tcp://127.0.0.1:5791 \
   --fps 30 \
   --image-size 640x480 \
-  --camera-keys color_0
+  --camera-keys color_0,color_1,color_2
 
 ISAAC_DUAL_PID="$(first_matching_pid 'dual_follow_with_studio\.py([[:space:]]|$)')"
 if [[ -n "$ISAAC_DUAL_PID" ]]; then

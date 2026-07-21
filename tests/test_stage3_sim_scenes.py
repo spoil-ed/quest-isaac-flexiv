@@ -48,11 +48,14 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
             with self.subTest(task_name=task_name):
                 data = load_scene_config(scene_path)
                 self.assertEqual(scene_task_metadata(data)["name"], task_name)
-                self.assertEqual([camera["name"] for camera in data["cameras"]], ["cam_front"])
+                self.assertEqual(data["scene_objects_activation"], {"mode": "after_initial_q"})
+                self.assertEqual([camera["name"] for camera in data["cameras"]], ["cam_front", "cam_left_wrist", "cam_right_wrist"])
                 camera = data["cameras"][0]
                 self.assertEqual(camera["position"]["y"], 0.0)
                 self.assertGreater(camera["position"]["z"], 2.0)
                 self.assertEqual(camera["up"], {"x": 1.0, "y": 0.0, "z": 0.0})
+                self.assertEqual(data["cameras"][1]["parent_prim_path"], "/World/Flexiv/LeftRizon4/flange")
+                self.assertEqual(data["cameras"][2]["parent_prim_path"], "/World/Flexiv/RightRizon4/flange")
                 self.assertEqual(len(data["robots"]), 2)
                 for robot in data["robots"]:
                     self.assertEqual(robot["bootstrap_q"], STUDIO_HOME_Q)
@@ -120,7 +123,7 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
                 specs = parse_scene_objects(data, config_path=scene_path, validate_assets=True)
                 self.assertEqual({spec.name for spec in specs}, expected_objects[task_name])
                 table = next(spec for spec in specs if spec.name == "work_table_top")
-                self.assertAlmostEqual(table.position[2] + table.size[2] / 2.0, 0.16)
+                self.assertAlmostEqual(table.position[2] + table.size[2] / 2.0, 0.5)
                 self.assertGreaterEqual(table.size[1] / table.size[0], 2.5)
                 self.assertIsNotNone(table.physics_material)
                 self.assertEqual(table.physics_material.restitution, 0.0)
@@ -140,6 +143,12 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
         self.assertIn("CreateVelocityAttr", source)
         self.assertIn("CreateAngularVelocityAttr", source)
         self.assertIn("_reset_joint_positions_and_velocities(stage, spec)", source)
+        app_source = (
+            ROOT
+            / "standalone_examples/api/isaacsim.robot.manipulators/flexiv_quest/dual_follow_with_studio.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("def set_deferred_scene_assets_active(", app_source)
+        self.assertIn("deferred scene assets enabled after", app_source)
 
     def test_missing_usd_asset_fails_clearly(self):
         with tempfile.TemporaryDirectory(prefix="stage3_missing_asset_") as tmp:
@@ -189,12 +198,12 @@ class Stage3SimSceneConfigTests(unittest.TestCase):
         self.assertEqual(args.physics_hz, 2000.0)
         self.assertEqual(args.render_hz, 30.0)
         self.assertFalse(args.gpu_dynamics)
-        self.assertEqual(args.target_pose_publish_hz, 30.0)
+        self.assertEqual(args.target_pose_publish_hz, 90.0)
         self.assertEqual(args.isaac_max_frames, 900)
         self.assertEqual(args.scene_task_metadata["name"], "pick_place_redblock_flexiv_dual")
         self.assertIn("red_block", {item["name"] for item in args.scene_object_summary})
-        self.assertEqual(args.scene_camera_names, ["cam_front"])
-        self.assertEqual(args.scene_camera_keys, ["color_0"])
+        self.assertEqual(args.scene_camera_names, ["cam_front", "cam_left_wrist", "cam_right_wrist"])
+        self.assertEqual(args.scene_camera_keys, ["color_0", "color_1", "color_2"])
         self.assertEqual(args.left_rdk_status_udp_port, 57682)
         self.assertEqual(args.right_rdk_status_udp_port, 57683)
         self.assertFalse(args.rdk_clear_fault)

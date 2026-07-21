@@ -261,6 +261,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--reset-settle-sec", type=float, default=2.0)
     parser.add_argument("--reset-timeout-sec", type=float, default=90.0)
     parser.add_argument("--startup-joint-tolerance-rad", type=float, default=0.03)
+    parser.add_argument(
+        "--startup-visual-init-q",
+        action="store_true",
+        help="Debug-only: move Isaac articulations to scene initial_q without DRDK before enabling deferred assets.",
+    )
+    parser.add_argument("--startup-visual-init-q-duration-sec", type=float, default=5.0)
     args = parser.parse_args(argv)
     args.scene_data = {}
     apply_scene_config(args)
@@ -532,6 +538,19 @@ class ArmRuntime:
     applied_gripper_closed: bool | None = None
 
 
+def _defer_scene_objects_until_initial_q(scene_data: dict[str, Any] | list[Any]) -> bool:
+    if not isinstance(scene_data, dict):
+        return False
+    activation = scene_data.get("scene_objects_activation") or {}
+    if isinstance(activation, str):
+        mode = activation
+    elif isinstance(activation, dict):
+        mode = str(activation.get("mode", ""))
+    else:
+        mode = ""
+    return mode.strip().lower() in {"after_initial_q", "after_task_ready"}
+
+
 def _scene_robot_config(args: argparse.Namespace, side: str) -> dict[str, Any]:
     return _robot_by_side(args.scene_data, side) if isinstance(args.scene_data, dict) else {}
 
@@ -705,6 +724,17 @@ def _padded(values, length: int) -> list[float]:
     return result
 
 
+def _camera_prim_path(camera_cfg: dict[str, Any], name: str) -> tuple[str, str | None]:
+    parent_path = camera_cfg.get("parent_prim_path")
+    parent = str(parent_path).rstrip("/") if parent_path is not None else None
+    prim_path = camera_cfg.get("prim_path")
+    if prim_path is not None:
+        return str(prim_path), parent
+    if parent:
+        return f"{parent}/{name}", parent
+    return f"/World/{name}", None
+
+
 def run(args: argparse.Namespace) -> int:
     if args.examples_ext is None:
         raise RuntimeError("Flexiv examples extension is not configured; pass --scene-config, --examples-ext, or set FLEXIV_EXAMPLES_EXT")
@@ -774,6 +804,7 @@ def run(args: argparse.Namespace) -> int:
     _add_default_lighting()
     scene_object_summary: list[dict[str, Any]] = []
     stage3_task = scene_task_metadata(args.scene_data) if isinstance(args.scene_data, dict) else {}
+    defer_scene_objects_until_initial_q = _defer_scene_objects_until_initial_q(args.scene_data)
     if isinstance(args.scene_data, dict) and args.scene_data.get("scene_objects"):
         try:
             from flexiv_sim_scenes.isaac import build_scene_objects
@@ -792,22 +823,7 @@ def run(args: argparse.Namespace) -> int:
             raise RuntimeError(f"Failed to load Stage3 scene objects from {args.scene_config}: {exc}") from exc
 
     stage2_cameras = []
-    if args.gateway_endpoint or args.capture_initial_frame is not None:
-        for idx, camera_cfg in enumerate(_load_camera_config(args.scene_config)):
-            name = str(camera_cfg.get("name", f"cam_{idx}"))
-            pos, ori = camera_pose_from_config(camera_cfg)
-            camera = Camera(
-                prim_path="/World/" + name,
-                frequency=float(camera_cfg.get("fps", args.gateway_fps)),
-                resolution=tuple(camera_cfg.get("resolution", [640, 480])),
-                position=pos,
-                orientation=ori,
-            )
-            camera.set_focal_length(float(camera_cfg.get("focal_length", 2.5)))
-            camera.set_world_pose(position=pos, orientation=ori, camera_axes="usd")
-            stage2_cameras.append(camera)
-        mode = "gateway/capture" if args.gateway_endpoint else "capture"
-        print(f"[FlexivDualTargetFrame] Stage2 {mode} cameras enabled: {len(stage2_cameras)}", flush=True)
+    stage2_camera_capture_enabled = bool(args.gateway_endpoint or args.capture_initial_frame is not None)
 
     usd = str(Path(args.usd).expanduser().resolve())
     serials = {"left": args.left_serial_number, "right": args.right_serial_number}
@@ -904,6 +920,53 @@ def run(args: argparse.Namespace) -> int:
             flush=True,
         )
 
+    if args.scene_config is not None or stage2_camera_capture_enabled:
+        try:
+            camera_configs = _load_camera_config(args.scene_config)
+        except ValueError:
+            if stage2_camera_capture_enabled:
+                raise
+            camera_configs = []
+        for idx, camera_cfg in enumerate(camera_configs):
+            name = str(camera_cfg.get("name", f"cam_{idx}"))
+            pos, ori = camera_pose_from_config(camera_cfg)
+            prim_path, parent_path = _camera_prim_path(camera_cfg, name)
+            if parent_path is not None and not get_current_stage().GetPrimAtPath(parent_path).IsValid():
+                raise RuntimeError(f"Camera {name} parent prim does not exist: {parent_path}")
+            camera = Camera(
+                prim_path=prim_path,
+                name=name,
+                frequency=float(camera_cfg.get("fps", args.gateway_fps)),
+                resolution=tuple(camera_cfg.get("resolution", [640, 480])),
+            )
+            camera.set_focal_length(float(camera_cfg.get("focal_length", 2.5)))
+            if parent_path is not None:
+                camera.set_local_pose(
+                    translation=np.asarray(pos, dtype=float),
+                    orientation=np.asarray(ori, dtype=float),
+                    camera_axes="usd",
+                )
+            else:
+                camera.set_world_pose(
+                    position=np.asarray(pos, dtype=float),
+                    orientation=np.asarray(ori, dtype=float),
+                    camera_axes="usd",
+                )
+            stage2_cameras.append(camera)
+        if stage2_cameras:
+            if args.gateway_endpoint:
+                mode = "gateway/capture"
+            elif args.capture_initial_frame is not None:
+                mode = "capture"
+            else:
+                mode = "scene"
+            camera_paths = [camera.prim_path for camera in stage2_cameras]
+            print(
+                f"[FlexivDualTargetFrame] Stage2 {mode} cameras configured: "
+                f"{len(stage2_cameras)} {camera_paths}",
+                flush=True,
+            )
+
     quest_target_receiver = (
         DualQuestTargetUdpReceiver(
             args.quest_target_udp_host,
@@ -969,6 +1032,13 @@ def run(args: argparse.Namespace) -> int:
     reset_signal_after_time = 0.0
     control_loop_enabled = False
     dual_task_ready_announced = False
+    scene_assets_active = True
+    scene_asset_visibility_states: dict[str, Any] = {}
+    scene_asset_collision_states: dict[str, bool] = {}
+    scene_asset_kinematic_states: dict[str, bool] = {}
+    visual_init_start_cycle: int | None = None
+    visual_init_start_q: dict[str, Any] = {}
+    visual_init_complete = False
 
     def _current_pose_base_tcp(arm: ArmRuntime) -> list[float]:
         base_position, base_orientation = arm.robot.get_world_pose()
@@ -1068,12 +1138,104 @@ def run(args: argparse.Namespace) -> int:
         arm.startup_trajectory_complete = False
         arm.quest_goal_pose_base_tcp = None
 
+    def set_deferred_scene_assets_active(active: bool, *, reason: str) -> None:
+        nonlocal scene_assets_active
+        if not defer_scene_objects_until_initial_q or not scene_object_summary:
+            scene_assets_active = True
+            return
+        if scene_assets_active == active:
+            return
+
+        from pxr import Usd, UsdGeom, UsdPhysics
+
+        for item in scene_object_summary:
+            root_path = str(item.get("prim_path") or "")
+            root = world.stage.GetPrimAtPath(root_path)
+            if not root.IsValid():
+                raise RuntimeError(f"deferred scene asset prim is missing: {root_path}")
+
+            imageable = UsdGeom.Imageable(root)
+            visibility_attr = imageable.GetVisibilityAttr()
+            if active:
+                previous_visibility = scene_asset_visibility_states.get(root_path, UsdGeom.Tokens.inherited)
+                imageable.CreateVisibilityAttr().Set(previous_visibility)
+            else:
+                if visibility_attr and visibility_attr.IsValid():
+                    previous_visibility = visibility_attr.Get()
+                else:
+                    previous_visibility = UsdGeom.Tokens.inherited
+                scene_asset_visibility_states.setdefault(root_path, previous_visibility)
+                imageable.CreateVisibilityAttr().Set(UsdGeom.Tokens.invisible)
+
+            for prim in Usd.PrimRange(root):
+                prim_path = str(prim.GetPath())
+                if prim.HasAPI(UsdPhysics.CollisionAPI):
+                    collision_api = UsdPhysics.CollisionAPI(prim)
+                    collision_attr = collision_api.GetCollisionEnabledAttr()
+                    if active:
+                        if prim_path in scene_asset_collision_states:
+                            enabled = bool(scene_asset_collision_states[prim_path])
+                            if not collision_attr or not collision_attr.IsValid():
+                                collision_attr = collision_api.CreateCollisionEnabledAttr(enabled)
+                            collision_attr.Set(enabled)
+                    else:
+                        if collision_attr and collision_attr.IsValid():
+                            previous_enabled = collision_attr.Get()
+                        else:
+                            previous_enabled = True
+                            collision_attr = collision_api.CreateCollisionEnabledAttr(True)
+                        scene_asset_collision_states.setdefault(
+                            prim_path, True if previous_enabled is None else bool(previous_enabled)
+                        )
+                        collision_attr.Set(False)
+
+                if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                    rigid_api = UsdPhysics.RigidBodyAPI(prim)
+                    kinematic_attr = rigid_api.GetKinematicEnabledAttr()
+                    if active:
+                        if prim_path in scene_asset_kinematic_states:
+                            enabled = bool(scene_asset_kinematic_states[prim_path])
+                            if not kinematic_attr or not kinematic_attr.IsValid():
+                                kinematic_attr = rigid_api.CreateKinematicEnabledAttr(enabled)
+                            kinematic_attr.Set(enabled)
+                    else:
+                        if kinematic_attr and kinematic_attr.IsValid():
+                            previous_kinematic = kinematic_attr.Get()
+                        else:
+                            previous_kinematic = False
+                            kinematic_attr = rigid_api.CreateKinematicEnabledAttr(False)
+                        scene_asset_kinematic_states.setdefault(
+                            prim_path, False if previous_kinematic is None else bool(previous_kinematic)
+                        )
+                        kinematic_attr.Set(True)
+
+        if active:
+            restored_collisions = len(scene_asset_collision_states)
+            restored_rigid_bodies = len(scene_asset_kinematic_states)
+            scene_asset_visibility_states.clear()
+            scene_asset_collision_states.clear()
+            scene_asset_kinematic_states.clear()
+            print(
+                "[FlexivDualTargetFrame] deferred scene assets enabled after "
+                f"{reason}; restored {restored_collisions} collision prims and "
+                f"{restored_rigid_bodies} rigid bodies",
+                flush=True,
+            )
+        else:
+            print(
+                "[FlexivDualTargetFrame] deferred scene assets disabled during "
+                f"{reason}; hidden {len(scene_object_summary)} configured assets",
+                flush=True,
+            )
+        scene_assets_active = active
+
     def initialize_like_startup(reason: str, *, reset_world: bool) -> None:
         nonlocal control_loop_enabled, dual_task_ready_announced
         # world.reset() can invoke physics callbacks before articulation views
         # and configured joint positions are ready. Never expose those
         # transient states to an already-operational Studio controller.
         control_loop_enabled = False
+        set_deferred_scene_assets_active(False, reason=reason)
         for idx, side in enumerate(("left", "right")):
             _reset_arm_to_start_pose(arms[side], reset_world=reset_world and idx == 0)
         if quest_target_receiver is not None:
@@ -1233,10 +1395,11 @@ def run(args: argparse.Namespace) -> int:
         reset_reason = str(control.get("reason", "unspecified"))
         dual_task_ready_announced = False
         try:
+            set_deferred_scene_assets_active(False, reason=f"reset seq={last_reset_seq}")
             set_reset_scene_collisions_suppressed(True)
         except Exception as exc:
             reset_state = "failed"
-            reset_error = f"failed to suppress scene collisions for reset: {exc}"
+            reset_error = f"failed to suppress scene assets for reset: {exc}"
             print(f"[FlexivDualTargetFrame] {reset_error}", flush=True)
             return
         if quest_target_receiver is not None:
@@ -1548,8 +1711,121 @@ def run(args: argparse.Namespace) -> int:
                     orientation=np.array(world_orientation),
                 )
 
+    def _task_ready() -> bool:
+        return all(
+            arm.startup_trajectory_complete
+            and arm.rdk_ready
+            and arm.rdk_phase == "ready"
+            and arm.effort_control_enabled
+            for arm in arms.values()
+        )
+
+    def _handle_task_ready(reason: str) -> bool:
+        nonlocal dual_task_ready_announced, reset_state, reset_error
+        task_ready = _task_ready()
+        if (
+            task_ready
+            and defer_scene_objects_until_initial_q
+            and not scene_assets_active
+            and reset_state in {"idle", "succeeded"}
+        ):
+            try:
+                reset_configured_scene_assets()
+                set_deferred_scene_assets_active(True, reason=reason)
+            except Exception as exc:
+                reset_state = "failed"
+                reset_error = f"failed to enable deferred scene assets after {reason}: {exc}"
+                print(f"[FlexivDualTargetFrame] {reset_error}", flush=True)
+
+        if task_ready and not dual_task_ready_announced and scene_assets_active:
+            dual_task_ready_announced = True
+            print(
+                "[FlexivDualTargetFrame] READY: both task initial poses reached; user control enabled",
+                flush=True,
+            )
+        return task_ready
+
+    def _run_startup_visual_init_q() -> bool:
+        nonlocal visual_init_start_cycle, visual_init_complete
+        if not args.startup_visual_init_q or visual_init_complete:
+            return False
+        if visual_init_start_cycle is None:
+            visual_init_start_cycle = int(servo_cycle)
+            visual_init_start_q.clear()
+            for arm in arms.values():
+                visual_init_start_q[arm.side] = np.asarray(arm.robot.q[:7], dtype=float)
+                arm.robot.switch_control_mode("position")
+                arm.effort_control_enabled = True
+                arm.rdk_phase = "visual_init_q"
+            print(
+                "[FlexivDualTargetFrame] visual startup validation: moving Isaac arms from "
+                "bootstrap_q to scene initial_q without DRDK",
+                flush=True,
+            )
+
+        duration_cycles = max(
+            1,
+            int(max(0.001, float(args.startup_visual_init_q_duration_sec)) * physics_hz),
+        )
+        alpha = min(1.0, max(0.0, (servo_cycle - visual_init_start_cycle) / float(duration_cycles)))
+        blend = alpha * alpha * (3.0 - 2.0 * alpha)
+        for arm in arms.values():
+            start_q = np.asarray(visual_init_start_q[arm.side], dtype=float)
+            target_q = np.asarray(arm.initial_q, dtype=float)
+            delta_q = np.asarray(
+                [
+                    math.atan2(math.sin(float(target - start)), math.cos(float(target - start)))
+                    for start, target in zip(start_q, target_q)
+                ],
+                dtype=float,
+            )
+            q = target_q if alpha >= 1.0 else start_q + blend * delta_q
+            _hold_arm_position(arm, q, switch_mode=False)
+
+        if alpha < 1.0:
+            return True
+
+        for arm in arms.values():
+            _hold_arm_position(arm, arm.initial_q, switch_mode=False)
+            pose_base_tcp = _current_pose_base_tcp(arm)
+            arm.rdk_reference_pose_base_tcp = list(pose_base_tcp)
+            arm.rdk_current_pose_base_tcp = list(pose_base_tcp)
+            arm.rdk_current_q = list(arm.initial_q)
+            arm.rdk_ready = True
+            arm.rdk_phase = "ready"
+            arm.effort_control_enabled = True
+            arm.startup_trajectory_complete = True
+            sync_target_to_base_tcp_pose(
+                arm.target_frame,
+                pose_base_tcp_des=pose_base_tcp,
+                base_position=arm.base_position,
+                base_orientation_wxyz=arm.base_orientation,
+            )
+            sync_target_to_base_tcp_pose(
+                arm.command_frame,
+                pose_base_tcp_des=pose_base_tcp,
+                base_position=arm.base_position,
+                base_orientation_wxyz=arm.base_orientation,
+            )
+            idle_position, idle_orientation = arm.target_frame.get_world_pose()
+            arm.idle_target_world_pose = [
+                *[float(value) for value in idle_position],
+                *[float(value) for value in idle_orientation],
+            ]
+            print(
+                f"[FlexivDualTargetFrame] {arm.side} visual task initial_q reached "
+                f"isaac_max_error_rad={_max_wrapped_joint_error(arm.robot.q, arm.initial_q):.6f}",
+                flush=True,
+            )
+        visual_init_complete = True
+        _handle_task_ready("visual startup initial_q")
+        return True
+
     def _update_rdk_statuses() -> None:
         nonlocal dual_task_ready_announced, reset_state, reset_error, reset_assets_restore_time
+        if args.startup_visual_init_q:
+            _handle_task_ready("visual startup initial_q")
+            return
         readiness = rdk_status_receiver.poll()
         for side, ready in readiness.items():
             arm = arms[side]
@@ -1631,19 +1907,7 @@ def run(args: argparse.Namespace) -> int:
                     flush=True,
                 )
             arm.rdk_ready = bool(ready)
-        task_ready = all(
-            arm.startup_trajectory_complete
-            and arm.rdk_ready
-            and arm.rdk_phase == "ready"
-            and arm.effort_control_enabled
-            for arm in arms.values()
-        )
-        if task_ready and not dual_task_ready_announced:
-            dual_task_ready_announced = True
-            print(
-                "[FlexivDualTargetFrame] READY: both task initial poses reached; user control enabled",
-                flush=True,
-            )
+        task_ready = _handle_task_ready("startup initial_q")
         if reset_state == "moving":
             reset_acknowledged = all(arm.rdk_reset_seq >= last_reset_seq for arm in arms.values())
             if task_ready and reset_acknowledged:
@@ -1673,6 +1937,7 @@ def run(args: argparse.Namespace) -> int:
             if time.monotonic() - reset_assets_restore_time >= asset_settle_sec:
                 try:
                     set_reset_scene_collisions_suppressed(False)
+                    set_deferred_scene_assets_active(True, reason=f"reset seq={last_reset_seq} initial_q")
                 except Exception as exc:
                     reset_state = "failed"
                     reset_error = f"failed to restore scene physics after asset reset: {exc}"
@@ -1743,15 +2008,18 @@ def run(args: argparse.Namespace) -> int:
             arm.sim_node.SendRobotStates(
                 flexivsimplugin.SimRobotStates(servo_cycle, arm.robot.q, arm.robot.dq)
             )
+        _run_startup_visual_init_q()
         if target_update_gate.should_publish(servo_cycle):
-            _update_quest_targets()
-            _apply_quest_gripper(arms["left"])
-            _apply_quest_gripper(arms["right"])
-            _update_arm_target(arms["left"])
-            _update_arm_target(arms["right"])
+            if not args.startup_visual_init_q:
+                _update_quest_targets()
+                _apply_quest_gripper(arms["left"])
+                _apply_quest_gripper(arms["right"])
+                _update_arm_target(arms["left"])
+                _update_arm_target(arms["right"])
             _update_rdk_statuses()
-        for arm in arms.values():
-            _apply_arm_studio_torque(arm)
+        if not args.startup_visual_init_q:
+            for arm in arms.values():
+                _apply_arm_studio_torque(arm)
 
     def publish_gateway_sample() -> None:
         nonlocal gateway_client, gateway_last_connect_attempt, gateway_last_publish, pending_reset_control
@@ -2169,10 +2437,12 @@ def run(args: argparse.Namespace) -> int:
         )
         return True
 
+    set_deferred_scene_assets_active(False, reason="startup")
     world.add_physics_callback("dual_target_frame_step", callback_fn=on_physics_step)
     world.reset()
-    for camera in stage2_cameras:
-        camera.initialize()
+    if stage2_camera_capture_enabled:
+        for camera in stage2_cameras:
+            camera.initialize()
     initialize_like_startup("startup", reset_world=False)
     _select_target(arms["left"].target_prim_path)
     if not args.manual_play:

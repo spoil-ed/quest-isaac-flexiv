@@ -10,7 +10,7 @@ gateway:
   bridge_endpoint: "tcp://127.0.0.1:5791"
   fps: 30
   jpeg_quality: 90
-  camera_keys: ["color_0"]
+  camera_keys: ["color_0", "color_1", "color_2"]
 
 quest_target: {host: "127.0.0.1", port: 57679}
 target_pose:

@@ -6,6 +6,11 @@ task:
   description: "Wall-mounted dual Flexiv arms over a tabletop with one red block"
   fake_trajectory_profile: "pick_place_redblock_dual"
 
+# Keep high tabletop assets out of the robot home/bootstrap pose.
+# They become visible and physical only after both arms reach task initial_q.
+scene_objects_activation:
+  mode: "after_initial_q"
+
 robots:
   - side: "left"
     serial_number: "Rizon4-VIHhZM"
@@ -13,8 +18,8 @@ robots:
     prim_path: "/World/Flexiv/LeftRizon4"
     name: "LeftRizon4"
     end_effector_prim_name: "flange"
-    usd: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
-    examples_ext: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+    usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+    examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
     position: {x: -0.06, y: 0.20, z: 1.08}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
     # Axis-aligned TCP workspace in Isaac world coordinates, meters.
@@ -43,8 +48,8 @@ robots:
     prim_path: "/World/Flexiv/RightRizon4"
     name: "RightRizon4"
     end_effector_prim_name: "flange"
-    usd: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
-    examples_ext: "../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
+    usd: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples/data/flexiv/Rizon4_with_Grav.usd"
+    examples_ext: "../../../../isaac_sim_ws/exts/isaacsim.robot.manipulators.examples"
     position: {x: -0.06, y: -0.20, z: 1.08}
     orientation: {w: 0.70710678, x: 0.0, y: 0.70710678, z: 0.0}
     # Axis-aligned TCP workspace in Isaac world coordinates, meters.
@@ -74,13 +79,27 @@ cameras:
     position: {x: -0.15, y: 0.0, z: 2.75}
     look_at: {x: 0.50, y: 0.0, z: 0.45}
     up: {x: 1.0, y: 0.0, z: 0.0}
+  - name: "cam_left_wrist"
+    parent_prim_path: "/World/Flexiv/LeftRizon4/flange"
+    resolution: [640, 480]
+    fps: 30
+    focal_length: 2.0
+    position: {x: 0.0, y: 0.04, z: 0.08}
+    orientation: {w: 0.0, x: 0.0, y: 1.0, z: 0.0}
+  - name: "cam_right_wrist"
+    parent_prim_path: "/World/Flexiv/RightRizon4/flange"
+    resolution: [640, 480]
+    fps: 30
+    focal_length: 2.0
+    position: {x: 0.0, y: -0.04, z: 0.08}
+    orientation: {w: 0.0, x: 0.0, y: 1.0, z: 0.0}
 
 scene_objects:
   - name: "work_table_top"
     type: "cuboid"
     prim_path: "/World/Stage3/WorkTableTop"
-    # Long table lowered to keep the bootstrap-to-initq trajectory collision-free.
-    position: {x: 0.50, y: 0.0, z: 0.13}
+    # Table top is raised to 0.5 m for visual scene inspection.
+    position: {x: 0.50, y: 0.0, z: 0.47}
     size: [0.74, 1.90, 0.06]
     color: [0.18, 0.18, 0.17]
     collision: true
@@ -93,7 +112,7 @@ scene_objects:
   - name: "red_block"
     type: "cuboid"
     prim_path: "/World/Stage3/RedBlock"
-    position: {x: 0.48, y: 0.12, z: 0.205}
+    position: {x: 0.48, y: 0.12, z: 0.53}
     size: [0.06, 0.06, 0.06]
     color: [1.0, 0.0, 0.0]
     mass: 1.0
@@ -102,7 +121,7 @@ scene_objects:
   - name: "place_pad"
     type: "cuboid"
     prim_path: "/World/Stage3/PlacePad"
-    position: {x: 0.62, y: -0.32, z: 0.175}
+    position: {x: 0.62, y: -0.32, z: 0.51}
     size: [0.18, 0.18, 0.02]
     color: [0.08, 0.22, 0.75]
     collision: false
